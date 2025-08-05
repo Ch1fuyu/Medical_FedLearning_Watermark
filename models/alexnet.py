@@ -1,10 +1,9 @@
 import torch.nn as nn
-
+import torch
 from models.layers.conv2d import ConvBlock
 
 class AlexNet(nn.Module):
-
-    def __init__(self, in_channels, num_classes):
+    def __init__(self, in_channels, num_classes, input_size=28):
         super().__init__()
         max_pool_idx = [1, 3, 7]
         layers = []
@@ -33,7 +32,12 @@ class AlexNet(nn.Module):
                 inp = oups[layer_idx]
 
         self.features = nn.Sequential(*layers)
-        self.classifier = nn.Linear(4 * 4 * 256, num_classes)
+        # 动态推断flatten后的特征数
+        with torch.no_grad():
+            dummy = torch.zeros(1, in_channels, input_size, input_size)
+            feat = self.features(dummy)
+            flatten_dim = feat.view(1, -1).shape[1]
+        self.classifier = nn.Linear(flatten_dim, num_classes)
 
     def forward(self, x):
         for m in self.features:

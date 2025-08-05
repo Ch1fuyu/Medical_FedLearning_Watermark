@@ -1,8 +1,16 @@
 import os
-
+import numpy as np
 import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import Dataset
+
+# 官方推荐方式导入DermaMNIST
+try:
+    from medmnist import INFO, DermaMNIST
+    MEDMNIST_AVAILABLE = True
+except ImportError:
+    MEDMNIST_AVAILABLE = False
+    print("Warning: MedMNIST not available. Please install with: pip install medmnist")
 
 from config.globals import set_seed
 from models.light_autoencoder import LightAutoencoder
@@ -25,6 +33,7 @@ class DatasetSplit(Dataset):
 def get_data(dataset_name, data_root, iid, client_num):
     train_set = []
     test_set = []
+    
     if dataset_name == 'cifar10':
         normalize = transforms.Normalize(mean=[0.507, 0.487, 0.441], std=[0.267, 0.256, 0.276])
         transform_train = transforms.Compose([transforms.RandomCrop(32, padding=4),
@@ -54,17 +63,49 @@ def get_data(dataset_name, data_root, iid, client_num):
                                                 download=not data_exists,
                                                 transform=transform_test
                                                 )
+    
+    elif dataset_name == 'dermamnist':
+        if not MEDMNIST_AVAILABLE:
+            raise ImportError("MedMNIST not available. Please install with: pip install medmnist")
+        
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        transform_train = transforms.Compose([
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(10),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2),
+            transforms.ToTensor(),
+            normalize,
+        ])
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            normalize,
+        ])
+        train_set = DermaMNIST(split='train', transform=transform_train, download=True, root=data_root)
+        test_set = DermaMNIST(split='test', transform=transform_test, download=True, root=data_root)
+        info = INFO['dermamnist']
+        num_classes = len(info['label'])
+        print(f"DermaMNIST - 训练集大小: {len(train_set)}, 测试集大小: {len(test_set)}")
+        print(f"类别数: {num_classes}, 通道数: {info['n_channels']}, 图像尺寸: 28x28")
+    else:
+        raise ValueError(f"Unsupported dataset: {dataset_name}")
 
     if iid:
-        dict_users = cifar_iid(train_set, client_num)
+        if dataset_name == 'cifar10':
+            dict_users = cifar_iid(train_set, client_num)
+        elif dataset_name == 'dermamnist':
+            dict_users = dermamnist_iid(train_set, client_num)
     else:
-        dict_users = cifar_beta(train_set, 0.1, client_num)
+        if dataset_name == 'cifar10':
+            dict_users = cifar_beta(train_set, 0.1, client_num)
+        elif dataset_name == 'dermamnist':
+            dict_users = dermamnist_beta(train_set, 0.1, client_num)
 
     return train_set, test_set, dict_users
 
 def get_data_no_fl(dataset_name, data_root):
     train_set = []
     test_set = []
+    
     if dataset_name == 'cifar10':
         normalize = transforms.Normalize(mean=[0.507, 0.487, 0.441], std=[0.267, 0.256, 0.276])
         transform_train = transforms.Compose([transforms.RandomCrop(32, padding=4),
@@ -94,6 +135,31 @@ def get_data_no_fl(dataset_name, data_root):
                                                 download=not data_exists,
                                                 transform=transform_test
                                                 )
+    
+    elif dataset_name == 'dermamnist':
+        if not MEDMNIST_AVAILABLE:
+            raise ImportError("MedMNIST not available. Please install with: pip install medmnist")
+        
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        transform_train = transforms.Compose([
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(10),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2),
+            transforms.ToTensor(),
+            normalize,
+        ])
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            normalize,
+        ])
+        train_set = DermaMNIST(split='train', transform=transform_train, download=True, root=data_root)
+        test_set = DermaMNIST(split='test', transform=transform_test, download=True, root=data_root)
+        info = INFO['dermamnist']
+        num_classes = len(info['label'])
+        print(f"DermaMNIST - 训练集大小: {len(train_set)}, 测试集大小: {len(test_set)}")
+        print(f"类别数: {num_classes}, 通道数: {info['n_channels']}, 图像尺寸: 28x28")
+    else:
+        raise ValueError(f"Unsupported dataset: {dataset_name}")
 
     return train_set, test_set
 

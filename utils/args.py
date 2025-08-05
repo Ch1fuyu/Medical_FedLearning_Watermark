@@ -35,7 +35,7 @@ def parser_args():
     parser.add_argument('--model_name', type=str, default='alexnet', choices=['alexnet', 'resnet'],
                         help='model architecture name')
     
-    parser.add_argument('--dataset', type=str, default='cifar10', choices=['cifar10', 'cifar100'], help="name of dataset")
+    parser.add_argument('--dataset', type=str, default='cifar10', choices=['cifar10', 'cifar100', 'dermamnist'], help="name of dataset")
 
     # =========================== Watermark parameters ===================================
     parser.add_argument('--wm_length', type=int, default=1000,
@@ -43,7 +43,7 @@ def parser_args():
 
     # =========================== Other parameters ===================================
     parser.add_argument('--gpu', default='0', type=str)
-    parser.add_argument('--num_classes', default=10, type=int)
+    parser.add_argument('--num_classes', default=10, type=int, help='number of classes (7 for dermamnist, 10 for cifar10)')
     parser.add_argument('--bp_interval', default=30, type=int, help='interval for starting bp the local part')
     parser.add_argument('--log_interval', default=1, type=int,
                         help='interval for evaluating loss and accuracy')
