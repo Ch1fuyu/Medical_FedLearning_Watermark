@@ -4,13 +4,81 @@ import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import Dataset
 
-# 官方推荐方式导入DermaMNIST
-try:
-    from medmnist import INFO, DermaMNIST
-    MEDMNIST_AVAILABLE = True
-except ImportError:
-    MEDMNIST_AVAILABLE = False
-    print("Warning: MedMNIST not available. Please install with: pip install medmnist")
+# 本地数据集类
+class LocalChestMNISTDataset(Dataset):
+    """本地ChestMNIST数据集类，用于加载.npz文件"""
+    def __init__(self, data_path, split='train', transform=None):
+        self.transform = transform
+        self.split = split
+        
+        # 加载.npz文件
+        data = np.load(data_path)
+        
+        if split == 'train':
+            self.images = data['train_images']
+            self.labels = data['train_labels']
+        elif split == 'test':
+            self.images = data['test_images']
+            self.labels = data['test_labels']
+        else:
+            raise ValueError(f"Unsupported split: {split}")
+        
+        # 对于多标签分类，保持标签的2D格式 (样本数, 标签数)
+        # 对于单标签分类，确保标签是1D数组
+        if len(self.labels.shape) > 1:
+            if self.labels.shape[1] > 1:
+                # 多标签分类，保持2D格式
+                pass
+            else:
+                # 单标签分类，squeeze为1D
+                self.labels = self.labels.squeeze()
+    
+    def __len__(self):
+        return len(self.images)
+    
+    def __getitem__(self, idx):
+        image = self.images[idx]
+        label = self.labels[idx]
+        
+        # 处理图像数据 - 根据错误信息修复
+        if len(image.shape) == 3:
+            # 检查图像格式
+            if image.shape[0] == 1:  # 单通道，形状为 (1, H, W)
+                image = image.squeeze(0)  # 转换为 (H, W)
+            elif image.shape[0] == 3:  # RGB，形状为 (3, H, W)
+                image = image.transpose(1, 2, 0)  # 转换为 (H, W, 3)
+            elif image.shape[2] == 1:  # 单通道，形状为 (H, W, 1)
+                image = image.squeeze(2)  # 转换为 (H, W)
+        
+        # 确保数据类型正确
+        if image.dtype != np.uint8:
+            if image.max() <= 1.0:
+                image = (image * 255).astype(np.uint8)
+            else:
+                image = image.astype(np.uint8)
+        
+        # 转换为PIL图像
+        from PIL import Image
+        if len(image.shape) == 2:
+            # 灰度图像，转换为RGB
+            image = Image.fromarray(image, mode='L').convert('RGB')
+        else:
+            # RGB图像
+            image = Image.fromarray(image)
+        
+        if self.transform:
+            image = self.transform(image)
+        
+        # 确保标签保持正确的形状
+        # 对于ChestMNIST多标签分类，标签应该是 (14,) 形状
+        if len(label.shape) == 1 and label.shape[0] == 14:
+            # 这是正确的多标签格式
+            pass
+        elif len(label.shape) == 2 and label.shape[1] == 14:
+            # 如果是 (1, 14) 形状，squeeze为 (14,)
+            label = label.squeeze()
+        
+        return image, label
 
 from config.globals import set_seed
 from models.light_autoencoder import LightAutoencoder
@@ -33,42 +101,19 @@ class DatasetSplit(Dataset):
 def get_data(dataset_name, data_root, iid, client_num):
     train_set = []
     test_set = []
-    
-    if dataset_name == 'cifar10':
-        normalize = transforms.Normalize(mean=[0.507, 0.487, 0.441], std=[0.267, 0.256, 0.276])
-        transform_train = transforms.Compose([transforms.RandomCrop(32, padding=4),
-                                              transforms.RandomHorizontalFlip(),
-                                              transforms.ColorJitter(brightness=0.25, contrast=0.8),
-                                              transforms.ToTensor(),
-                                              normalize,
-                                              ])
-        transform_test = transforms.Compose([transforms.CenterCrop(32),
-                                             transforms.ToTensor(),
-                                             normalize,
-                                             ])
 
-        # 检查本地是否已经下载好数据
-        data_exists = os.path.exists(os.path.join(data_root, 'cifar-10-batches-py'))
-
-        train_set = torchvision.datasets.CIFAR10(data_root,
-                                                 train=True,
-                                                 download=not data_exists,
-                                                 transform=transform_train
-                                                 )
-
-        train_set = DatasetSplit(train_set, np.arange(0, 50000))
-
-        test_set = torchvision.datasets.CIFAR10(data_root,
-                                                train=False,
-                                                download=not data_exists,
-                                                transform=transform_test
-                                                )
-    
-    elif dataset_name == 'dermamnist':
-        if not MEDMNIST_AVAILABLE:
-            raise ImportError("MedMNIST not available. Please install with: pip install medmnist")
+    dataset_path = os.path.join(data_root, dataset_name) + '.npz'
+    if dataset_name == 'chestmnist':
+        if not os.path.exists(dataset_path):
+            raise FileNotFoundError(f"ChestMNIST dataset file not found: {dataset_path}")
         
+        print(f"使用ChestMNIST数据集文件: {dataset_name}")
+        
+        # ChestMNIST参数
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        num_classes = 14  # 多标签分类，14个病理标签
+        print("使用ChestMNIST多标签分类设置（14个病理标签）")
+        
         transform_train = transforms.Compose([
             transforms.RandomHorizontalFlip(),
             transforms.RandomRotation(10),
@@ -80,67 +125,38 @@ def get_data(dataset_name, data_root, iid, client_num):
             transforms.ToTensor(),
             normalize,
         ])
-        train_set = DermaMNIST(split='train', transform=transform_train, download=True, root=data_root)
-        test_set = DermaMNIST(split='test', transform=transform_test, download=True, root=data_root)
-        info = INFO['dermamnist']
-        num_classes = len(info['label'])
-        print(f"DermaMNIST - 训练集大小: {len(train_set)}, 测试集大小: {len(test_set)}")
-        print(f"类别数: {num_classes}, 通道数: {info['n_channels']}, 图像尺寸: 28x28")
+
+        train_set = LocalChestMNISTDataset(dataset_path, split='train', transform=transform_train)
+        test_set = LocalChestMNISTDataset(dataset_path, split='test', transform=transform_test)
+        
+        print(f"ChestMNIST数据集 - 训练集大小: {len(train_set)}, 测试集大小: {len(test_set)}")
+        print(f"类别数: {num_classes}")
     else:
         raise ValueError(f"Unsupported dataset: {dataset_name}")
 
     if iid:
-        if dataset_name == 'cifar10':
-            dict_users = cifar_iid(train_set, client_num)
-        elif dataset_name == 'dermamnist':
-            dict_users = dermamnist_iid(train_set, client_num)
+        dict_users = chestmnist_iid(train_set, client_num)
     else:
-        if dataset_name == 'cifar10':
-            dict_users = cifar_beta(train_set, 0.1, client_num)
-        elif dataset_name == 'dermamnist':
-            dict_users = dermamnist_beta(train_set, 0.1, client_num)
+        dict_users = chestmnist_beta(train_set, 0.1, client_num)
 
     return train_set, test_set, dict_users
 
-def get_data_no_fl(dataset_name, data_root):
+def get_data_no_fl(dataset_name, data_root, dataset_file=None):
     train_set = []
     test_set = []
-    
-    if dataset_name == 'cifar10':
-        normalize = transforms.Normalize(mean=[0.507, 0.487, 0.441], std=[0.267, 0.256, 0.276])
-        transform_train = transforms.Compose([transforms.RandomCrop(32, padding=4),
-                                              transforms.RandomHorizontalFlip(),
-                                              transforms.ColorJitter(brightness=0.25, contrast=0.8),
-                                              transforms.ToTensor(),
-                                              normalize,
-                                              ])
-        transform_test = transforms.Compose([transforms.CenterCrop(32),
-                                             transforms.ToTensor(),
-                                             normalize,
-                                             ])
 
-        # 检查本地是否已经下载好数据
-        data_exists = os.path.exists(os.path.join(data_root, 'cifar-10-batches-py'))
-
-        train_set = torchvision.datasets.CIFAR10(data_root,
-                                                 train=True,
-                                                 download=not data_exists,
-                                                 transform=transform_train
-                                                 )
-
-        train_set = DatasetSplit(train_set, np.arange(0, 50000))
-
-        test_set = torchvision.datasets.CIFAR10(data_root,
-                                                train=False,
-                                                download=not data_exists,
-                                                transform=transform_test
-                                                )
-    
-    elif dataset_name == 'dermamnist':
-        if not MEDMNIST_AVAILABLE:
-            raise ImportError("MedMNIST not available. Please install with: pip install medmnist")
+    dataset_path = os.path.join(data_root, dataset_name) + '.npz'
+    if dataset_name == 'chestmnist':
+        if not os.path.exists(dataset_path):
+            raise FileNotFoundError(f"ChestMNIST dataset file not found: {dataset_path}")
         
+        print(f"使用ChestMNIST数据集文件: {dataset_file}")
+        
+        # ChestMNIST参数
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        num_classes = 14  # 多标签分类，14个病理标签
+        print("使用ChestMNIST多标签分类设置（14个病理标签）")
+        
         transform_train = transforms.Compose([
             transforms.RandomHorizontalFlip(),
             transforms.RandomRotation(10),
@@ -152,12 +168,12 @@ def get_data_no_fl(dataset_name, data_root):
             transforms.ToTensor(),
             normalize,
         ])
-        train_set = DermaMNIST(split='train', transform=transform_train, download=True, root=data_root)
-        test_set = DermaMNIST(split='test', transform=transform_test, download=True, root=data_root)
-        info = INFO['dermamnist']
-        num_classes = len(info['label'])
-        print(f"DermaMNIST - 训练集大小: {len(train_set)}, 测试集大小: {len(test_set)}")
-        print(f"类别数: {num_classes}, 通道数: {info['n_channels']}, 图像尺寸: 28x28")
+
+        train_set = LocalChestMNISTDataset(dataset_path, split='train', transform=transform_train)
+        test_set = LocalChestMNISTDataset(dataset_path, split='test', transform=transform_test)
+        
+        print(f"ChestMNIST数据集 - 训练集大小: {len(train_set)}, 测试集大小: {len(test_set)}")
+        print(f"类别数: {num_classes}")
     else:
         raise ValueError(f"Unsupported dataset: {dataset_name}")
 

@@ -5,18 +5,26 @@ from torch import optim
 
 def accuracy(output, target, top_k=(1,)):
     with torch.no_grad():
-        max_k = max(top_k)
-        batch_size = target.size(0)
+        # 检查是否为多标签分类（ChestMNIST: batch_size x 14）
+        if len(target.shape) == 2 and target.shape[1] == 14:
+            # 多标签分类：使用sigmoid和阈值
+            pred = torch.sigmoid(output) > 0.5
+            correct = (pred == target).float().mean()
+            return [correct * 100.0]
+        else:
+            # 单标签分类：使用top-k准确率
+            max_k = max(top_k)
+            batch_size = target.size(0)
 
-        _, pred = output.topk(max_k, 1, True, True)
-        pred = pred.t()
-        correct = pred.eq(target.view(1, -1).expand_as(pred))
+            _, pred = output.topk(max_k, 1, True, True)
+            pred = pred.t()
+            correct = pred.eq(target.view(1, -1).expand_as(pred))
 
-        res = []
-        for k in top_k:
-            correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
-            res.append(correct_k.mul_(100.0 / batch_size))
-        return res
+            res = []
+            for k in top_k:
+                correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+                res.append(correct_k.mul_(100.0 / batch_size))
+            return res
 
 class TesterPrivate(object):
     def __init__(self, model, device, verbose=True):
@@ -39,9 +47,20 @@ class TesterPrivate(object):
                 target = target.to(self.device)
 
                 pred = self.model(data)
-                loss_meter += F.cross_entropy(pred, target, reduction='sum').item()
-                pred = pred.max(1, keepdim=True)[1]
-                acc_meter += pred.eq(target.view_as(pred)).sum().item()
+                
+                # 检查是否为多标签分类
+                if len(target.shape) == 2 and target.shape[1] == 14:
+                    # 多标签分类：使用BCEWithLogitsLoss
+                    loss_meter += F.binary_cross_entropy_with_logits(pred, target.float(), reduction='sum').item()
+                    # 多标签准确率计算
+                    pred_binary = torch.sigmoid(pred) > 0.5
+                    acc_meter += (pred_binary == target).float().mean().item() * data.size(0)
+                else:
+                    # 单标签分类：使用CrossEntropyLoss
+                    loss_meter += F.cross_entropy(pred, target, reduction='sum').item()
+                    pred = pred.max(1, keepdim=True)[1]
+                    acc_meter += pred.eq(target.view_as(pred)).sum().item()
+                
                 run_count += data.size(0)
 
         loss_meter /= run_count
@@ -85,7 +104,15 @@ class TrainerPrivate(object):
 
                 # 获取模型预测结果
                 pred = self.model(x)
-                loss += F.cross_entropy(pred, y)
+                
+                # 检查是否为多标签分类
+                if len(y.shape) == 2 and y.shape[1] == 14:
+                    # 多标签分类：使用BCEWithLogitsLoss
+                    loss += F.binary_cross_entropy_with_logits(pred, y.float())
+                else:
+                    # 单标签分类：使用CrossEntropyLoss
+                    loss += F.cross_entropy(pred, y)
+                
                 acc_meter += accuracy(pred, y)[0].item()
 
                 # params = torch.cat([param.view(-1) for param in self.model.parameters()])
@@ -140,7 +167,15 @@ class TrainerPrivate(object):
                 self.optimizer.zero_grad()
 
                 pred = self.model(x)
-                loss = F.cross_entropy(pred, y)
+                
+                # 检查是否为多标签分类
+                if len(y.shape) == 2 and y.shape[1] == 14:
+                    # 多标签分类：使用BCEWithLogitsLoss
+                    loss = F.binary_cross_entropy_with_logits(pred, y.float())
+                else:
+                    # 单标签分类：使用CrossEntropyLoss
+                    loss = F.cross_entropy(pred, y)
+                
                 acc_meter += accuracy(pred, y)[0].item()
 
                 loss.backward()

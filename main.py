@@ -32,7 +32,7 @@ logging.basicConfig(
 )
 
 
-class FederatedLearningOnCifar10(Experiment):
+class FederatedLearningOnChestMNIST(Experiment):
     def __init__(self, args):
         super().__init__(args)
         self.random_positions = None
@@ -43,19 +43,15 @@ class FederatedLearningOnCifar10(Experiment):
         logging.info(args)
         logging.info('==> Preparing data...')
         
-        # 根据数据集调整参数
-        if self.dataset == 'dermamnist':
-            self.num_classes = 7  # DermaMNIST有7个类别
-            self.in_channels = 3  # RGB图像
-            logging.info(f'Using DermaMNIST dataset with {self.num_classes} classes')
-        else:
-            self.num_classes = args.num_classes
-            self.in_channels = args.in_channels
+        # ChestMNIST多标签分类设置
+        self.num_classes = 14  # ChestMNIST是多标签分类，14个病理标签
+        logging.info(f'Using ChestMNIST dataset with {self.num_classes} classes (multi-label)')
+        self.in_channels = 3  # RGB图像
             
         self.train_set, self.test_set, self.dict_users = get_data(dataset_name=self.dataset,
                                                                   data_root=self.data_root,
                                                                   iid=self.iid,
-                                                                  client_num=self.client_num
+                                                                  client_num=self.client_num,
                                                                   )
         logging.info('==> Training model...')
         self.logs = {'best_train_acc': -np.inf, 'best_train_loss': -np.inf,
@@ -183,7 +179,7 @@ def main(args):
                 'console_log': os.path.basename(log_file_name),
             }
             }
-    fl = FederatedLearningOnCifar10(args)
+    fl = FederatedLearningOnChestMNIST(args)
     logg, test_acc = fl.training()
     logs['net_info'] = logg
     logs['test_acc'] = {'value': test_acc}

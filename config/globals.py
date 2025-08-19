@@ -2,8 +2,7 @@ import torch
 import numpy as np
 import random
 
-root = 'D:/CODE/FL_Cifar'
-data_root = 'D:/CODE/FL_Cifar/data'
+data_root = './data'
 
 
 def set_seed(seed = 42):
