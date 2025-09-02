@@ -102,7 +102,7 @@ def get_data(dataset_name, data_root, iid, client_num):
     train_set = []
     test_set = []
 
-    dataset_path = os.path.join(data_root, dataset_name) + '.npz'
+    dataset_path = os.path.join(data_root, dataset_name + '.npz')
     if dataset_name == 'chestmnist':
         if not os.path.exists(dataset_path):
             raise FileNotFoundError(f"ChestMNIST dataset file not found: {dataset_path}")
@@ -145,12 +145,12 @@ def get_data_no_fl(dataset_name, data_root, dataset_file=None):
     train_set = []
     test_set = []
 
-    dataset_path = os.path.join(data_root, dataset_name) + '.npz'
+    dataset_path = os.path.join(data_root, dataset_name + '.npz')
     if dataset_name == 'chestmnist':
         if not os.path.exists(dataset_path):
             raise FileNotFoundError(f"ChestMNIST dataset file not found: {dataset_path}")
         
-        print(f"使用ChestMNIST数据集文件: {dataset_file}")
+        print(f"使用ChestMNIST数据集文件: {dataset_name}")
         
         # ChestMNIST参数
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])

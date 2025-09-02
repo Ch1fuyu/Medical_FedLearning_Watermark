@@ -10,11 +10,11 @@ def parser_args():
                         help="the fraction of clients: C")
     parser.add_argument('--local_ep', type=int, default=2,
                         help="the number of local epochs: E")
-    parser.add_argument('--batch_size', type=int, default=16,
+    parser.add_argument('--batch_size', type=int, default=128,
                         help="local batch size: B")
     parser.add_argument('--lr_outer', type=float, default=1,
                         help="learning rate")
-    parser.add_argument('--lr', type=float, default=0.01,
+    parser.add_argument('--lr', type=float, default=0.001,
                         help="learning rate for inner update")
     parser.add_argument('--gamma', type=float, default=0.99,
                          help="exponential weight decay")
@@ -22,9 +22,9 @@ def parser_args():
                         help='dataset is split iid or not')
     parser.add_argument('--wd', type=float, default=4e-5,
                         help='weight decay')
-    parser.add_argument('--optim', type=str, default='sgd',
+    parser.add_argument('--optim', type=str, default='adam',
                         help='optimizer: [sgd, adam]')
-    parser.add_argument('--epochs', type=int, default=1,
+    parser.add_argument('--epochs', type=int, default=100,
                         help='communication round')
     parser.add_argument('--in_channels', type=int, default=3,
                         help='in channels')
@@ -32,7 +32,7 @@ def parser_args():
                         help='which kind of client sampling we use')
 
     # ============================ Model arguments ===================================
-    parser.add_argument('--model_name', type=str, default='alexnet', choices=['alexnet', 'resnet'],
+    parser.add_argument('--model_name', type=str, default='resnet', choices=['alexnet', 'resnet'],
                         help='model architecture name')
     
     parser.add_argument('--dataset', type=str, default='chestmnist', help="name of dataset (ChestMNIST only)")

@@ -12,6 +12,7 @@ from tqdm import tqdm
 
 from config.globals import set_seed
 from models.alexnet import AlexNet
+from models.resnet import resnet18
 from utils.args import parser_args
 from utils.base import Experiment
 from utils.dataset import get_data, DatasetSplit, construct_random_wm_position
@@ -70,7 +71,12 @@ class FederatedLearningOnChestMNIST(Experiment):
         self.tester = TesterPrivate(self.model, self.device)
 
     def construct_model(self):
-        model = AlexNet(self.in_channels, self.num_classes)
+        if self.model_name == 'resnet':
+            model = resnet18(num_classes=self.num_classes, in_channels=self.in_channels, input_size=28)
+            logging.info('Using ResNet-18 model')
+        else:
+            model = AlexNet(self.in_channels, self.num_classes)
+            logging.info('Using AlexNet model')
         self.model = model.to(self.device)
         logging.info(f'Model created with {self.in_channels} input channels and {self.num_classes} output classes')
 
@@ -90,6 +96,11 @@ class FederatedLearningOnChestMNIST(Experiment):
 
         idxs_users = []
 
+        # Early Stopping 配置
+        patience = 10
+        early_stop_counter = 0
+        best_val_auc = -np.inf
+
         for epoch in range(self.epochs): # 均匀采样，frac 默认为 1，即每轮中全体客户端参与训练
             if self.sampling_type == 'uniform':
                 self.m = max(int(self.frac * self.client_num), 1)
@@ -107,7 +118,10 @@ class FederatedLearningOnChestMNIST(Experiment):
                 local_ws.append(copy.deepcopy(local_w))
                 local_losses.append(local_loss)
 
-            self.lr = self.lr * 0.99
+            # 学习率调度（在第50和75轮时衰减0.1倍）
+            if (epoch + 1) in [50, 75]:
+                self.lr *= 0.1
+                logging.info(f'LR decayed at epoch {epoch + 1}. New lr: {self.lr}')
 
             client_weights = []
             for i in range(self.client_num):
@@ -118,8 +132,11 @@ class FederatedLearningOnChestMNIST(Experiment):
             self.model.load_state_dict(self.w_t)
 
             if (epoch + 1) == self.epochs or (epoch + 1) % 1 == 0:
-                loss_train_mean, acc_train_mean = self.trainer.test(train_ldr)
-                loss_val_mean, acc_val_mean = self.trainer.test(val_ldr)
+                train_metrics = self.trainer.test(train_ldr)
+                val_metrics = self.trainer.test(val_ldr)
+
+                loss_train_mean, acc_train_mean, auc_train = train_metrics
+                loss_val_mean, acc_val_mean, auc_val = val_metrics
 
                 self.logs['val_acc'].append(acc_val_mean)
                 self.logs['val_loss'].append(loss_val_mean)
@@ -137,8 +154,18 @@ class FederatedLearningOnChestMNIST(Experiment):
                 logging.info(
                     "Train Loss {:.4f} --- Val Loss {:.4f}"
                     .format(loss_train_mean, loss_val_mean))
-                logging.info("Train acc {:.4f} --- Val acc {:.4f} --Best acc {:.4f}".format(acc_train_mean, acc_val_mean,
-                                                                                            self.logs['best_test_acc']))
+                logging.info("Train acc {:.4f} (AUC {:.4f}) --- Val acc {:.4f} (AUC {:.4f}) --Best acc {:.4f}"
+                             .format(acc_train_mean, auc_train, acc_val_mean, auc_val, self.logs['best_test_acc']))
+
+                # Early Stopping：基于验证AUC
+                if auc_val > best_val_auc:
+                    best_val_auc = auc_val
+                    early_stop_counter = 0
+                else:
+                    early_stop_counter += 1
+                    if early_stop_counter >= patience:
+                        logging.info(f'Early stopping triggered at epoch {epoch + 1}. Best Val AUC: {best_val_auc:.4f}')
+                        break
 
         logging.info('-------------------------------Result--------------------------------------')
         logging.info('Test loss: {:.4f} --- Test acc: {:.4f}'.format(self.logs['best_test_loss'],

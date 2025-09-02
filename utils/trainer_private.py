@@ -2,6 +2,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import optim
+try:
+    from sklearn.metrics import roc_auc_score
+except Exception:
+    roc_auc_score = None
 
 def accuracy(output, target, top_k=(1,)):
     with torch.no_grad():
@@ -52,21 +56,79 @@ class TesterPrivate(object):
                 if len(target.shape) == 2 and target.shape[1] == 14:
                     # 多标签分类：使用BCEWithLogitsLoss
                     loss_meter += F.binary_cross_entropy_with_logits(pred, target.float(), reduction='sum').item()
-                    # 多标签准确率计算
-                    pred_binary = torch.sigmoid(pred) > 0.5
+                    # 多标签准确率（元素级匹配率，仅参考）
+                    pred_prob = torch.sigmoid(pred)
+                    pred_binary = pred_prob > 0.5
                     acc_meter += (pred_binary == target).float().mean().item() * data.size(0)
+                    # AUC（宏平均）：需要sklearn
+                    if roc_auc_score is not None:
+                        try:
+                            y_true = target.detach().cpu().numpy()
+                            y_score = pred_prob.detach().cpu().numpy()
+                            
+                            # 检查每个类别是否有足够的正负样本
+                            valid_classes = []
+                            for i in range(y_true.shape[1]):
+                                if len(np.unique(y_true[:, i])) > 1:  # 确保有0和1两种标签
+                                    valid_classes.append(i)
+                            
+                            if len(valid_classes) > 0:
+                                # 只计算有效类别的AUC
+                                auc_scores = []
+                                for i in valid_classes:
+                                    try:
+                                        auc_i = roc_auc_score(y_true[:, i], y_score[:, i])
+                                        auc_scores.append(auc_i)
+                                    except Exception:
+                                        continue
+                                
+                                if len(auc_scores) > 0:
+                                    auc_val = np.mean(auc_scores)  # 宏平均
+                                    # 可选：记录有效类别数量（调试用）
+                                    if self.verbose and len(valid_classes) < y_true.shape[1]:
+                                        print(f"Warning: Only {len(valid_classes)}/{y_true.shape[1]} classes have both positive and negative samples")
+                                else:
+                                    auc_val = 0.0
+                            else:
+                                auc_val = 0.0
+                                if self.verbose:
+                                    print(f"Warning: No valid classes found for AUC calculation (all classes have only one label)")
+                        except Exception:
+                            auc_val = 0.0
+                    else:
+                        auc_val = 0.0
                 else:
                     # 单标签分类：使用CrossEntropyLoss
                     loss_meter += F.cross_entropy(pred, target, reduction='sum').item()
                     pred = pred.max(1, keepdim=True)[1]
                     acc_meter += pred.eq(target.view_as(pred)).sum().item()
+                    # AUC（单标签多类）：使用概率
+                    if roc_auc_score is not None:
+                        try:
+                            # 将logits转为softmax概率
+                            prob = F.softmax(self.model(data), dim=1)
+                            y_true = target.detach().cpu().numpy()
+                            y_score = prob.detach().cpu().numpy()
+                            
+                            # 检查是否有足够的类别
+                            unique_classes = np.unique(y_true)
+                            if len(unique_classes) > 1:
+                                # 对于多类，使用ovr宏平均
+                                auc_val = roc_auc_score(y_true, y_score, multi_class='ovr', average='macro')
+                            else:
+                                auc_val = 0.0
+                        except Exception:
+                            auc_val = 0.0
+                    else:
+                        auc_val = 0.0
                 
                 run_count += data.size(0)
 
         loss_meter /= run_count
         acc_meter /= run_count
 
-        return loss_meter, acc_meter
+        # 为保持接口一致性，返回 (loss, acc, auc)
+        return loss_meter, acc_meter, float(auc_val)
 
 class TrainerPrivate(object):
     def __init__(self, model, device, dp, sigma, random_positions):
@@ -79,10 +141,8 @@ class TrainerPrivate(object):
         self.random_positions = random_positions  # 加入随机位置列表
 
     def local_update(self, dataloader, local_ep, lr, client_id):
-        self.optimizer = optim.SGD(self.model.parameters(),
-                                   lr,
-                                   momentum=0.9,
-                                   weight_decay=0.0005)
+        # 使用 Adam 优化器
+        self.optimizer = optim.Adam(self.model.parameters(), lr=lr, weight_decay=0.0005)
 
         self.model.to(self.device)
         self.model.train()
@@ -131,16 +191,16 @@ class TrainerPrivate(object):
             epoch_loss.append(loss_meter)
 
             # 将整个参数空间展开成一维张量
-            all_params = torch.cat([param.view(-1) for param in self.model.parameters()])
-            # 在每轮训练结束后，将指定位置的参数设置为 0.5
-            for _, param_idx in position_dict:
-                all_params[param_idx] = torch.tensor(0.5, device=self.device)
+            # all_params = torch.cat([param.view(-1) for param in self.model.parameters()])
+            # # 在每轮训练结束后，将指定位置的参数设置为 0.5
+            # for _, param_idx in position_dict:
+            #     all_params[param_idx] = torch.tensor(0.5, device=self.device)
 
-            # 将修改后的一维张量重新赋值给模型参数
-            start_idx = 0
-            for param in self.model.parameters():
-                param.data = all_params[start_idx:start_idx + param.numel()].view(param.size())
-                start_idx += param.numel()
+            # # 将修改后的一维张量重新赋值给模型参数
+            # start_idx = 0
+            # for param in self.model.parameters():
+            #     param.data = all_params[start_idx:start_idx + param.numel()].view(param.size())
+            #     start_idx += param.numel()
 
         # 如果启用差分隐私（DP），为每个参数添加噪声
         if self.dp:
