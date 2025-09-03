@@ -14,7 +14,7 @@ def parser_args():
                         help="local batch size: B")
     parser.add_argument('--lr_outer', type=float, default=1,
                         help="learning rate")
-    parser.add_argument('--lr', type=float, default=0.001,
+    parser.add_argument('--lr', type=float, default=0.01,
                         help="learning rate for inner update")
     parser.add_argument('--gamma', type=float, default=0.99,
                          help="exponential weight decay")

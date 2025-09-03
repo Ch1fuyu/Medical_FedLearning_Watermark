@@ -7,14 +7,35 @@ try:
 except Exception:
     roc_auc_score = None
 
+def focal_loss(pred, target, alpha=1, gamma=2):
+    """
+    Focal Loss for handling class imbalance
+    alpha: weighting factor for rare class (default=1)
+    gamma: focusing parameter (default=2)
+    """
+    # 计算sigmoid概率
+    p = torch.sigmoid(pred)
+    
+    # 计算focal loss
+    ce_loss = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
+    p_t = p * target + (1 - p) * (1 - target)
+    focal_loss = alpha * (1 - p_t) ** gamma * ce_loss
+    
+    return focal_loss.mean()
+
 def accuracy(output, target, top_k=(1,)):
     with torch.no_grad():
         # 检查是否为多标签分类（ChestMNIST: batch_size x 14）
         if len(target.shape) == 2 and target.shape[1] == 14:
             # 多标签分类：使用sigmoid和阈值
-            pred = torch.sigmoid(output) > 0.5
-            correct = (pred == target).float().mean()
-            return [correct * 100.0]
+            pred_prob = torch.sigmoid(output)
+            pred_binary = pred_prob > 0.5
+            
+            # 计算样本级准确率（样本完全匹配才算正确）
+            sample_correct = torch.all(pred_binary == target, dim=1).float().mean()
+            
+            # 返回样本级准确率
+            return [sample_correct * 100.0]
         else:
             # 单标签分类：使用top-k准确率
             max_k = max(top_k)
@@ -31,7 +52,7 @@ def accuracy(output, target, top_k=(1,)):
             return res
 
 class TesterPrivate(object):
-    def __init__(self, model, device, verbose=True):
+    def __init__(self, model, device, verbose=False):
         self.model = model
         self.device = device
         self.verbose = verbose
@@ -54,12 +75,21 @@ class TesterPrivate(object):
                 
                 # 检查是否为多标签分类
                 if len(target.shape) == 2 and target.shape[1] == 14:
-                    # 多标签分类：使用BCEWithLogitsLoss
+                    # 多标签分类：使用普通BCEWithLogitsLoss进行评估
                     loss_meter += F.binary_cross_entropy_with_logits(pred, target.float(), reduction='sum').item()
-                    # 多标签准确率（元素级匹配率，仅参考）
+                    # 使用新的准确率计算函数
+                    acc_results = accuracy(pred, target)
+                    sample_acc = acc_results[0]  # 样本级准确率
+                    acc_meter += sample_acc * data.size(0) / 100.0  # 转换为小数
+                    
+                    # 计算sigmoid概率用于AUC计算
                     pred_prob = torch.sigmoid(pred)
-                    pred_binary = pred_prob > 0.5
-                    acc_meter += (pred_binary == target).float().mean().item() * data.size(0)
+                    
+                    # 调试信息（仅在verbose模式下且是第一个batch时显示）
+                    if self.verbose and run_count == 0:
+                        pred_normal = torch.all(pred_prob < 0.5, dim=1).sum().item()
+                        print(f"第一个batch - 样本级准确率: {sample_acc:.4f}%, 预测正常样本: {pred_normal}/{data.size(0)}")
+                    
                     # AUC（宏平均）：需要sklearn
                     if roc_auc_score is not None:
                         try:
@@ -84,15 +114,10 @@ class TesterPrivate(object):
                                 
                                 if len(auc_scores) > 0:
                                     auc_val = np.mean(auc_scores)  # 宏平均
-                                    # 可选：记录有效类别数量（调试用）
-                                    if self.verbose and len(valid_classes) < y_true.shape[1]:
-                                        print(f"Warning: Only {len(valid_classes)}/{y_true.shape[1]} classes have both positive and negative samples")
                                 else:
                                     auc_val = 0.0
                             else:
                                 auc_val = 0.0
-                                if self.verbose:
-                                    print(f"Warning: No valid classes found for AUC calculation (all classes have only one label)")
                         except Exception:
                             auc_val = 0.0
                     else:
@@ -167,13 +192,14 @@ class TrainerPrivate(object):
                 
                 # 检查是否为多标签分类
                 if len(y.shape) == 2 and y.shape[1] == 14:
-                    # 多标签分类：使用BCEWithLogitsLoss
-                    loss += F.binary_cross_entropy_with_logits(pred, y.float())
+                    # 多标签分类：使用Focal Loss来处理数据不平衡
+                    loss += focal_loss(pred, y.float(), alpha=2, gamma=2)
                 else:
                     # 单标签分类：使用CrossEntropyLoss
                     loss += F.cross_entropy(pred, y)
                 
-                acc_meter += accuracy(pred, y)[0].item()
+                acc_results = accuracy(pred, y)
+                acc_meter += acc_results[0].item()  # 使用样本级准确率
 
                 # params = torch.cat([param.view(-1) for param in self.model.parameters()])
                 # # 在每个batch结束后操作指定的随机位置参数
@@ -230,13 +256,14 @@ class TrainerPrivate(object):
                 
                 # 检查是否为多标签分类
                 if len(y.shape) == 2 and y.shape[1] == 14:
-                    # 多标签分类：使用BCEWithLogitsLoss
-                    loss = F.binary_cross_entropy_with_logits(pred, y.float())
+                    # 多标签分类：使用Focal Loss来处理数据不平衡
+                    loss = focal_loss(pred, y.float(), alpha=2, gamma=2)
                 else:
                     # 单标签分类：使用CrossEntropyLoss
                     loss = F.cross_entropy(pred, y)
                 
-                acc_meter += accuracy(pred, y)[0].item()
+                acc_results = accuracy(pred, y)
+                acc_meter += acc_results[0].item()  # 使用样本级准确率
 
                 loss.backward()
                 self.optimizer.step()
