@@ -7,21 +7,6 @@ try:
 except Exception:
     roc_auc_score = None
 
-def focal_loss(pred, target, alpha=1, gamma=2):
-    """
-    Focal Loss for handling class imbalance
-    alpha: weighting factor for rare class (default=1)
-    gamma: focusing parameter (default=2)
-    """
-    # 计算sigmoid概率
-    p = torch.sigmoid(pred)
-    
-    # 计算focal loss
-    ce_loss = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
-    p_t = p * target + (1 - p) * (1 - target)
-    focal_loss = alpha * (1 - p_t) ** gamma * ce_loss
-    
-    return focal_loss.mean()
 
 def accuracy(output, target, top_k=(1,)):
     with torch.no_grad():
@@ -31,11 +16,14 @@ def accuracy(output, target, top_k=(1,)):
             pred_prob = torch.sigmoid(output)
             pred_binary = pred_prob > 0.5
             
-            # 计算样本级准确率（样本完全匹配才算正确）
+            # 标签级准确率
+            label_correct = (pred_binary == target).float().mean()
+            
+            # 样本级准确率
             sample_correct = torch.all(pred_binary == target, dim=1).float().mean()
             
-            # 返回样本级准确率
-            return [sample_correct * 100.0]
+            # 返回标签级准确率作为主要指标
+            return [label_correct * 100.0, sample_correct * 100.0]
         else:
             # 单标签分类：使用top-k准确率
             max_k = max(top_k)
@@ -79,8 +67,9 @@ class TesterPrivate(object):
                     loss_meter += F.binary_cross_entropy_with_logits(pred, target.float(), reduction='sum').item()
                     # 使用新的准确率计算函数
                     acc_results = accuracy(pred, target)
-                    sample_acc = acc_results[0]  # 样本级准确率
-                    acc_meter += sample_acc * data.size(0) / 100.0  # 转换为小数
+                    label_acc = acc_results[0]  # 标签级准确率（主要指标）
+                    sample_acc = acc_results[1]  # 样本级准确率
+                    acc_meter += label_acc.item() * data.size(0) / 100.0  # 使用标签级准确率，确保转换为标量
                     
                     # 计算sigmoid概率用于AUC计算
                     pred_prob = torch.sigmoid(pred)
@@ -88,7 +77,7 @@ class TesterPrivate(object):
                     # 调试信息（仅在verbose模式下且是第一个batch时显示）
                     if self.verbose and run_count == 0:
                         pred_normal = torch.all(pred_prob < 0.5, dim=1).sum().item()
-                        print(f"第一个batch - 样本级准确率: {sample_acc:.4f}%, 预测正常样本: {pred_normal}/{data.size(0)}")
+                        print(f"First batch - Label-level accuracy: {label_acc:.4f}%, Sample-level accuracy: {sample_acc:.4f}%, Predicted normal samples: {pred_normal}/{data.size(0)}")
                     
                     # AUC（宏平均）：需要sklearn
                     if roc_auc_score is not None:
@@ -152,11 +141,15 @@ class TesterPrivate(object):
         loss_meter /= run_count
         acc_meter /= run_count
 
+        # 确保acc_meter是标量
+        if hasattr(acc_meter, 'item'):
+            acc_meter = acc_meter.item()
+
         # 为保持接口一致性，返回 (loss, acc, auc)
         return loss_meter, acc_meter, float(auc_val)
 
 class TrainerPrivate(object):
-    def __init__(self, model, device, dp, sigma, random_positions):
+    def __init__(self, model, device, dp, sigma, random_positions, args=None):
         self.optimizer = None
         self.model = model
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -164,14 +157,37 @@ class TrainerPrivate(object):
         self.dp = dp
         self.sigma = sigma
         self.random_positions = random_positions  # 加入随机位置列表
+        self.args = args  # 添加参数对象
+
+    def get_loss_function(self, pred, target):
+        """使用BCEWithLogitsLoss，支持类别权重"""
+        if self.args is None or not self.args.class_weights:
+            # 使用标准BCEWithLogitsLoss
+            return F.binary_cross_entropy_with_logits(pred, target.float())
+        
+        # 计算类别权重
+        pos_counts = target.sum(dim=0)
+        neg_counts = target.shape[0] - pos_counts
+        pos_weights = torch.zeros_like(pos_counts, dtype=torch.float32, device=pred.device)
+        for i in range(len(pos_counts)):
+            if pos_counts[i] > 0 and neg_counts[i] > 0:
+                pos_weights[i] = (neg_counts[i] / pos_counts[i]) * self.args.pos_weight_factor
+            else:
+                pos_weights[i] = 1.0
+        pos_weights = torch.clamp(pos_weights, min=0.1, max=10.0)
+        
+        return F.binary_cross_entropy_with_logits(pred, target.float(), pos_weight=pos_weights)
 
     def local_update(self, dataloader, local_ep, lr, client_id):
-        # 使用 Adam 优化器
-        self.optimizer = optim.Adam(self.model.parameters(), lr=lr, weight_decay=0.0005)
+        # 使用 Adam 优化器，移除weight_decay以对齐官方策略
+        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
+        
+        # 本地训练不使用学习率调度，使用全局调度
 
         self.model.to(self.device)
         self.model.train()
         epoch_loss = []
+        epoch_acc = []
         train_ldr = dataloader
 
         # 获取该客户端的随机参数位置
@@ -180,6 +196,7 @@ class TrainerPrivate(object):
         for epoch in range(local_ep):
             loss_meter = 0
             acc_meter = 0
+            batch_count = 0
 
             for batch_idx, (x, y) in enumerate(train_ldr):
                 x, y = x.to(self.device), y.to(self.device)
@@ -192,29 +209,39 @@ class TrainerPrivate(object):
                 
                 # 检查是否为多标签分类
                 if len(y.shape) == 2 and y.shape[1] == 14:
-                    # 多标签分类：使用Focal Loss来处理数据不平衡
-                    loss += focal_loss(pred, y.float(), alpha=2, gamma=2)
+                    # 多标签分类：根据参数选择损失函数
+                    loss += self.get_loss_function(pred, y)
                 else:
                     # 单标签分类：使用CrossEntropyLoss
                     loss += F.cross_entropy(pred, y)
                 
                 acc_results = accuracy(pred, y)
-                acc_meter += acc_results[0].item()  # 使用样本级准确率
-
-                # params = torch.cat([param.view(-1) for param in self.model.parameters()])
-                # # 在每个batch结束后操作指定的随机位置参数
-                # for layer_name, param_idx in positions:
-                #     print(params.data[param_idx])
+                if len(y.shape) == 2 and y.shape[1] == 14:
+                    # 多标签分类：使用标签级准确率
+                    acc_meter += acc_results[0].item()  # 标签级准确率
+                else:
+                    # 单标签分类：使用原来的准确率
+                    acc_meter += acc_results[0].item()
 
                 loss.backward()
+                
+                # 梯度裁剪，防止梯度爆炸
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                
                 self.optimizer.step()
 
                 loss_meter += loss.item()
-
-            loss_meter /= len(train_ldr)
-            acc_meter /= len(dataloader)
+                batch_count += 1
+            
+            loss_meter /= batch_count
+            acc_meter /= batch_count
 
             epoch_loss.append(loss_meter)
+            epoch_acc.append(acc_meter)
+            
+            # 输出客户端训练进度
+            if epoch + 1 == local_ep:
+                print(f"Client {client_id} - Epoch {epoch+1}/{local_ep}: Loss={loss_meter:.4f}, Acc={acc_meter:.4f}, LR={lr:.6f}")
 
             # 将整个参数空间展开成一维张量
             # all_params = torch.cat([param.view(-1) for param in self.model.parameters()])
@@ -256,14 +283,19 @@ class TrainerPrivate(object):
                 
                 # 检查是否为多标签分类
                 if len(y.shape) == 2 and y.shape[1] == 14:
-                    # 多标签分类：使用Focal Loss来处理数据不平衡
-                    loss = focal_loss(pred, y.float(), alpha=2, gamma=2)
+                    # 多标签分类：根据参数选择损失函数
+                    loss = self.get_loss_function(pred, y)
                 else:
                     # 单标签分类：使用CrossEntropyLoss
                     loss = F.cross_entropy(pred, y)
                 
                 acc_results = accuracy(pred, y)
-                acc_meter += acc_results[0].item()  # 使用样本级准确率
+                if len(y.shape) == 2 and y.shape[1] == 14:
+                    # 多标签分类：使用标签级准确率
+                    acc_meter += acc_results[0].item()  # 标签级准确率
+                else:
+                    # 单标签分类：使用原来的准确率
+                    acc_meter += acc_results[0].item()
 
                 loss.backward()
                 self.optimizer.step()

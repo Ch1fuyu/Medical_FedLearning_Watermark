@@ -28,7 +28,7 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H-%M-%S',  # 日期格式
     handlers=[
         logging.StreamHandler(sys.stdout),  # 输出到控制台
-        logging.FileHandler(log_file_name, mode='a')  # 追加模式
+        logging.FileHandler(log_file_name, mode='a', encoding='utf-8')  # 追加模式
     ]
 )
 
@@ -46,7 +46,6 @@ class FederatedLearningOnChestMNIST(Experiment):
         
         # ChestMNIST多标签分类设置
         self.num_classes = 14  # ChestMNIST是多标签分类，14个病理标签
-        logging.info(f'Using ChestMNIST dataset with {self.num_classes} classes (multi-label)')
         self.in_channels = 3  # RGB图像
             
         self.train_set, self.test_set, self.dict_users = get_data(dataset_name=self.dataset,
@@ -57,9 +56,15 @@ class FederatedLearningOnChestMNIST(Experiment):
         logging.info('==> Training model...')
         self.logs = {'best_train_acc': -np.inf, 'best_train_loss': -np.inf,
                      'val_acc': [], 'val_loss': [],
-                     'best_test_acc': -np.inf, 'best_test_loss': -np.inf,
+                     'best_model_acc': -np.inf, 'best_model_loss': -np.inf,
+                     'best_model_auc': -np.inf,
                      'best_model': [],
                      'local_loss': [],
+                     # 独立跟踪历史最高指标
+                     'highest_acc_ever': -np.inf,      # 历史最高准确率（纯准确率）
+                     'highest_auc_ever': -np.inf,     # 历史最高AUC（纯AUC）
+                     'acc_when_highest_auc': -np.inf, # 达到历史最高AUC时的准确率
+                     'auc_when_highest_acc': -np.inf, # 达到历史最高准确率时的AUC
                      }
 
         self.construct_model()
@@ -67,18 +72,15 @@ class FederatedLearningOnChestMNIST(Experiment):
 
         # 将随机参数位置分配给每个客户端
         self.random_positions = construct_random_wm_position(self.model, self.client_num)
-        self.trainer = TrainerPrivate(self.model, self.device, self.dp, self.sigma, self.random_positions)
+        self.trainer = TrainerPrivate(self.model, self.device, self.dp, self.sigma, self.random_positions, self.args)
         self.tester = TesterPrivate(self.model, self.device)
 
     def construct_model(self):
         if self.model_name == 'resnet':
             model = resnet18(num_classes=self.num_classes, in_channels=self.in_channels, input_size=28)
-            logging.info('Using ResNet-18 model')
         else:
             model = AlexNet(self.in_channels, self.num_classes)
-            logging.info('Using AlexNet model')
         self.model = model.to(self.device)
-        logging.info(f'Model created with {self.in_channels} input channels and {self.num_classes} output classes')
 
     def training(self):
         start = time.time()
@@ -96,9 +98,10 @@ class FederatedLearningOnChestMNIST(Experiment):
 
         idxs_users = []
 
-        # Early Stopping 配置
-        patience = 10
+        # Early Stopping 配置 - 基于准确率
+        patience = self.args.patience  # 从参数中获取耐心值
         early_stop_counter = 0
+        best_val_acc = -np.inf
         best_val_auc = -np.inf
 
         for epoch in range(self.epochs): # 均匀采样，frac 默认为 1，即每轮中全体客户端参与训练
@@ -118,17 +121,20 @@ class FederatedLearningOnChestMNIST(Experiment):
                 local_ws.append(copy.deepcopy(local_w))
                 local_losses.append(local_loss)
 
-            # 学习率调度（在第50和75轮时衰减0.1倍）
-            if (epoch + 1) in [50, 75]:
-                self.lr *= 0.1
-                logging.info(f'LR decayed at epoch {epoch + 1}. New lr: {self.lr}')
+            # 学习率调度 - MultiStepLR (在50%和75%epoch时衰减)
+            milestones = [int(self.epochs * 0.5), int(self.epochs * 0.75)]
+            if (epoch + 1) in milestones:
+                self.lr *= 0.1  # 使用MedMNIST2D的gamma=0.1
+                logging.info(f'LR decayed at epoch {epoch + 1} (milestone: {milestones}). New lr: {self.lr}')
 
+            # 计算参与训练的客户端的权重（相对于总数据集）
             client_weights = []
-            for i in range(self.client_num):
-                client_weight = len(DatasetSplit(self.train_set, self.dict_users[i])) / len(self.train_set)
+            for idx in idxs_users:
+                client_weight = len(DatasetSplit(self.train_set, self.dict_users[idx])) / len(self.train_set)
                 client_weights.append(client_weight)
 
-            self._fed_avg(local_ws, client_weights)
+            # 更新全局模型权重
+            self._fed_avg(local_ws, client_weights, idxs_users)
             self.model.load_state_dict(self.w_t)
 
             if (epoch + 1) == self.epochs or (epoch + 1) % 1 == 0:
@@ -142,10 +148,22 @@ class FederatedLearningOnChestMNIST(Experiment):
                 self.logs['val_loss'].append(loss_val_mean)
                 self.logs['local_loss'].append(np.mean(local_losses))
 
-                if self.logs['best_test_acc'] < acc_val_mean:
-                    self.logs['best_test_acc'] = acc_val_mean
-                    self.logs['best_test_loss'] = loss_val_mean
+                # 更新历史最高值跟踪
+                if self.logs['highest_acc_ever'] < acc_val_mean:
+                    self.logs['highest_acc_ever'] = acc_val_mean
+                    self.logs['auc_when_highest_acc'] = auc_val
+                    
+                if self.logs['highest_auc_ever'] < auc_val:
+                    self.logs['highest_auc_ever'] = auc_val
+                    self.logs['acc_when_highest_auc'] = acc_val_mean
+
+                # 模型选择标准：以验证集AUC为准，只有AUC提升才保存模型
+                if self.logs['best_model_auc'] < auc_val:
+                    self.logs['best_model_acc'] = acc_val_mean
+                    self.logs['best_model_loss'] = loss_val_mean
+                    self.logs['best_model_auc'] = auc_val
                     self.logs['best_model'] = [copy.deepcopy(self.model.state_dict())]
+                    logging.info(f'New best model saved! AUC improved to {auc_val:.4f}')
 
                 if self.logs['best_train_acc'] < acc_train_mean:
                     self.logs['best_train_acc'] = acc_train_mean
@@ -154,8 +172,12 @@ class FederatedLearningOnChestMNIST(Experiment):
                 logging.info(
                     "Train Loss {:.4f} --- Val Loss {:.4f}"
                     .format(loss_train_mean, loss_val_mean))
-                logging.info("Train acc {:.4f} (AUC {:.4f}) --- Val acc {:.4f} (AUC {:.4f}) --Best acc {:.4f}"
-                             .format(acc_train_mean, auc_train, acc_val_mean, auc_val, self.logs['best_test_acc']))
+                logging.info("Train: acc {:.4f} (AUC {:.4f}) | Val: acc {:.4f} (AUC {:.4f}) | Highest ACC: {:.4f} | Highest AUC: {:.4f}"
+                             .format(acc_train_mean, auc_train, acc_val_mean, auc_val,
+                                     self.logs['highest_acc_ever'], self.logs['highest_auc_ever']))
+
+                # 添加调试信息：检查模型预测分布
+                self._debug_model_predictions(val_ldr, epoch + 1)
 
                 # Early Stopping：基于验证AUC
                 if auc_val > best_val_auc:
@@ -168,23 +190,115 @@ class FederatedLearningOnChestMNIST(Experiment):
                         break
 
         logging.info('-------------------------------Result--------------------------------------')
-        logging.info('Test loss: {:.4f} --- Test acc: {:.4f}'.format(self.logs['best_test_loss'],
-                                                                     self.logs['best_test_acc']))
+        logging.info('Test loss: {:.4f} --- Test acc: {:.4f} --- Test auc: {:.4f}'.format(self.logs['best_model_loss'],
+                                                                                          self.logs['best_model_acc'],
+                                                                                          self.logs['best_model_auc']))
+        logging.info('历史最高统计:')
+        logging.info('  历史最高准确率: {:.4f} (对应AUC: {:.4f})'.format(self.logs['highest_acc_ever'], self.logs['auc_when_highest_acc']))
+        logging.info('  历史最高AUC: {:.4f} (对应准确率: {:.4f})'.format(self.logs['highest_auc_ever'], self.logs['acc_when_highest_auc']))
         end = time.time()
         logging.info('Time: {:.1f} min'.format((end - start) / 60))
         logging.info('-------------------------------Finish--------------------------------------')
 
-        return self.logs, self.logs['best_test_acc']
+        return self.logs, self.logs['best_model_auc']
 
-    def _fed_avg(self, local_ws, client_weights):
+    def _debug_model_predictions(self, dataloader, epoch):
+        """调试模型预测分布"""
+        self.model.eval()
+        with torch.no_grad():
+            all_preds = []
+            all_targets = []
+            
+            for data, target in dataloader:
+                data = data.to(self.device)
+                target = target.to(self.device)
+                
+                pred = self.model(data)
+                pred_prob = torch.sigmoid(pred)
+                pred_binary = pred_prob > 0.5
+                
+                all_preds.append(pred_binary.cpu())
+                all_targets.append(target.cpu())
+            
+            # 合并所有预测
+            all_preds = torch.cat(all_preds, dim=0)
+            all_targets = torch.cat(all_targets, dim=0)
+            
+            # 统计预测分布
+            pred_normal = torch.all(all_preds == 0, dim=1).sum().item()
+            pred_pathological = all_preds.shape[0] - pred_normal
+            
+            # 统计真实分布
+            true_normal = torch.all(all_targets == 0, dim=1).sum().item()
+            true_pathological = all_targets.shape[0] - true_normal
+            
+            # 计算各类别的预测准确率
+            label_acc = (all_preds == all_targets).float().mean()
+            sample_acc = torch.all(all_preds == all_targets, dim=1).float().mean()
+            
+            logging.info(f"Epoch {epoch} 调试信息:")
+            logging.info(f"  真实分布: 正常{true_normal}个 ({true_normal/len(all_targets)*100:.1f}%), 病理{true_pathological}个 ({true_pathological/len(all_targets)*100:.1f}%)")
+            logging.info(f"  预测分布: 正常{pred_normal}个 ({pred_normal/len(all_preds)*100:.1f}%), 病理{pred_pathological}个 ({pred_pathological/len(all_preds)*100:.1f}%)")
+            logging.info(f"  标签级准确率: {label_acc*100:.2f}%, 样本级准确率: {sample_acc*100:.2f}%")
+            
+            # 检查是否总是预测正常
+            if (epoch % 10 == 0) & (pred_normal / len(all_preds) > 0.95):
+                logging.warning(f"  警告: 模型倾向于总是预测正常 ({pred_normal/len(all_preds)*100:.1f}%)！")
+
+    def _fed_avg(self, local_ws, client_weights, idxs_users):
+        """联邦平均算法，正确实现FedAvg"""
+        # 计算参与训练的客户端权重总和
+        total_weight = sum(client_weights)
+        
+        # 归一化权重，确保权重和为1
+        normalized_weights = [w / total_weight for w in client_weights]
+        
+        # 验证权重和是否为1
+        weight_sum = sum(normalized_weights)
+        if abs(weight_sum - 1.0) > 1e-6:
+            logging.warning(f"Weight sum is {weight_sum:.6f}, not 1.0. Normalizing...")
+            normalized_weights = [w / weight_sum for w in normalized_weights]
+        
+        # 初始化平均权重
         w_avg = copy.deepcopy(local_ws[0])
         for k in w_avg.keys():
-            w_avg[k] = w_avg[k] * client_weights[0]
+            w_avg[k] = w_avg[k] * normalized_weights[0]
 
-            for i in range(1, len(local_ws)):
-                w_avg[k] += local_ws[i][k] * client_weights[i]
+        # 累加其他客户端的权重
+        for i in range(1, len(local_ws)):
+            for k in w_avg.keys():
+                w_avg[k] += local_ws[i][k] * normalized_weights[i]
 
+        # 更新全局模型权重
+        for k in w_avg.keys():
             self.w_t[k] = w_avg[k]
+            
+        # 记录详细的聚合信息
+        # logging.info(f"FedAvg: {len(local_ws)} clients, weights={[f'{w:.4f}' for w in normalized_weights]}")
+        # logging.info(f"Participating clients: {idxs_users}")
+        
+        # 验证聚合算法的正确性
+        self._verify_fedavg_correctness(local_ws, normalized_weights)
+
+    def _verify_fedavg_correctness(self, local_ws, normalized_weights):
+        """验证联邦平均算法的正确性"""
+        # 检查权重和是否为1
+        weight_sum = sum(normalized_weights)
+        if abs(weight_sum - 1.0) > 1e-6:
+            logging.error(f"FedAvg verification failed: weight sum = {weight_sum:.6f}")
+            return False
+        
+        # 检查参数维度一致性
+        for i, local_w in enumerate(local_ws):
+            for key in local_w.keys():
+                if key not in self.w_t:
+                    logging.error(f"FedAvg verification failed: key {key} missing in global model")
+                    return False
+                if local_w[key].shape != self.w_t[key].shape:
+                    logging.error(f"FedAvg verification failed: shape mismatch for {key}")
+                    return False
+        
+        return True
 
 def main(args):
     logs = {'net_info': None,
@@ -207,9 +321,9 @@ def main(args):
             }
             }
     fl = FederatedLearningOnChestMNIST(args)
-    logg, test_acc = fl.training()
+    logg, test_auc = fl.training()
     logs['net_info'] = logg
-    logs['test_acc'] = {'value': test_acc}
+    logs['test_auc'] = {'value': test_auc}
     logs['bp_local'] = {'value': True if args.bp_interval == 0 else False}
 
     save_dir = './save/'
@@ -225,7 +339,7 @@ def main(args):
                                                                  'fra_{:.4f}_acc_{:.4f}.pkl'.format(
                    formatted_now, args.dp, args.sigma, args.iid, args.num_sign, args.weight_type, args.loss_type, args.num_bit,
                    args.loss_alpha, args.num_back, args.backdoor_indis, args.num_trigger, args.epochs, args.local_ep,
-                   args.client_num, args.frac, test_acc
+                   args.client_num, args.frac, test_auc
                ))
 
     return

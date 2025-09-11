@@ -107,17 +107,12 @@ def get_data(dataset_name, data_root, iid, client_num):
         if not os.path.exists(dataset_path):
             raise FileNotFoundError(f"ChestMNIST dataset file not found: {dataset_path}")
         
-        print(f"使用ChestMNIST数据集文件: {dataset_name}")
-        
         # ChestMNIST参数
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        normalize = transforms.Normalize(mean=[0.5], std=[0.5])
         num_classes = 14  # 多标签分类，14个病理标签
-        print("使用ChestMNIST多标签分类设置（14个病理标签）")
         
         transform_train = transforms.Compose([
             transforms.RandomHorizontalFlip(),
-            transforms.RandomRotation(10),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2),
             transforms.ToTensor(),
             normalize,
         ])
@@ -129,8 +124,7 @@ def get_data(dataset_name, data_root, iid, client_num):
         train_set = LocalChestMNISTDataset(dataset_path, split='train', transform=transform_train)
         test_set = LocalChestMNISTDataset(dataset_path, split='test', transform=transform_test)
         
-        print(f"ChestMNIST数据集 - 训练集大小: {len(train_set)}, 测试集大小: {len(test_set)}")
-        print(f"类别数: {num_classes}")
+        print(f"ChestMNIST dataset - Training set size: {len(train_set)}, Test set size: {len(test_set)}")
     else:
         raise ValueError(f"Unsupported dataset: {dataset_name}")
 
@@ -150,17 +144,15 @@ def get_data_no_fl(dataset_name, data_root, dataset_file=None):
         if not os.path.exists(dataset_path):
             raise FileNotFoundError(f"ChestMNIST dataset file not found: {dataset_path}")
         
-        print(f"使用ChestMNIST数据集文件: {dataset_name}")
+        print(f"Using ChestMNIST dataset file: {dataset_name}")
         
         # ChestMNIST参数
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        normalize = transforms.Normalize(mean=[0.5], std=[0.5])
         num_classes = 14  # 多标签分类，14个病理标签
-        print("使用ChestMNIST多标签分类设置（14个病理标签）")
+        print("Using ChestMNIST multi-label classification setup (14 pathology labels)")
         
         transform_train = transforms.Compose([
             transforms.RandomHorizontalFlip(),
-            transforms.RandomRotation(10),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2),
             transforms.ToTensor(),
             normalize,
         ])
@@ -172,8 +164,7 @@ def get_data_no_fl(dataset_name, data_root, dataset_file=None):
         train_set = LocalChestMNISTDataset(dataset_path, split='train', transform=transform_train)
         test_set = LocalChestMNISTDataset(dataset_path, split='test', transform=transform_test)
         
-        print(f"ChestMNIST数据集 - 训练集大小: {len(train_set)}, 测试集大小: {len(test_set)}")
-        print(f"类别数: {num_classes}")
+        print(f"ChestMNIST dataset - Training set size: {len(train_set)}, Test set size: {len(test_set)}")
     else:
         raise ValueError(f"Unsupported dataset: {dataset_name}")
 
@@ -186,7 +177,7 @@ def construct_random_wm_position(model, client_num):
     if encoder_total_params == 0:
         raise ValueError("编码器参数数量为 0，请检查编码器模型是否正确。")
 
-    print(f"编码器总参数数量（作为水印的大小）: {encoder_total_params}")
+    print(f"Encoder total parameter count (as watermark size): {encoder_total_params}")
 
     # 获取主任务模型所有参数扁平索引
     param_indices = []
