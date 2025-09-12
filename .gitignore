@@ -123,6 +123,9 @@ test/
 # 官方示例代码
 MedMNIST2D/
 
+# 实验脚本
+experiments/
+
 # 临时文件
 *.tmp
 *.temp
