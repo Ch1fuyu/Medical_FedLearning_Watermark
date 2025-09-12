@@ -181,8 +181,6 @@ class TrainerPrivate(object):
     def local_update(self, dataloader, local_ep, lr, client_id):
         # 使用 Adam 优化器，移除weight_decay以对齐官方策略
         self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
-        
-        # 本地训练不使用学习率调度，使用全局调度
 
         self.model.to(self.device)
         self.model.train()
@@ -244,16 +242,16 @@ class TrainerPrivate(object):
                 print(f"Client {client_id} - Epoch {epoch+1}/{local_ep}: Loss={loss_meter:.4f}, Acc={acc_meter:.4f}, LR={lr:.6f}")
 
             # 将整个参数空间展开成一维张量
-            # all_params = torch.cat([param.view(-1) for param in self.model.parameters()])
-            # # 在每轮训练结束后，将指定位置的参数设置为 0.5
-            # for _, param_idx in position_dict:
-            #     all_params[param_idx] = torch.tensor(0.5, device=self.device)
+            all_params = torch.cat([param.view(-1) for param in self.model.parameters()])
+            # 在每轮训练结束后，将指定位置的参数设置为 0.5
+            for _, param_idx in position_dict:
+                all_params[param_idx] = torch.tensor(0.5, device=self.device)
 
             # # 将修改后的一维张量重新赋值给模型参数
-            # start_idx = 0
-            # for param in self.model.parameters():
-            #     param.data = all_params[start_idx:start_idx + param.numel()].view(param.size())
-            #     start_idx += param.numel()
+            start_idx = 0
+            for param in self.model.parameters():
+                param.data = all_params[start_idx:start_idx + param.numel()].view(param.size())
+                start_idx += param.numel()
 
         # 如果启用差分隐私（DP），为每个参数添加噪声
         if self.dp:

@@ -32,7 +32,7 @@ def parser_args():
     parser.add_argument('--gamma', type=float, default=0.99, help='exponential weight decay (unused)')
     
     # ========================= 训练控制参数 ========================
-    parser.add_argument('--patience', type=int, default=20, help='early stopping patience')
+    parser.add_argument('--patience', type=int, default=10, help='early stopping patience')
     parser.add_argument('--log_interval', default=1, type=int, help='evaluation interval')
     parser.add_argument('--save-interval', type=int, default=0, help='model save interval')
     
