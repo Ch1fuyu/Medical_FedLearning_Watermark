@@ -17,6 +17,7 @@ from utils.args import parser_args
 from utils.base import Experiment
 from utils.dataset import get_data, DatasetSplit, construct_random_wm_position
 from utils.trainer_private import TrainerPrivate, TesterPrivate
+import pandas as pd
 
 set_seed()
 
@@ -104,6 +105,10 @@ class FederatedLearningOnChestMNIST(Experiment):
         best_val_acc = -np.inf
         best_val_auc = -np.inf
 
+        # 统计记录：轮次，学习率，训练损失，验证损失，训练准确率，训练AUC，验证准确率，验证AUC，
+        # 最高验证准确率，最高验证AUC，标签级准确率，样本级准确率
+        stats_rows = []
+
         for epoch in range(self.epochs): # 均匀采样，frac 默认为 1，即每轮中全体客户端参与训练
             if self.sampling_type == 'uniform':
                 self.m = max(int(self.frac * self.client_num), 1)
@@ -141,39 +146,40 @@ class FederatedLearningOnChestMNIST(Experiment):
                 train_metrics = self.trainer.test(train_ldr)
                 val_metrics = self.trainer.test(val_ldr)
 
-                loss_train_mean, acc_train_mean, auc_train = train_metrics
-                loss_val_mean, acc_val_mean, auc_val = val_metrics
+                # (loss, acc_label, auc, acc_sample)
+                loss_train_mean, acc_train_label_mean, auc_train, acc_train_sample_mean = train_metrics
+                loss_val_mean, acc_val_label_mean, auc_val, acc_val_sample_mean = val_metrics
 
-                self.logs['val_acc'].append(acc_val_mean)
+                self.logs['val_acc'].append(acc_val_label_mean)
                 self.logs['val_loss'].append(loss_val_mean)
                 self.logs['local_loss'].append(np.mean(local_losses))
 
                 # 更新历史最高值跟踪
-                if self.logs['highest_acc_ever'] < acc_val_mean:
-                    self.logs['highest_acc_ever'] = acc_val_mean
+                if self.logs['highest_acc_ever'] < acc_val_label_mean:
+                    self.logs['highest_acc_ever'] = acc_val_label_mean
                     self.logs['auc_when_highest_acc'] = auc_val
                     
                 if self.logs['highest_auc_ever'] < auc_val:
                     self.logs['highest_auc_ever'] = auc_val
-                    self.logs['acc_when_highest_auc'] = acc_val_mean
+                    self.logs['acc_when_highest_auc'] = acc_val_label_mean
 
                 # 模型选择标准：以验证集AUC为准，只有AUC提升才保存模型
                 if self.logs['best_model_auc'] < auc_val:
-                    self.logs['best_model_acc'] = acc_val_mean
+                    self.logs['best_model_acc'] = acc_val_label_mean
                     self.logs['best_model_loss'] = loss_val_mean
                     self.logs['best_model_auc'] = auc_val
                     self.logs['best_model'] = [copy.deepcopy(self.model.state_dict())]
                     logging.info(f'New best model saved! AUC improved to {auc_val:.4f}')
 
-                if self.logs['best_train_acc'] < acc_train_mean:
-                    self.logs['best_train_acc'] = acc_train_mean
+                if self.logs['best_train_acc'] < acc_train_label_mean:
+                    self.logs['best_train_acc'] = acc_train_label_mean
                     self.logs['best_train_loss'] = loss_train_mean
 
                 logging.info(
                     "Train Loss {:.4f} --- Val Loss {:.4f}"
                     .format(loss_train_mean, loss_val_mean))
-                logging.info("Train: acc {:.4f} (AUC {:.4f}) | Val: acc {:.4f} (AUC {:.4f}) | Highest ACC: {:.4f} | Highest AUC: {:.4f}"
-                             .format(acc_train_mean, auc_train, acc_val_mean, auc_val,
+                logging.info("Train: acc(label) {:.4f}, acc(sample) {:.4f} (AUC {:.4f}) | Val: acc(label) {:.4f}, acc(sample) {:.4f} (AUC {:.4f}) | Highest ACC: {:.4f} | Highest AUC: {:.4f}"
+                             .format(acc_train_label_mean, acc_train_sample_mean, auc_train, acc_val_label_mean, acc_val_sample_mean, auc_val,
                                      self.logs['highest_acc_ever'], self.logs['highest_auc_ever']))
 
                 # 添加调试信息：检查模型预测分布
@@ -189,6 +195,22 @@ class FederatedLearningOnChestMNIST(Experiment):
                         logging.info(f'Early stopping triggered at epoch {epoch + 1}. Best Val AUC: {best_val_auc:.4f}')
                         break
 
+                # 记录本轮统计数据
+                stats_rows.append({
+                    'round': epoch + 1,
+                    'lr': self.lr,
+                    'train_loss': float(loss_train_mean),
+                    'val_loss': float(loss_val_mean),
+                    'train_acc_label': float(acc_train_label_mean),
+                    'train_auc': float(auc_train),
+                    'val_acc_label': float(acc_val_label_mean),
+                    'val_auc': float(auc_val),
+                    'best_val_acc_so_far': float(self.logs['highest_acc_ever']),
+                    'best_val_auc_so_far': float(self.logs['highest_auc_ever']),
+                    'train_acc_sample': float(acc_train_sample_mean),
+                    'val_acc_sample': float(acc_val_sample_mean),
+                })
+
         logging.info('-------------------------------Result--------------------------------------')
         logging.info('Test loss: {:.4f} --- Test acc: {:.4f} --- Test auc: {:.4f}'.format(self.logs['best_model_loss'],
                                                                                           self.logs['best_model_acc'],
@@ -199,6 +221,18 @@ class FederatedLearningOnChestMNIST(Experiment):
         end = time.time()
         logging.info('Time: {:.1f} min'.format((end - start) / 60))
         logging.info('-------------------------------Finish--------------------------------------')
+
+        # 导出Excel
+        try:
+            os.makedirs('save/excel', exist_ok=True)
+            df = pd.DataFrame(stats_rows,
+                              columns=['round','lr','train_loss','val_loss','train_acc_label','train_auc','val_acc_label','val_auc','best_val_acc_so_far','best_val_auc_so_far','train_acc_sample','val_acc_sample'])
+            now = datetime.now().strftime('%Y%m%d%H%M%S')
+            excel_path = f'save/excel/metrics_{self.model_name}_{self.dataset}_{now}.xlsx'
+            df.to_excel(excel_path, index=False)
+            logging.info(f'Excel metrics saved to: {excel_path}')
+        except Exception as e:
+            logging.warning(f'Failed to export Excel metrics: {e}')
 
         return self.logs, self.logs['best_model_auc']
 

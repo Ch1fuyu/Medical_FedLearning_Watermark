@@ -16,11 +16,11 @@ def parser_args():
     parser.add_argument('--in_channels', type=int, default=3, help='input channels')
     
     # ========================= 联邦学习核心参数 ========================
-    parser.add_argument('--client_num', type=int, default=10, help="number of clients: K")
-    parser.add_argument('--frac', type=float, default=1, help="fraction of participating clients: C")
+    parser.add_argument('--epochs', type=int, default=100, help='total communication rounds')
     parser.add_argument('--local_ep', type=int, default=2, help="local epochs per client: E")
     parser.add_argument('--batch_size', type=int, default=128, help="local batch size: B")
-    parser.add_argument('--epochs', type=int, default=100, help='total communication rounds')
+    parser.add_argument('--client_num', type=int, default=10, help="number of clients: K")
+    parser.add_argument('--frac', type=float, default=1, help="fraction of participating clients: C")
     parser.add_argument('--sampling_type', type=str, default='uniform', help='client sampling strategy')
     parser.add_argument('--iid', action='store_true', default=True, help='IID data distribution')
     
@@ -42,6 +42,14 @@ def parser_args():
     parser.add_argument('--pos_weight_factor', type=float, default=1.0, 
                         help='factor to adjust positive class weights')
     
+    # ========================= 水印与密钥矩阵配置 ========================
+    parser.add_argument('--use_key_matrix', action='store_true', default=True,
+                        help='use saved key matrices to embed watermark after local training')
+    parser.add_argument('--key_matrix_dir', type=str, default='save/key_matrix',
+                        help='directory containing generated key matrices')
+    parser.add_argument('--encoder_path', type=str, default='save/autoencoder/encoder.pth',
+                        help='path to the trained autoencoder encoder weights')
+
     # ========================= 水印和IPR参数 (暂时关闭) ========================
     parser.add_argument('--wm_length', type=int, default=1000, help='watermark length (temporarily disabled)')
     parser.add_argument('--num_sign', type=int, default=1, help="number of signature users (temporarily disabled)")

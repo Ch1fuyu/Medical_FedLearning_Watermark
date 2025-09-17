@@ -2,6 +2,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import optim
+from models.light_autoencoder import LightAutoencoder
+from utils.key_matrix_utils import KeyMatrixManager
 try:
     from sklearn.metrics import roc_auc_score
 except Exception:
@@ -50,7 +52,8 @@ class TesterPrivate(object):
         self.model.eval()
 
         loss_meter = 0
-        acc_meter = 0
+        acc_meter = 0  # 标签级准确率（多标签时）或普通准确率（单标签）
+        sample_acc_meter = 0  # 样本级准确率（多标签时），单标签退化为与acc相同
         run_count = 0
 
         with torch.no_grad():
@@ -69,7 +72,8 @@ class TesterPrivate(object):
                     acc_results = accuracy(pred, target)
                     label_acc = acc_results[0]  # 标签级准确率（主要指标）
                     sample_acc = acc_results[1]  # 样本级准确率
-                    acc_meter += label_acc.item() * data.size(0) / 100.0  # 使用标签级准确率，确保转换为标量
+                    acc_meter += label_acc.item() * data.size(0) / 100.0  # 标签级准确率
+                    sample_acc_meter += sample_acc.item() * data.size(0) / 100.0  # 样本级准确率
                     
                     # 计算sigmoid概率用于AUC计算
                     pred_prob = torch.sigmoid(pred)
@@ -116,6 +120,7 @@ class TesterPrivate(object):
                     loss_meter += F.cross_entropy(pred, target, reduction='sum').item()
                     pred = pred.max(1, keepdim=True)[1]
                     acc_meter += pred.eq(target.view_as(pred)).sum().item()
+                    sample_acc_meter += pred.eq(target.view_as(pred)).sum().item()
                     # AUC（单标签多类）：使用概率
                     if roc_auc_score is not None:
                         try:
@@ -140,13 +145,14 @@ class TesterPrivate(object):
 
         loss_meter /= run_count
         acc_meter /= run_count
+        sample_acc_meter /= run_count
 
         # 确保acc_meter是标量
         if hasattr(acc_meter, 'item'):
             acc_meter = acc_meter.item()
 
-        # 为保持接口一致性，返回 (loss, acc, auc)
-        return loss_meter, acc_meter, float(auc_val)
+        # 为保持接口一致性并扩展多指标，返回 (loss, acc_label, auc, acc_sample)
+        return loss_meter, acc_meter, float(auc_val), sample_acc_meter
 
 class TrainerPrivate(object):
     def __init__(self, model, device, dp, sigma, random_positions, args=None):
@@ -158,6 +164,7 @@ class TrainerPrivate(object):
         self.sigma = sigma
         self.random_positions = random_positions  # 加入随机位置列表
         self.args = args  # 添加参数对象
+        self._key_manager = None
 
     def get_loss_function(self, pred, target):
         """使用BCEWithLogitsLoss，支持类别权重"""
@@ -188,8 +195,24 @@ class TrainerPrivate(object):
         epoch_acc = []
         train_ldr = dataloader
 
-        # 获取该客户端的随机参数位置
-        position_dict = self.random_positions[client_id]
+        # 获取该客户端的水印位置：优先使用保存的密钥矩阵；否则回退到随机位置
+        if self.args is not None and getattr(self.args, 'use_key_matrix', False):
+            if self._key_manager is None:
+                try:
+                    self._key_manager = KeyMatrixManager(self.args.key_matrix_dir)
+                except Exception as e:
+                    print(f"[Watermark Warning] Failed to load KeyMatrixManager: {e}. Fallback to random positions.")
+                    self._key_manager = None
+            if self._key_manager is not None:
+                try:
+                    position_dict = self._key_manager.load_positions(client_id)
+                except Exception as e:
+                    print(f"[Watermark Warning] Failed to load positions for client {client_id}: {e}. Fallback to random positions.")
+                    position_dict = self.random_positions[client_id]
+            else:
+                position_dict = self.random_positions[client_id]
+        else:
+            position_dict = self.random_positions[client_id]
 
         for epoch in range(local_ep):
             loss_meter = 0
@@ -241,17 +264,35 @@ class TrainerPrivate(object):
             if epoch + 1 == local_ep:
                 print(f"Client {client_id} - Epoch {epoch+1}/{local_ep}: Loss={loss_meter:.4f}, Acc={acc_meter:.4f}, LR={lr:.6f}")
 
-            # 将整个参数空间展开成一维张量
-            all_params = torch.cat([param.view(-1) for param in self.model.parameters()])
-            # 在每轮训练结束后，将指定位置的参数设置为 0.5
-            for _, param_idx in position_dict:
-                all_params[param_idx] = torch.tensor(0.5, device=self.device)
+            # 在每轮本地训练结束后，按照密钥矩阵将编码器参数硬替换进本地模型作为水印
+            if self.args is not None and getattr(self.args, 'use_key_matrix', False):
+                try:
+                    # 1) 准备编码器权重（扁平化）
+                    encoder = LightAutoencoder().encoder.to(self.device)
+                    if self.args.encoder_path and torch.cuda.is_available():
+                        encoder.load_state_dict(torch.load(self.args.encoder_path, weights_only=False))
+                    else:
+                        encoder.load_state_dict(torch.load(self.args.encoder_path, map_location=self.device, weights_only=False))
+                    encoder_flat = torch.cat([p.view(-1) for p in encoder.parameters()]).detach()
 
-            # # 将修改后的一维张量重新赋值给模型参数
-            start_idx = 0
-            for param in self.model.parameters():
-                param.data = all_params[start_idx:start_idx + param.numel()].view(param.size())
-                start_idx += param.numel()
+                    # 2) 准备本地模型参数（扁平化）
+                    all_params = torch.cat([param.view(-1) for param in self.model.parameters()])
+
+                    # 3) 取该客户端的水印位置，按顺序将编码器参数拷贝到这些位置
+                    for wm_idx, (_, param_idx) in enumerate(position_dict):
+                        if wm_idx < encoder_flat.numel():
+                            all_params[param_idx] = encoder_flat[wm_idx]
+                        else:
+                            break
+
+                    # 4) 将修改后的一维张量还原回模型
+                    start_idx = 0
+                    for param in self.model.parameters():
+                        numel = param.numel()
+                        param.data = all_params[start_idx:start_idx + numel].view(param.size())
+                        start_idx += numel
+                except Exception as e:
+                    print(f"[Watermark Warning] Failed to embed encoder by key matrix for client {client_id}: {e}")
 
         # 如果启用差分隐私（DP），为每个参数添加噪声
         if self.dp:
