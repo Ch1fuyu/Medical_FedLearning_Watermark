@@ -55,6 +55,10 @@ class TesterPrivate(object):
         acc_meter = 0  # 标签级准确率（多标签时）或普通准确率（单标签）
         sample_acc_meter = 0  # 样本级准确率（多标签时），单标签退化为与acc相同
         run_count = 0
+        
+        # 用于AUC计算的累积数据
+        all_y_true = []
+        all_y_score = []
 
         with torch.no_grad():
             for load in dataloader:
@@ -83,63 +87,19 @@ class TesterPrivate(object):
                         pred_normal = torch.all(pred_prob < 0.5, dim=1).sum().item()
                         print(f"First batch - Label-level accuracy: {label_acc:.4f}%, Sample-level accuracy: {sample_acc:.4f}%, Predicted normal samples: {pred_normal}/{data.size(0)}")
                     
-                    # AUC（宏平均）：需要sklearn
-                    if roc_auc_score is not None:
-                        try:
-                            y_true = target.detach().cpu().numpy()
-                            y_score = pred_prob.detach().cpu().numpy()
-                            
-                            # 检查每个类别是否有足够的正负样本
-                            valid_classes = []
-                            for i in range(y_true.shape[1]):
-                                if len(np.unique(y_true[:, i])) > 1:  # 确保有0和1两种标签
-                                    valid_classes.append(i)
-                            
-                            if len(valid_classes) > 0:
-                                # 只计算有效类别的AUC
-                                auc_scores = []
-                                for i in valid_classes:
-                                    try:
-                                        auc_i = roc_auc_score(y_true[:, i], y_score[:, i])
-                                        auc_scores.append(auc_i)
-                                    except Exception:
-                                        continue
-                                
-                                if len(auc_scores) > 0:
-                                    auc_val = np.mean(auc_scores)  # 宏平均
-                                else:
-                                    auc_val = 0.0
-                            else:
-                                auc_val = 0.0
-                        except Exception:
-                            auc_val = 0.0
-                    else:
-                        auc_val = 0.0
+                    # 累积AUC计算数据
+                    all_y_true.append(target.detach().cpu().numpy())
+                    all_y_score.append(pred_prob.detach().cpu().numpy())
                 else:
                     # 单标签分类：使用CrossEntropyLoss
                     loss_meter += F.cross_entropy(pred, target, reduction='sum').item()
                     pred = pred.max(1, keepdim=True)[1]
                     acc_meter += pred.eq(target.view_as(pred)).sum().item()
                     sample_acc_meter += pred.eq(target.view_as(pred)).sum().item()
-                    # AUC（单标签多类）：使用概率
-                    if roc_auc_score is not None:
-                        try:
-                            # 将logits转为softmax概率
-                            prob = F.softmax(self.model(data), dim=1)
-                            y_true = target.detach().cpu().numpy()
-                            y_score = prob.detach().cpu().numpy()
-                            
-                            # 检查是否有足够的类别
-                            unique_classes = np.unique(y_true)
-                            if len(unique_classes) > 1:
-                                # 对于多类，使用ovr宏平均
-                                auc_val = roc_auc_score(y_true, y_score, multi_class='ovr', average='macro')
-                            else:
-                                auc_val = 0.0
-                        except Exception:
-                            auc_val = 0.0
-                    else:
-                        auc_val = 0.0
+                    # 累积单标签分类的AUC计算数据
+                    prob = F.softmax(self.model(data), dim=1)
+                    all_y_true.append(target.detach().cpu().numpy())
+                    all_y_score.append(prob.detach().cpu().numpy())
                 
                 run_count += data.size(0)
 
@@ -150,6 +110,42 @@ class TesterPrivate(object):
         # 确保acc_meter是标量
         if hasattr(acc_meter, 'item'):
             acc_meter = acc_meter.item()
+
+        # 计算整体AUC
+        auc_val = 0.0
+        if len(all_y_true) > 0 and roc_auc_score is not None:
+            try:
+                # 合并所有batch的数据
+                y_true_all = np.concatenate(all_y_true, axis=0)
+                y_score_all = np.concatenate(all_y_score, axis=0)
+                
+                # 检查是否为多标签分类
+                if len(y_true_all.shape) == 2 and y_true_all.shape[1] == 14:
+                    # 多标签分类：宏平均AUC
+                    valid_classes = []
+                    for i in range(y_true_all.shape[1]):
+                        if len(np.unique(y_true_all[:, i])) > 1:  # 确保有0和1两种标签
+                            valid_classes.append(i)
+                    
+                    if len(valid_classes) > 0:
+                        auc_scores = []
+                        for i in valid_classes:
+                            try:
+                                auc_i = roc_auc_score(y_true_all[:, i], y_score_all[:, i])
+                                auc_scores.append(auc_i)
+                            except Exception:
+                                continue
+                        
+                        if len(auc_scores) > 0:
+                            auc_val = np.mean(auc_scores)  # 宏平均
+                else:
+                    # 单标签分类：多类AUC
+                    unique_classes = np.unique(y_true_all)
+                    if len(unique_classes) > 1:
+                        auc_val = roc_auc_score(y_true_all, y_score_all, multi_class='ovr', average='macro')
+            except Exception as e:
+                print(f"AUC计算错误: {e}")
+                auc_val = 0.0
 
         # 为保持接口一致性并扩展多指标，返回 (loss, acc_label, auc, acc_sample)
         return loss_meter, acc_meter, float(auc_val), sample_acc_meter
@@ -165,6 +161,7 @@ class TrainerPrivate(object):
         self.random_positions = random_positions  # 加入随机位置列表
         self.args = args  # 添加参数对象
         self._key_manager = None
+        self.position_dict = random_positions  # 为了兼容性，添加这个属性
 
     def get_loss_function(self, pred, target):
         """使用BCEWithLogitsLoss，支持类别权重"""
@@ -186,168 +183,151 @@ class TrainerPrivate(object):
         return F.binary_cross_entropy_with_logits(pred, target.float(), pos_weight=pos_weights)
 
     def local_update(self, dataloader, local_ep, lr, client_id):
-        # 使用 Adam 优化器，移除weight_decay以对齐官方策略
-        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
-
-        self.model.to(self.device)
         self.model.train()
-        epoch_loss = []
-        epoch_acc = []
-        train_ldr = dataloader
+        self.optimizer = torch.optim.SGD(self.model.parameters(), lr=lr, momentum=0.9)
 
-        # 获取该客户端的水印位置：优先使用保存的密钥矩阵；否则回退到随机位置
-        if self.args is not None and getattr(self.args, 'use_key_matrix', False):
-            if self._key_manager is None:
-                try:
-                    self._key_manager = KeyMatrixManager(self.args.key_matrix_dir)
-                except Exception as e:
-                    print(f"[Watermark Warning] Failed to load KeyMatrixManager: {e}. Fallback to random positions.")
-                    self._key_manager = None
-            if self._key_manager is not None:
-                try:
-                    position_dict = self._key_manager.load_positions(client_id)
-                except Exception as e:
-                    print(f"[Watermark Warning] Failed to load positions for client {client_id}: {e}. Fallback to random positions.")
-                    position_dict = self.random_positions[client_id]
-            else:
-                position_dict = self.random_positions[client_id]
-        else:
-            position_dict = self.random_positions[client_id]
+        epoch_loss, epoch_acc = [], []
 
         for epoch in range(local_ep):
-            loss_meter = 0
-            acc_meter = 0
-            batch_count = 0
-
-            for batch_idx, (x, y) in enumerate(train_ldr):
-                x, y = x.to(self.device), y.to(self.device)
-                self.optimizer.zero_grad()
-
-                loss = torch.tensor(0.).to(self.device)
-
-                # 获取模型预测结果
-                pred = self.model(x)
-                
-                # 检查是否为多标签分类
-                if len(y.shape) == 2 and y.shape[1] == 14:
-                    # 多标签分类：根据参数选择损失函数
-                    loss += self.get_loss_function(pred, y)
-                else:
-                    # 单标签分类：使用CrossEntropyLoss
-                    loss += F.cross_entropy(pred, y)
-                
-                acc_results = accuracy(pred, y)
-                if len(y.shape) == 2 and y.shape[1] == 14:
-                    # 多标签分类：使用标签级准确率
-                    acc_meter += acc_results[0].item()  # 标签级准确率
-                else:
-                    # 单标签分类：使用原来的准确率
-                    acc_meter += acc_results[0].item()
-
-                loss.backward()
-                
-                # 梯度裁剪，防止梯度爆炸
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                
-                self.optimizer.step()
-
-                loss_meter += loss.item()
-                batch_count += 1
-            
-            loss_meter /= batch_count
-            acc_meter /= batch_count
-
-            epoch_loss.append(loss_meter)
-            epoch_acc.append(acc_meter)
-            
-            # 输出客户端训练进度
-            if epoch + 1 == local_ep:
-                print(f"Client {client_id} - Epoch {epoch+1}/{local_ep}: Loss={loss_meter:.4f}, Acc={acc_meter:.4f}, LR={lr:.6f}")
-
-            # 在每轮本地训练结束后，按照密钥矩阵将编码器参数硬替换进本地模型作为水印
-            if self.args is not None and getattr(self.args, 'use_key_matrix', False):
-                try:
-                    # 1) 准备编码器权重（扁平化）
-                    encoder = LightAutoencoder().encoder.to(self.device)
-                    if self.args.encoder_path and torch.cuda.is_available():
-                        encoder.load_state_dict(torch.load(self.args.encoder_path, weights_only=False))
-                    else:
-                        encoder.load_state_dict(torch.load(self.args.encoder_path, map_location=self.device, weights_only=False))
-                    encoder_flat = torch.cat([p.view(-1) for p in encoder.parameters()]).detach()
-
-                    # 2) 准备本地模型参数（扁平化）
-                    all_params = torch.cat([param.view(-1) for param in self.model.parameters()])
-
-                    # 3) 取该客户端的水印位置，按顺序将编码器参数拷贝到这些位置
-                    for wm_idx, (_, param_idx) in enumerate(position_dict):
-                        if wm_idx < encoder_flat.numel():
-                            all_params[param_idx] = encoder_flat[wm_idx]
-                        else:
-                            break
-
-                    # 4) 将修改后的一维张量还原回模型
-                    start_idx = 0
-                    for param in self.model.parameters():
-                        numel = param.numel()
-                        param.data = all_params[start_idx:start_idx + numel].view(param.size())
-                        start_idx += numel
-                except Exception as e:
-                    print(f"[Watermark Warning] Failed to embed encoder by key matrix for client {client_id}: {e}")
-
-        # 如果启用差分隐私（DP），为每个参数添加噪声
-        if self.dp:
-            for param in self.model.parameters():
-                param.data = param.data + torch.normal(torch.zeros(param.size()), self.sigma).to(self.device)
-
-        return self.model.state_dict(), np.mean(epoch_loss)
-
-    def local_update_with_no_fl(self, dataloader, local_ep, lr):
-        self.optimizer = optim.SGD(self.model.parameters(),
-                                   lr,
-                                   momentum=0.9,
-                                   weight_decay=0.0005)
-
-        self.model.to(self.device)
-        self.model.train()
-
-        for epoch in range(local_ep):
-            loss_meter = 0
-            acc_meter = 0
+            loss_meter = 0.0
+            acc_meter = 0.0
+            run_count = 0  # 统计总样本数
 
             for batch_idx, (x, y) in enumerate(dataloader):
                 x, y = x.to(self.device), y.to(self.device)
                 self.optimizer.zero_grad()
 
+                # 前向传播
                 pred = self.model(x)
-                
-                # 检查是否为多标签分类
-                if len(y.shape) == 2 and y.shape[1] == 14:
-                    # 多标签分类：根据参数选择损失函数
-                    loss = self.get_loss_function(pred, y)
-                else:
-                    # 单标签分类：使用CrossEntropyLoss
-                    loss = F.cross_entropy(pred, y)
-                
-                acc_results = accuracy(pred, y)
-                if len(y.shape) == 2 and y.shape[1] == 14:
-                    # 多标签分类：使用标签级准确率
-                    acc_meter += acc_results[0].item()  # 标签级准确率
-                else:
-                    # 单标签分类：使用原来的准确率
-                    acc_meter += acc_results[0].item()
 
+                # 计算损失
+                if len(y.shape) == 2 and y.shape[1] == 14:  # 多标签
+                    loss = self.get_loss_function(pred, y)
+                else:  # 单标签
+                    loss = F.cross_entropy(pred, y)
+
+                # 计算准确率（按样本加权）
+                acc_results = accuracy(pred, y)
+                acc_meter += acc_results[0].item() * x.size(0) / 100.0
+
+                # 反向传播
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
 
-                loss_meter += loss.item()
+                # 记录损失（按样本加权）
+                loss_meter += loss.item() * x.size(0)
+                run_count += x.size(0)
 
-            loss_meter /= len(dataloader)
-            acc_meter /= len(dataloader)
+            # 样本平均
+            loss_meter /= run_count
+            acc_meter /= run_count
+
+            epoch_loss.append(loss_meter)
+            epoch_acc.append(acc_meter)
+
+            if epoch + 1 == local_ep:
+                print(f"Client {client_id} - Epoch {epoch+1}/{local_ep}: "
+                      f"Loss={loss_meter:.4f}, Acc={acc_meter:.4f}, LR={lr:.6f}")
+
+        # 本地训练结束后，进行水印嵌入
+        if self.args is not None and getattr(self.args, 'use_key_matrix', False):
+            try:
+                # 获取该客户端的水印位置：优先使用保存的密钥矩阵；否则回退到随机位置
+                if self._key_manager is None:
+                    try:
+                        self._key_manager = KeyMatrixManager(self.args.key_matrix_dir)
+                    except Exception as e:
+                        print(f"[Watermark Warning] Failed to load KeyMatrixManager: {e}. Fallback to random positions.")
+                        self._key_manager = None
+                
+                if self._key_manager is not None:
+                    try:
+                        position_dict = self._key_manager.load_positions(client_id)
+                    except Exception as e:
+                        print(f"[Watermark Warning] Failed to load positions for client {client_id}: {e}. Fallback to random positions.")
+                        position_dict = self.random_positions[client_id]
+                else:
+                    position_dict = self.random_positions[client_id]
+
+                # 加载编码器
+                encoder = LightAutoencoder().encoder.to(self.device)
+                if self.args.encoder_path and torch.cuda.is_available():
+                    encoder.load_state_dict(torch.load(self.args.encoder_path, weights_only=False))
+                else:
+                    encoder.load_state_dict(torch.load(self.args.encoder_path, map_location=self.device, weights_only=False))
+
+                with torch.no_grad():
+                    all_params = torch.cat([param.view(-1) for param in self.model.parameters()])
+                    encoder_flat = torch.cat([param.view(-1) for param in encoder.parameters()])
+
+                    # 按顺序将编码器参数拷贝到水印位置
+                    for wm_idx, (_, param_idx) in enumerate(position_dict):
+                        if wm_idx < encoder_flat.numel() and param_idx < all_params.numel():
+                            all_params[param_idx] = encoder_flat[wm_idx]
+
+                    # 将修改后的参数还原回模型
+                    offset = 0
+                    for param in self.model.parameters():
+                        numel = param.numel()
+                        param.data.copy_(all_params[offset:offset + numel].view_as(param))
+                        offset += numel
+                        
+            except Exception as e:
+                print(f"[Watermark Warning] Failed to embed watermark for client {client_id}: {e}")
 
         # 如果启用差分隐私（DP），为每个参数添加噪声
         if self.dp:
             for param in self.model.parameters():
                 param.data = param.data + torch.normal(torch.zeros(param.size()), self.sigma).to(self.device)
+
+        return self.model.state_dict(), np.mean(epoch_loss), np.mean(epoch_acc)
+
+    def local_update_with_no_fl(self, dataloader, local_ep, lr):
+        self.model.train()
+        self.optimizer = torch.optim.SGD(self.model.parameters(), lr=lr, momentum=0.9)
+
+        epoch_loss, epoch_acc = [], []
+
+        for epoch in range(local_ep):
+            loss_meter = 0.0
+            acc_meter = 0.0
+            run_count = 0  # 统计总样本数
+
+            for batch_idx, (x, y) in enumerate(dataloader):
+                x, y = x.to(self.device), y.to(self.device)
+                self.optimizer.zero_grad()
+
+                # 前向传播
+                pred = self.model(x)
+
+                # 计算损失
+                if len(y.shape) == 2 and y.shape[1] == 14:  # 多标签
+                    loss = self.get_loss_function(pred, y)
+                else:  # 单标签
+                    loss = F.cross_entropy(pred, y)
+
+                # 计算准确率（按样本加权）
+                acc_results = accuracy(pred, y)
+                acc_meter += acc_results[0].item() * x.size(0) / 100.0
+
+                # 反向传播
+                loss.backward()
+                self.optimizer.step()
+
+                # 记录损失（按样本加权）
+                loss_meter += loss.item() * x.size(0)
+                run_count += x.size(0)
+
+            # 样本平均
+            loss_meter /= run_count
+            acc_meter /= run_count
+
+            epoch_loss.append(loss_meter)
+            epoch_acc.append(acc_meter)
+
+        return self.model.state_dict(), np.mean(epoch_loss), np.mean(epoch_acc)
+
 
     def test(self, dataloader):
         return self.tester.test(dataloader)

@@ -121,7 +121,7 @@ class FederatedLearningOnChestMNIST(Experiment):
                 self.model.load_state_dict(self.w_t)
 
                 # 传递客户端的ID给 TrainerPrivate
-                local_w, local_loss = self.trainer.local_update(local_train_loader[idx], self.local_ep, self.lr, idx)
+                local_w, local_loss, local_acc = self.trainer.local_update(local_train_loader[idx], self.local_ep, self.lr, idx)
 
                 local_ws.append(copy.deepcopy(local_w))
                 local_losses.append(local_loss)
@@ -280,7 +280,7 @@ class FederatedLearningOnChestMNIST(Experiment):
                 logging.warning(f"  警告: 模型倾向于总是预测正常 ({pred_normal/len(all_preds)*100:.1f}%)！")
 
     def _fed_avg(self, local_ws, client_weights, idxs_users):
-        """联邦平均算法，正确实现FedAvg"""
+        """联邦平均算法，FedAvg"""
         # 计算参与训练的客户端权重总和
         total_weight = sum(client_weights)
         
