@@ -105,8 +105,7 @@ class FederatedLearningOnChestMNIST(Experiment):
         best_val_acc = -np.inf
         best_val_auc = -np.inf
 
-        # 统计记录：轮次，学习率，训练损失，验证损失，训练准确率，训练AUC，验证准确率，验证AUC，
-        # 最高验证准确率，最高验证AUC，标签级准确率，样本级准确率
+        # 统计记录
         stats_rows = []
 
         for epoch in range(self.epochs): # 均匀采样，frac 默认为 1，即每轮中全体客户端参与训练
@@ -176,14 +175,12 @@ class FederatedLearningOnChestMNIST(Experiment):
                     self.logs['best_train_loss'] = loss_train_mean
 
                 logging.info(
-                    "Train Loss {:.4f} --- Val Loss {:.4f}"
-                    .format(loss_train_mean, loss_val_mean))
-                logging.info("Train: acc(label) {:.4f}, acc(sample) {:.4f} (AUC {:.4f}) | Val: acc(label) {:.4f}, acc(sample) {:.4f} (AUC {:.4f}) | Highest ACC: {:.4f} | Highest AUC: {:.4f}"
-                             .format(acc_train_label_mean, acc_train_sample_mean, auc_train, acc_val_label_mean, acc_val_sample_mean, auc_val,
-                                     self.logs['highest_acc_ever'], self.logs['highest_auc_ever']))
+                    f"Train Loss {loss_train_mean:.4f} --- Val Loss {loss_val_mean:.4f}")
+                logging.info(
+                    f"Train: acc(label) {acc_train_label_mean:.4f}, acc(sample) {acc_train_sample_mean:.4f} (AUC {auc_train:.4f}) | "
+                    f"Val: acc(label) {acc_val_label_mean:.4f}, acc(sample) {acc_val_sample_mean:.4f} (AUC {auc_val:.4f}) | "
+                    f"Highest ACC: {self.logs['highest_acc_ever']:.4f} | Highest AUC: {self.logs['highest_auc_ever']:.4f}")
 
-                # 添加调试信息：检查模型预测分布
-                self._debug_model_predictions(val_ldr, epoch + 1)
 
                 # Early Stopping：基于验证AUC
                 if auc_val > best_val_auc:
@@ -212,12 +209,13 @@ class FederatedLearningOnChestMNIST(Experiment):
                 })
 
         logging.info('-------------------------------Result--------------------------------------')
-        logging.info('Test loss: {:.4f} --- Test acc: {:.4f} --- Test auc: {:.4f}'.format(self.logs['best_model_loss'],
-                                                                                          self.logs['best_model_acc'],
-                                                                                          self.logs['best_model_auc']))
+        logging.info(
+            f'Test loss: {self.logs["best_model_loss"]:.4f} --- Test acc: {self.logs["best_model_acc"]:.4f} --- Test auc: {self.logs["best_model_auc"]:.4f}')
         logging.info('历史最高统计:')
-        logging.info('  历史最高准确率: {:.4f} (对应AUC: {:.4f})'.format(self.logs['highest_acc_ever'], self.logs['auc_when_highest_acc']))
-        logging.info('  历史最高AUC: {:.4f} (对应准确率: {:.4f})'.format(self.logs['highest_auc_ever'], self.logs['acc_when_highest_auc']))
+        logging.info(
+            f'  历史最高准确率: {self.logs["highest_acc_ever"]:.4f} (对应AUC: {self.logs["auc_when_highest_acc"]:.4f})')
+        logging.info(
+            f'  历史最高AUC: {self.logs["highest_auc_ever"]:.4f} (对应准确率: {self.logs["acc_when_highest_auc"]:.4f})')
         end = time.time()
         logging.info('Time: {:.1f} min'.format((end - start) / 60))
         logging.info('-------------------------------Finish--------------------------------------')
@@ -225,62 +223,22 @@ class FederatedLearningOnChestMNIST(Experiment):
         # 导出Excel
         try:
             os.makedirs('save/excel', exist_ok=True)
-            df = pd.DataFrame(stats_rows,
-                              columns=['round','lr','train_loss','val_loss','train_acc_label','train_auc','val_acc_label','val_auc','best_val_acc_so_far','best_val_auc_so_far','train_acc_sample','val_acc_sample'])
+            columns = ['round', 'lr', 'train_loss', 'val_loss', 'train_acc_label', 'train_auc', 
+                     'val_acc_label', 'val_auc', 'best_val_acc_so_far', 'best_val_auc_so_far', 
+                     'train_acc_sample', 'val_acc_sample']
+            df = pd.DataFrame(stats_rows, columns=columns)
             now = datetime.now().strftime('%Y%m%d%H%M%S')
             excel_path = f'save/excel/metrics_{self.model_name}_{self.dataset}_{now}.xlsx'
-            df.to_excel(excel_path, index=False)
+            df.to_excel(excel_path, index=False, engine='openpyxl')
             logging.info(f'Excel metrics saved to: {excel_path}')
         except Exception as e:
             logging.warning(f'Failed to export Excel metrics: {e}')
 
         return self.logs, self.logs['best_model_auc']
 
-    def _debug_model_predictions(self, dataloader, epoch):
-        """调试模型预测分布"""
-        self.model.eval()
-        with torch.no_grad():
-            all_preds = []
-            all_targets = []
-            
-            for data, target in dataloader:
-                data = data.to(self.device)
-                target = target.to(self.device)
-                
-                pred = self.model(data)
-                pred_prob = torch.sigmoid(pred)
-                pred_binary = pred_prob > 0.5
-                
-                all_preds.append(pred_binary.cpu())
-                all_targets.append(target.cpu())
-            
-            # 合并所有预测
-            all_preds = torch.cat(all_preds, dim=0)
-            all_targets = torch.cat(all_targets, dim=0)
-            
-            # 统计预测分布
-            pred_normal = torch.all(all_preds == 0, dim=1).sum().item()
-            pred_pathological = all_preds.shape[0] - pred_normal
-            
-            # 统计真实分布
-            true_normal = torch.all(all_targets == 0, dim=1).sum().item()
-            true_pathological = all_targets.shape[0] - true_normal
-            
-            # 计算各类别的预测准确率
-            label_acc = (all_preds == all_targets).float().mean()
-            sample_acc = torch.all(all_preds == all_targets, dim=1).float().mean()
-            
-            logging.info(f"Epoch {epoch} 调试信息:")
-            logging.info(f"  真实分布: 正常{true_normal}个 ({true_normal/len(all_targets)*100:.1f}%), 病理{true_pathological}个 ({true_pathological/len(all_targets)*100:.1f}%)")
-            logging.info(f"  预测分布: 正常{pred_normal}个 ({pred_normal/len(all_preds)*100:.1f}%), 病理{pred_pathological}个 ({pred_pathological/len(all_preds)*100:.1f}%)")
-            logging.info(f"  标签级准确率: {label_acc*100:.2f}%, 样本级准确率: {sample_acc*100:.2f}%")
-            
-            # 检查是否总是预测正常
-            if (epoch % 10 == 0) & (pred_normal / len(all_preds) > 0.95):
-                logging.warning(f"  警告: 模型倾向于总是预测正常 ({pred_normal/len(all_preds)*100:.1f}%)！")
 
     def _fed_avg(self, local_ws, client_weights, idxs_users):
-        """联邦平均算法，FedAvg"""
+        """联邦平均算法，FedAvg with exclusive watermark aggregation"""
         # 计算参与训练的客户端权重总和
         total_weight = sum(client_weights)
         
@@ -303,36 +261,57 @@ class FederatedLearningOnChestMNIST(Experiment):
             for k in w_avg.keys():
                 w_avg[k] += local_ws[i][k] * normalized_weights[i]
 
+        # 独占式水印聚合：每个客户端的水印位置只使用该客户端的参数
+        self._exclusive_watermark_aggregation(local_ws, idxs_users, w_avg)
+
         # 更新全局模型权重
         for k in w_avg.keys():
             self.w_t[k] = w_avg[k]
-            
-        # 记录详细的聚合信息
-        # logging.info(f"FedAvg: {len(local_ws)} clients, weights={[f'{w:.4f}' for w in normalized_weights]}")
-        # logging.info(f"Participating clients: {idxs_users}")
-        
-        # 验证聚合算法的正确性
-        self._verify_fedavg_correctness(local_ws, normalized_weights)
 
-    def _verify_fedavg_correctness(self, local_ws, normalized_weights):
-        """验证联邦平均算法的正确性"""
-        # 检查权重和是否为1
-        weight_sum = sum(normalized_weights)
-        if abs(weight_sum - 1.0) > 1e-6:
-            logging.error(f"FedAvg verification failed: weight sum = {weight_sum:.6f}")
-            return False
+    def _exclusive_watermark_aggregation(self, local_ws, idxs_users, w_avg):
+        """
+        独占式水印聚合：每个客户端的水印位置只使用该客户端的参数
         
-        # 检查参数维度一致性
-        for i, local_w in enumerate(local_ws):
-            for key in local_w.keys():
-                if key not in self.w_t:
-                    logging.error(f"FedAvg verification failed: key {key} missing in global model")
-                    return False
-                if local_w[key].shape != self.w_t[key].shape:
-                    logging.error(f"FedAvg verification failed: shape mismatch for {key}")
-                    return False
-        
-        return True
+        Args:
+            local_ws: 本地模型权重列表
+            idxs_users: 参与训练的客户端ID列表
+            w_avg: 平均聚合后的权重字典
+        """
+        try:
+            from utils.key_matrix_utils import KeyMatrixManager
+            
+            # 加载密钥矩阵管理器
+            key_manager = KeyMatrixManager('./save/key_matrix')
+            
+            # 对每个客户端的水印位置进行独占式聚合
+            for i, client_id in enumerate(idxs_users):
+                try:
+                    # 获取该客户端的水印位置
+                    positions = key_manager.load_positions(client_id)
+                    
+                    # 对该客户端的水印位置使用独占式聚合
+                    for param_name, param_idx in positions:
+                        if param_name in local_ws[i] and param_name in w_avg:
+                            # 获取参数张量
+                            local_param = local_ws[i][param_name]
+                            avg_param = w_avg[param_name]
+                            
+                            # 确保参数形状一致
+                            if local_param.shape == avg_param.shape:
+                                # 将局部索引转换为扁平化索引
+                                param_flat = avg_param.view(-1)
+                                local_flat = local_param.view(-1)
+                                
+                                # 使用局部索引直接替换
+                                if param_idx < param_flat.numel():
+                                    param_flat[param_idx] = local_flat[param_idx]
+                                    
+                except Exception as e:
+                    logging.warning(f"Failed to apply exclusive watermark aggregation for client {client_id}: {e}")
+                    continue
+                    
+        except Exception as e:
+            logging.warning(f"Failed to load key matrix manager for exclusive watermark aggregation: {e}")
 
 def main(args):
     logs = {'net_info': None,

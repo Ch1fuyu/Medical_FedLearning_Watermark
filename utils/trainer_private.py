@@ -258,20 +258,22 @@ class TrainerPrivate(object):
                     encoder.load_state_dict(torch.load(self.args.encoder_path, map_location=self.device, weights_only=False))
 
                 with torch.no_grad():
-                    all_params = torch.cat([param.view(-1) for param in self.model.parameters()])
                     encoder_flat = torch.cat([param.view(-1) for param in encoder.parameters()])
 
                     # 按顺序将编码器参数拷贝到水印位置
-                    for wm_idx, (_, param_idx) in enumerate(position_dict):
-                        if wm_idx < encoder_flat.numel() and param_idx < all_params.numel():
-                            all_params[param_idx] = encoder_flat[wm_idx]
-
-                    # 将修改后的参数还原回模型
-                    offset = 0
-                    for param in self.model.parameters():
-                        numel = param.numel()
-                        param.data.copy_(all_params[offset:offset + numel].view_as(param))
-                        offset += numel
+                    # position_dict 存储的是 (param_name, local_idx) 对
+                    wm_idx = 0
+                    for param_name, param_idx in position_dict:
+                        if wm_idx < encoder_flat.numel():
+                            # 找到对应的参数
+                            for name, param in self.model.named_parameters():
+                                if name == param_name:
+                                    # param_idx 是局部索引，直接使用
+                                    param_flat = param.view(-1)
+                                    if param_idx < param_flat.numel():
+                                        param_flat[param_idx] = encoder_flat[wm_idx]
+                                    wm_idx += 1
+                                    break
                         
             except Exception as e:
                 print(f"[Watermark Warning] Failed to embed watermark for client {client_id}: {e}")

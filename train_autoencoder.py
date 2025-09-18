@@ -13,9 +13,9 @@ from models.light_autoencoder import LightAutoencoder
 plt.rcParams["font.family"] = ["SimHei"]
 
 # 参数定义
-batch_size = 500
+batch_size = 128
 learning_rate = 0.005
-num_epochs = 10
+num_epochs = 50
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # 权重保存路径
@@ -40,10 +40,10 @@ def count_parameters(model):
 
 
 def save_model(model, path):
-    # 保存整个模型参数
+    """保存模型参数"""
     torch.save(model.state_dict(), path)
     print(f"模型已保存至：{path}")
-
+    
     # 分别保存编码器和解码器参数
     encoder_path = os.path.join(weights_dir, 'encoder.pth')
     decoder_path = os.path.join(weights_dir, 'decoder.pth')
@@ -54,22 +54,15 @@ def save_model(model, path):
 
 
 def load_model(model, path):
+    """加载模型参数"""
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint)
     print(f"已加载模型：{path}")
     return model
 
-def load_encoder(model, path):
-    model.encoder.load_state_dict(torch.load(path, map_location=device))
-    print(f"已加载编码器参数：{path}")
-    return model
-
-def load_decoder(model, path):
-    model.decoder.load_state_dict(torch.load(path, map_location=device))
-    print(f"已加载解码器参数：{path}")
-    return model
 
 def train(model, loader, criterion, optimizer, epochs, device):
+    """训练自编码器"""
     model.train()
     for epoch in range(epochs):
         start_time = time.time()
@@ -88,11 +81,16 @@ def train(model, loader, criterion, optimizer, epochs, device):
 
 
 def test_and_visualize(model, loader, device, n=8):
+    """测试并可视化重建结果"""
     model.eval()
     with torch.no_grad():
         data, _ = next(iter(loader))
         data = data.to(device)
         output = model(data)
+        
+        # 创建保存目录
+        os.makedirs('./save/image', exist_ok=True)
+        
         plt.figure(figsize=(16, 4))
         for i in range(n):
             plt.subplot(2, n, i + 1)

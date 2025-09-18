@@ -70,9 +70,6 @@ class KeyMatrixManager:
         with open(position_path, 'r') as f:
             return json.load(f)
     
-    def get_watermark_positions(self, client_id: int) -> List[Tuple[str, int]]:
-        """获取客户端的水印位置（兼容旧接口）"""
-        return self.load_positions(client_id)
     
     def embed_watermark(self, model_params: Dict[str, torch.Tensor], 
                        client_id: int, watermark_values: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -95,29 +92,28 @@ class KeyMatrixManager:
         for name, param in model_params.items():
             watermarked_params[name] = param.clone()
         
-        # 嵌入水印
+        # 嵌入水印到各个参数中
         watermark_idx = 0
         for param_name, param_idx in positions:
-            if param_name in watermarked_params:
-                # 将一维索引转换为多维索引
-                param_shape = watermarked_params[param_name].shape
-                multi_idx = torch.unravel_index(torch.tensor(param_idx), param_shape)
+            if param_name in watermarked_params and watermark_idx < len(watermark_values):
+                # param_idx 是局部索引，直接使用
+                param_tensor = watermarked_params[param_name].view(-1)  # 扁平化参数
                 
-                # 设置水印值
-                if watermark_idx < len(watermark_values):
-                    watermarked_params[param_name][multi_idx] = watermark_values[watermark_idx]
+                if param_idx < param_tensor.numel():
+                    param_tensor[param_idx] = watermark_values[watermark_idx]
                     watermark_idx += 1
         
         return watermarked_params
     
     def extract_watermark(self, model_params: Dict[str, torch.Tensor], 
-                         client_id: int) -> torch.Tensor:
+                         client_id: int, check_pruning: bool = False) -> torch.Tensor:
         """
         从模型参数中提取水印
         
         Args:
             model_params: 模型参数字典
             client_id: 客户端ID
+            check_pruning: 是否检查剪枝对水印的影响
             
         Returns:
             提取的水印值
@@ -127,12 +123,27 @@ class KeyMatrixManager:
         watermark_values = []
         for param_name, param_idx in positions:
             if param_name in model_params:
-                # 将一维索引转换为多维索引
-                param_shape = model_params[param_name].shape
-                multi_idx = torch.unravel_index(torch.tensor(param_idx), param_shape)
+                # param_idx 是局部索引，直接使用
+                param_tensor = model_params[param_name].view(-1)  # 扁平化参数
                 
-                # 提取水印值
-                watermark_values.append(model_params[param_name][multi_idx].item())
+                if param_idx < param_tensor.numel():
+                    watermark_value = param_tensor[param_idx].item()
+                    
+                    # 如果启用剪枝检查，检测水印位置是否被剪掉
+                    if check_pruning:
+                        # 如果参数值为0，可能被剪掉了
+                        if abs(watermark_value) < 1e-8:
+                            # 返回特殊值表示水印被破坏
+                            watermark_value = -999.0
+                            print(f"检测到水印位置被剪枝: {param_name}[{param_idx}] = {watermark_value}")
+                    
+                    watermark_values.append(watermark_value)
+                else:
+                    print(f"警告: 局部索引 {param_idx} 超出参数 {param_name} 的范围 {param_tensor.numel()}")
+                    watermark_values.append(0.0)
+            else:
+                print(f"警告: 参数名 {param_name} 不在模型参数中")
+                watermark_values.append(0.0)
         
         return torch.tensor(watermark_values)
     
@@ -186,29 +197,3 @@ def load_key_matrix_manager(key_matrix_dir: str) -> KeyMatrixManager:
     """
     return KeyMatrixManager(key_matrix_dir)
 
-# 兼容性函数
-def construct_key_matrices_from_saved(key_matrix_dir: str) -> Dict[int, List[Tuple[str, int]]]:
-    """
-    从保存的密钥矩阵中构造位置字典（兼容旧接口）
-    
-    Args:
-        key_matrix_dir: 密钥矩阵保存目录
-        
-    Returns:
-        位置字典 {client_id: positions}
-    """
-    manager = KeyMatrixManager(key_matrix_dir)
-    position_dict = {}
-    
-    for client_id in range(manager.client_num):
-        positions = manager.load_positions(client_id)
-        # 确保位置信息是元组格式（JSON会将元组转换为列表）
-        tuple_positions = []
-        for pos in positions:
-            if isinstance(pos, list):
-                tuple_positions.append(tuple(pos))
-            else:
-                tuple_positions.append(pos)
-        position_dict[client_id] = tuple_positions
-    
-    return position_dict

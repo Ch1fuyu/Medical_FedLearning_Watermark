@@ -54,13 +54,15 @@ class KeyMatrixGenerator:
     def _get_model_param_info(self):
         """获取模型参数信息"""
         param_info = []
+        start_idx = 0
         for name, param in self.model.named_parameters():
             param_info.append({
                 'name': name,
                 'shape': list(param.shape),
                 'numel': param.numel(),
-                'start_idx': sum(p['numel'] for p in param_info)
+                'start_idx': start_idx
             })
+            start_idx += param.numel()
         return param_info
     
     def _calculate_watermark_sizes(self):
