@@ -13,9 +13,9 @@ from models.light_autoencoder import LightAutoencoder
 plt.rcParams["font.family"] = ["SimHei"]
 
 # 参数定义
-batch_size = 128
+batch_size = 500
 learning_rate = 0.005
-num_epochs = 50
+num_epochs = 100
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # 权重保存路径
@@ -76,7 +76,8 @@ def train(model, loader, criterion, optimizer, epochs, device):
             optimizer.step()
             total_loss += loss.item() * data.size(0)
         avg_loss = total_loss / len(loader.dataset)
-        print(f"Epoch {epoch+1:02d}/{epochs}, Loss: {avg_loss:.6f}, Time: {time.time() - start_time:.2f}s")
+        if (epoch + 1) % 10 == 0 or epoch == 0:  # 只显示每10个epoch和第一个epoch
+            print(f"Epoch {epoch+1:02d}/{epochs}, Loss: {avg_loss:.6f}")
     return model
 
 

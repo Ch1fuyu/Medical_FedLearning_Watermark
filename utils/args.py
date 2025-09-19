@@ -15,7 +15,7 @@ def parser_args():
     parser.add_argument('--in_channels', type=int, default=3, help='input channels')
     
     # ========================= 联邦学习核心参数 ========================
-    parser.add_argument('--epochs', type=int, default=1, help='total communication rounds')
+    parser.add_argument('--epochs', type=int, default=100, help='total communication rounds')
     parser.add_argument('--local_ep', type=int, default=2, help="local epochs per client: E")
     parser.add_argument('--batch_size', type=int, default=128, help="local batch size: B")
     parser.add_argument('--client_num', type=int, default=10, help="number of clients: K")

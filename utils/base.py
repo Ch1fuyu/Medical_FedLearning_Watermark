@@ -28,7 +28,6 @@ class Experiment(object):
         self.epochs = args.epochs
         self.batch_size = args.batch_size
         self.lr = args.lr
-        self.eval = args.eval
         self.save_interval = args.save_interval
         self.loss_type = args.loss_type
         self.weight_type = args.weight_type

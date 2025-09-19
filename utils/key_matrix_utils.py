@@ -131,11 +131,10 @@ class KeyMatrixManager:
                     
                     # 如果启用剪枝检查，检测水印位置是否被剪掉
                     if check_pruning:
-                        # 如果参数值为0，可能被剪掉了
-                        if abs(watermark_value) < 1e-8:
-                            # 返回特殊值表示水印被破坏
-                            watermark_value = -999.0
-                            print(f"检测到水印位置被剪枝: {param_name}[{param_idx}] = {watermark_value}")
+                        # 检查参数是否被剪枝（完全等于0）
+                        if watermark_value == 0.0:
+                            # 记录被剪枝的位置，但不修改值
+                            pass  # 不输出详细信息
                     
                     watermark_values.append(watermark_value)
                 else:

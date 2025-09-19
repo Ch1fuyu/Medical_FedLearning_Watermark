@@ -95,11 +95,8 @@ class WatermarkReconstructor:
         Returns:
             重建的自编码器
         """
-        print("🔍 开始从所有客户端提取水印参数...")
-        
         # 获取所有客户端ID
         all_client_ids = self.key_manager.list_clients()
-        print(f"   发现 {len(all_client_ids)} 个客户端: {all_client_ids}")
         
         # 从所有客户端提取水印参数
         all_watermark_values = []
@@ -111,11 +108,8 @@ class WatermarkReconstructor:
                 if len(watermark_values) > 0:
                     all_watermark_values.append(watermark_values)
                     successful_clients.append(client_id)
-                    print(f"   ✓ 客户端 {client_id}: 提取了 {len(watermark_values)} 个水印参数")
-                else:
-                    print(f"   ⚠️  客户端 {client_id}: 未提取到水印参数")
             except Exception as e:
-                print(f"   ❌ 客户端 {client_id}: 提取失败 - {e}")
+                pass  # 静默处理错误
         
         if not all_watermark_values:
             print("❌ 未能从任何客户端提取到水印参数")
@@ -123,23 +117,19 @@ class WatermarkReconstructor:
         
         # 合并所有水印参数
         combined_watermark_values = torch.cat(all_watermark_values)
-        print(f"✓ 成功合并 {len(successful_clients)} 个客户端的水印参数，总计 {len(combined_watermark_values)} 个参数")
         
         # 检查参数数量是否匹配编码器
         encoder_params = list(LightAutoencoder().encoder.parameters())
         total_encoder_params = sum(param.numel() for param in encoder_params)
         
         if len(combined_watermark_values) != total_encoder_params:
-            print(f"ℹ️  水印参数数量 ({len(combined_watermark_values)}) 与编码器参数数量 ({total_encoder_params}) 不匹配")
             if len(combined_watermark_values) > total_encoder_params:
                 # 截断多余的参数
                 combined_watermark_values = combined_watermark_values[:total_encoder_params]
-                print(f"   已截断水印参数到 {total_encoder_params} 个")
             else:
                 # 填充不足的参数
                 padding = torch.zeros(total_encoder_params - len(combined_watermark_values))
                 combined_watermark_values = torch.cat([combined_watermark_values, padding])
-                print(f"   已填充水印参数到 {total_encoder_params} 个")
         
         # 创建新的自编码器
         reconstructed_autoencoder = LightAutoencoder().to(self.device)
@@ -150,7 +140,6 @@ class WatermarkReconstructor:
             reconstructed_autoencoder.decoder.load_state_dict(
                 torch.load(decoder_path, map_location=self.device, weights_only=False)
             )
-            print(f"✓ 已加载解码器权重: {decoder_path}")
         else:
             print(f"⚠️  未找到解码器权重: {decoder_path}")
         
@@ -525,16 +514,15 @@ class WatermarkReconstructor:
         
         return infringement_criteria
     
-    def setup_deltapcc_evaluation(self, ds_loader, perf_fail_mse: float = 0.5):
+    def setup_deltapcc_evaluation(self, ds_loader, perf_fail_ratio: float = 0.1):
         """
         设置ΔPCC评估参数
         
         Args:
             ds_loader: 专用数据集加载器 (Ds)
-            perf_fail_mse: 失效性能的MSE值 (容忍下限)
+            perf_fail_ratio: 失效性能比例（相对于基准性能的倍数）
         """
         self.ds_loader = ds_loader
-        self.perf_fail = perf_fail_mse
         
         # 计算基准性能 perf_before
         print("计算基准性能 perf_before...")
@@ -542,8 +530,9 @@ class WatermarkReconstructor:
             self.original_autoencoder, ds_loader
         )['mse']
         
-        # 计算阈值 τ = |loss_fail - loss_before|
-        self.tau = abs(self.perf_fail - self.perf_before)
+        # 使用相对阈值计算方式（与剪枝攻击一致）
+        self.perf_fail = self.perf_before * (1 + perf_fail_ratio)
+        self.tau = self.perf_fail - self.perf_before
         
         print(f"ΔPCC评估参数设置完成:")
         print(f"  基准性能 (perf_before): {self.perf_before:.6f}")
@@ -553,6 +542,66 @@ class WatermarkReconstructor:
         if self.tau <= 0:
             print("⚠️  警告: 阈值τ <= 0，这可能导致ΔPCC计算异常")
     
+    def evaluate_encoder_decoder_separated(self, model_state_dict: Dict[str, torch.Tensor], 
+                                         client_id: int, test_loader) -> Dict[str, float]:
+        """
+        分离评估编码器和解码器（参考代码风格）
+        编码器：从水印模型提取（可能被攻击）
+        解码器：始终使用原始预训练权重
+        
+        Args:
+            model_state_dict: 待测模型状态字典
+            client_id: 客户端ID
+            test_loader: 测试数据加载器
+            
+        Returns:
+            评估结果
+        """
+        # 提取水印参数
+        watermark_values = self.extract_watermark_parameters(model_state_dict, client_id)
+        
+        if len(watermark_values) == 0:
+            return {
+                'mse': float('inf'),
+                'ssim': 0.0,
+                'psnr': 0.0,
+                'reconstruction_success': False,
+                'watermark_damaged': False
+            }
+        
+        # 创建新的自编码器
+        autoencoder = LightAutoencoder().to(self.device)
+        
+        # 加载原始解码器权重（始终不变）
+        decoder_path = os.path.join(self.autoencoder_weights_dir, 'decoder.pth')
+        if os.path.exists(decoder_path):
+            autoencoder.decoder.load_state_dict(
+                torch.load(decoder_path, map_location=self.device, weights_only=False)
+            )
+        else:
+            print(f"❌ 解码器权重文件不存在: {decoder_path}")
+            return {
+                'mse': float('inf'),
+                'ssim': 0.0,
+                'psnr': 0.0,
+                'reconstruction_success': False,
+                'watermark_damaged': False
+            }
+        
+        # 重建编码器参数（从水印模型提取）
+        self._reconstruct_encoder_from_watermark(autoencoder.encoder, watermark_values)
+        
+        # 评估性能
+        metrics = self.evaluate_autoencoder_performance(autoencoder, test_loader)
+        
+        return {
+            'mse': metrics['mse'],
+            'ssim': metrics['ssim'],
+            'psnr': metrics['psnr'],
+            'reconstruction_success': True,
+            'watermark_damaged': False
+        }
+
     def calculate_deltapcc(self, model_state_dict: Dict[str, torch.Tensor], 
                           client_id: int, check_pruning: bool = True) -> Dict[str, float]:
         """
@@ -575,30 +624,15 @@ class WatermarkReconstructor:
         # 如果启用了剪枝检查，检测水印完整性
         watermark_damaged = False
         if check_pruning and len(watermark_values) > 0:
-            # 检查是否有水印值被设置为-999.0（表示被剪枝）
-            damaged_count = (watermark_values == -999.0).sum().item()
+            # 检查水印值是否完全等于0（被剪枝）
+            damaged_count = (watermark_values == 0.0).sum().item()
             total_watermark_count = len(watermark_values)
             watermark_damaged = damaged_count > 0
             
             if watermark_damaged:
                 print(f"⚠️  检测到水印被剪枝破坏: {damaged_count}/{total_watermark_count} 个水印位置被剪掉")
-                # 如果水印被严重破坏，直接判定为侵权
-                if damaged_count / total_watermark_count > 0.5:  # 超过50%的水印被破坏
-                    print("❌ 水印严重破坏，直接判定为侵权")
-                    return {
-                        'delta_pcc': 0.0,  # 设置为0表示严重侵权
-                        'perf_before': self.perf_before,
-                        'perf_after': float('inf'),
-                        'perf_fail': self.perf_fail,
-                        'delta_perf': float('inf'),
-                        'tau': self.tau,
-                        'infringement_detected': True,
-                        'reconstruction_success': False,
-                        'watermark_damaged': True,
-                        'damaged_ratio': damaged_count / total_watermark_count,
-                        'psnr': 0.0,
-                        'ssim': 0.0
-                    }
+                # 注意：水印破坏信息仅用于记录，不影响侵权判断
+                # 侵权判断将完全基于PCC值
         
         # 从待测模型重建自编码器
         reconstructed_autoencoder = self.reconstruct_autoencoder_from_watermark(
@@ -627,8 +661,13 @@ class WatermarkReconstructor:
         # 计算ΔPCC = Δperf / τ
         delta_pcc = delta_perf / self.tau if self.tau > 0 else float('inf')
         
-        # 侵权判断: ΔPCC < 1 表示侵权，或者水印被破坏也表示侵权
-        infringement_detected = delta_pcc < 1.0 or watermark_damaged
+        # 调试信息
+        print(f"  调试信息: perf_before={self.perf_before:.6f}, perf_after={perf_after:.6f}")
+        print(f"  调试信息: perf_fail={self.perf_fail:.6f}, tau={self.tau:.6f}")
+        print(f"  调试信息: delta_perf={delta_perf:.6f}, delta_pcc={delta_pcc:.6f}")
+        
+        # 侵权判断: 只基于ΔPCC < 1 表示侵权
+        infringement_detected = delta_pcc < 1.0
         
         return {
             'delta_pcc': delta_pcc,
@@ -794,7 +833,7 @@ def test_watermark_reconstruction():
     
     # 设置ΔPCC评估参数
     print("设置ΔPCC评估参数...")
-    reconstructor.setup_deltapcc_evaluation(test_loader, perf_fail_mse=0.5)
+    reconstructor.setup_deltapcc_evaluation(test_loader, perf_fail_ratio=0.1)
     
     # 模拟一个水印模型（这里使用随机参数）
     print("创建模拟水印模型...")
@@ -811,20 +850,9 @@ def test_watermark_reconstruction():
     if deltapcc_result['reconstruction_success']:
         print("✓ ΔPCC计算成功")
         
-        print("\n=== ΔPCC评估结果 ===")
-        print(f"基准性能 (perf_before): {deltapcc_result['perf_before']:.6f}")
-        print(f"测试后性能 (perf_after): {deltapcc_result['perf_after']:.6f}")
-        print(f"失效性能 (perf_fail): {deltapcc_result['perf_fail']:.6f}")
-        print(f"性能变化 (Δperf): {deltapcc_result['delta_perf']:.6f}")
-        print(f"阈值 (τ): {deltapcc_result['tau']:.6f}")
-        print(f"ΔPCC值: {deltapcc_result['delta_pcc']:.6f}")
-        print(f"PSNR: {deltapcc_result['psnr']:.2f}")
-        print(f"SSIM: {deltapcc_result['ssim']:.4f}")
-        
-        # 侵权判断
+        # 简化的ΔPCC评估结果
         infringement_status = "侵权" if deltapcc_result['infringement_detected'] else "未侵权"
-        print(f"\n侵权判断: {infringement_status}")
-        print(f"判断依据: ΔPCC {'<' if deltapcc_result['delta_pcc'] < 1.0 else '≥'} 1.0")
+        print(f"ΔPCC: {deltapcc_result['delta_pcc']:.3f} | 侵权判断: {infringement_status}")
         
     else:
         print("❌ ΔPCC计算失败")
@@ -880,7 +908,7 @@ def test_deltapcc_batch_evaluation():
     test_loader = create_test_loader_for_autoencoder()
     
     # 设置ΔPCC评估参数
-    reconstructor.setup_deltapcc_evaluation(test_loader, perf_fail_mse=0.5)
+    reconstructor.setup_deltapcc_evaluation(test_loader, perf_fail_ratio=0.1)
     
     # 创建多个模拟模型
     print("创建多个模拟水印模型...")

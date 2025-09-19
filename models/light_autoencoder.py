@@ -15,8 +15,7 @@ class LightAutoencoder(nn.Module):
             nn.ReLU(True),
             nn.ConvTranspose2d(16, 8, kernel_size=3, stride=2, padding=1, output_padding=1),  # 7x7 → 14x14
             nn.ReLU(True),
-            nn.ConvTranspose2d(8, 1, kernel_size=3, stride=2, padding=1, output_padding=1),  # 14x14 → 28x28
-            nn.Sigmoid()
+            nn.ConvTranspose2d(8, 1, kernel_size=3, stride=2, padding=1, output_padding=1)  # 14x14 → 28x28
         )
 
     def forward(self, x):
