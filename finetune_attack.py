@@ -1,567 +1,672 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-微调攻击测试脚本
-模拟攻击者使用相同数据集对模型进行单机微调，测试水印的鲁棒性
+微调攻击实验代码
+针对模型微调攻击的实验，继续对主任务进行训练，观察水印完整性、ΔPCC值变化以及判断是否侵权
 """
 
-import os
-import sys
 import copy
-import json
-import time
-import argparse
+import os
+from datetime import datetime
+
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from sklearn.metrics import roc_auc_score
-import warnings
-warnings.filterwarnings('ignore')
+from torchvision import datasets, transforms
+from tqdm import tqdm
 
-# 添加项目根目录到路径
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-from utils.args import get_args
-from utils.dataset import get_dataset
-from models.resnet import ResNet18
-from models.alexnet import AlexNet
-from utils.key_matrix_utils import KeyMatrixManager
-from utils.watermark_reconstruction import WatermarkReconstructor, create_test_loader_for_autoencoder
+from models.resnet import resnet18
+from utils.dataset import LocalChestMNISTDataset
+from utils.watermark_reconstruction import WatermarkReconstructor
 
 
-def load_model_from_pkl(pkl_path):
-    """从pkl文件加载模型"""
-    print(f"Loading model from: {pkl_path}")
+def load_mnist_test_data(batch_size: int = 128, data_dir: str = './data'):
+    """
+    加载MNIST测试数据，用于自编码器性能评估
+
+    Args:
+        batch_size: 批次大小
+        data_dir: 数据目录
+
+    Returns:
+        MNIST测试数据加载器
+    """
+    # 使用与train_autoencoder.py相同的数据预处理
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,))
+    ])
+
+    # 加载MNIST测试集
+    test_dataset = datasets.MNIST(data_dir, train=False, download=True, transform=transform)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+    print(f"✓ 已加载MNIST测试集: {len(test_dataset)} 个样本")
+    return test_loader
+
+
+def test_autoencoder_mse(autoencoder, test_loader, device: str = 'cuda'):
+    """
+    测试自编码器在测试集上的MSE loss（统一使用剪枝攻击的计算方式）
     
-    data = torch.load(pkl_path, weights_only=False)
-    model_state = data['model_state_dict']
-    args = data['args']
-    best_acc = data.get('best_acc', 0.0)
-    best_auc = data.get('best_auc', 0.0)
-    
-    print(f"Model: {args.model}, Dataset: {args.dataset}, Device: {args.device}")
-    print(f"Best accuracy: {best_acc:.4f}, Best AUC: {best_auc:.4f}")
-    
-    return model_state, args, best_acc, best_auc
-
-def create_model(args):
-    """根据参数创建模型"""
-    if args.model == 'resnet18':
-        return ResNet18(num_classes=args.num_classes)
-    elif args.model == 'alexnet':
-        return AlexNet(num_classes=args.num_classes)
-    else:
-        raise ValueError(f"Unsupported model: {args.model}")
-
-def finetune_model(model, train_loader, val_loader, args, finetune_epochs=10, finetune_lr=0.001):
-    """对模型进行微调"""
-    print(f"\n开始微调攻击 - 轮数: {finetune_epochs}, 学习率: {finetune_lr}")
-    
-    optimizer = optim.Adam(model.parameters(), lr=finetune_lr, weight_decay=1e-4)
-    criterion = nn.CrossEntropyLoss()
-    finetune_history = []
-    
-    for epoch in range(finetune_epochs):
-        # 训练阶段
-        model.train()
-        train_loss = 0.0
-        train_correct = 0
-        train_total = 0
+    Args:
+        autoencoder: 自编码器模型
+        test_loader: 测试数据加载器
+        device: 设备类型
         
-        for data, target in train_loader:
-            if args.device == 'cuda' and torch.cuda.is_available():
-                data, target = data.cuda(), target.cuda()
-            
-            optimizer.zero_grad()
-            output = model(data)
-            loss = criterion(output, target)
-            loss.backward()
-            optimizer.step()
-            
-            train_loss += loss.item()
-            _, predicted = torch.max(output.data, 1)
-            train_total += target.size(0)
-            train_correct += (predicted == target).sum().item()
-        
-        train_acc = 100. * train_correct / train_total
-        train_loss = train_loss / len(train_loader)
-        
-        # 验证阶段
-        val_loss, val_acc, val_auc, val_sample_acc = evaluate_model(model, val_loader, args)
-        
-        # 记录历史
-        finetune_history.append({
-            'epoch': epoch + 1,
-            'train_loss': train_loss,
-            'train_acc': train_acc,
-            'val_loss': val_loss,
-            'val_acc': val_acc,
-            'val_auc': val_auc,
-            'val_sample_acc': val_sample_acc
-        })
-        
-        print(f"Epoch {epoch+1:2d}/{finetune_epochs}: "
-              f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, "
-              f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%, Val AUC: {val_auc:.4f}")
+    Returns:
+        MSE loss值
+    """
+    if autoencoder is None:
+        return float('inf')
     
-    return finetune_history
-
-def evaluate_model(model, data_loader, args):
-    """评估模型性能"""
-    model.eval()
-    loss_meter = 0.0
-    acc_meter = 0.0
-    sample_acc_meter = 0.0
-    run_count = 0
-    
-    all_y_true = []
-    all_y_score = []
-    
-    criterion = nn.CrossEntropyLoss()
+    autoencoder.eval()
+    total_mse = 0.0
+    total_samples = 0
     
     with torch.no_grad():
-        for data, target in data_loader:
-            if args.device == 'cuda' and torch.cuda.is_available():
-                data, target = data.cuda(), target.cuda()
+        for data, _ in test_loader:
+            data = data.to(device)
             
-            output = model(data)
-            loss = criterion(output, target)
+            # 前向传播
+            reconstructed = autoencoder(data)
             
-            # 计算准确率
-            _, predicted = torch.max(output.data, 1)
-            correct = (predicted == target).sum().item()
-            acc = correct / target.size(0)
-            
-            # 计算样本级准确率（多标签）
-            if args.dataset in ['chestmnist', 'dermamnist', 'octmnist', 'pneumoniamnist', 'retinamnist']:
-                # 对于多标签分类，使用sigmoid + 阈值0.5
-                probs = torch.sigmoid(output)
-                pred_labels = (probs > 0.5).float()
-                true_labels = target.float()
-                sample_acc = (pred_labels == true_labels).all(dim=1).float().mean().item()
-                sample_acc_meter += sample_acc * target.size(0)
-                
-                # 收集AUC计算数据
-                all_y_true.extend(target.cpu().numpy())
-                all_y_score.extend(probs.cpu().numpy())
-            else:
-                # 单标签分类
-                sample_acc = acc
-                sample_acc_meter += sample_acc * target.size(0)
-                
-                # 收集AUC计算数据
-                all_y_true.extend(target.cpu().numpy())
-                all_y_score.extend(torch.softmax(output, dim=1).cpu().numpy())
-            
-            loss_meter += loss.item() * target.size(0)
-            acc_meter += correct
-            run_count += target.size(0)
+            # 计算MSE loss (使用sum reduction，然后手动平均)
+            mse_loss = torch.nn.functional.mse_loss(reconstructed, data, reduction='sum')
+            total_mse += mse_loss.item()
+            total_samples += data.size(0)  # 累加样本数
     
-    # 计算最终指标
-    final_loss = loss_meter / run_count
-    final_acc = 100. * acc_meter / run_count
-    final_sample_acc = 100. * sample_acc_meter / run_count
-    
-    # 计算AUC
-    if len(all_y_true) > 0 and len(all_y_score) > 0:
-        try:
-            if args.dataset in ['chestmnist', 'dermamnist', 'octmnist', 'pneumoniamnist', 'retinamnist']:
-                # 多标签AUC
-                auc_val = roc_auc_score(all_y_true, all_y_score, average='macro', multi_class='ovr')
-            else:
-                # 单标签AUC
-                if len(np.unique(all_y_true)) > 2:
-                    auc_val = roc_auc_score(all_y_true, all_y_score, multi_class='ovr', average='macro')
-                else:
-                    auc_val = roc_auc_score(all_y_true, all_y_score)
-        except Exception as e:
-            print(f"AUC calculation failed: {e}")
-            auc_val = 0.0
-    else:
-        auc_val = 0.0
-    
-    return final_loss, final_acc, auc_val, final_sample_acc
+    avg_mse = total_mse / total_samples
+    return avg_mse
 
-def detect_watermark(model, key_manager, client_id):
-    """检测模型中是否存在水印"""
-    if key_manager is None:
-        return False, 0.0
+
+def evaluate_encoder_decoder_from_all_clients(reconstructor, model_state_dict, test_loader, device: str = 'cuda'):
+    """
+    从所有客户端的水印参数重建自编码器并评估性能（统一使用剪枝攻击的MSE计算方式）
     
+    Args:
+        reconstructor: 水印重建器
+        model_state_dict: 模型状态字典
+        test_loader: 测试数据加载器
+        device: 设备类型
+        
+    Returns:
+        评估结果字典
+    """
     try:
-        # 提取水印
-        watermark_values = key_manager.extract_watermark(model.state_dict(), client_id)
+        # 使用所有客户端的密钥矩阵重建自编码器
+        reconstructed_autoencoder = reconstructor.reconstruct_autoencoder_from_all_clients(model_state_dict)
         
-        # 计算水印强度（非零参数的比例）
-        watermark_strength = np.mean(np.abs(watermark_values) > 1e-6)
+        if reconstructed_autoencoder is None:
+            return {
+                'mse': float('inf'),
+                'ssim': 0.0,
+                'psnr': 0.0,
+                'reconstruction_success': False,
+                'watermark_damaged': False
+            }
+
+        # 使用统一的MSE计算方式
+        mse = test_autoencoder_mse(reconstructed_autoencoder, test_loader, device)
         
-        # 如果水印强度大于阈值，认为存在水印
-        has_watermark = watermark_strength > 0.1  # 阈值可调整
+        # 计算其他指标（如果需要的话）
+        try:
+            metrics = reconstructor.evaluate_autoencoder_performance(reconstructed_autoencoder, test_loader)
+            ssim = metrics.get('ssim', 0.0)
+            psnr = metrics.get('psnr', 0.0)
+        except:
+            ssim = 0.0
+            psnr = 0.0
         
-        return has_watermark, watermark_strength
+        return {
+            'mse': mse,
+            'ssim': ssim,
+            'psnr': psnr,
+            'reconstruction_success': True,
+            'watermark_damaged': False
+        }
+        
     except Exception as e:
-        print(f"水印检测失败: {e}")
-        return False, 0.0
+        print(f"❌ 自编码器重建和评估失败: {e}")
+        return {
+            'mse': float('inf'),
+            'ssim': 0.0,
+            'psnr': 0.0,
+            'reconstruction_success': False,
+            'watermark_damaged': False
+        }
+
+
+def load_chestmnist_data(data_root: str = './data'):
+    """
+    加载ChestMNIST数据集用于微调训练
+
+    Args:
+        data_root: 数据根目录
+
+    Returns:
+        训练和测试数据加载器
+    """
+    # ChestMNIST数据预处理
+    normalize = transforms.Normalize(mean=[0.5], std=[0.5])
+
+    transform_train = transforms.Compose([
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        normalize,
+    ])
+    transform_test = transforms.Compose([
+        transforms.ToTensor(),
+        normalize,
+    ])
+
+    # 加载ChestMNIST数据集
+    dataset_path = os.path.join(data_root, 'chestmnist.npz')
+    if not os.path.exists(dataset_path):
+        raise FileNotFoundError(f"ChestMNIST数据集文件不存在: {dataset_path}")
+
+    train_set = LocalChestMNISTDataset(dataset_path, split='train', transform=transform_train)
+    test_set = LocalChestMNISTDataset(dataset_path, split='test', transform=transform_test)
+
+    print(f"✓ 已加载ChestMNIST数据集 - 训练集: {len(train_set)}, 测试集: {len(test_set)}")
+
+    return train_set, test_set
+
+
+def load_main_task_model(model_path: str, device: str = 'cuda'):
+    """
+    加载主任务模型（ResNet18 for ChestMNIST）
+
+    Args:
+        model_path: 模型文件路径
+        device: 设备类型
+
+    Returns:
+        加载的模型
+    """
+    # 创建模型实例
+    model = resnet18(num_classes=14, in_channels=3, input_size=28)
+
+    # 加载模型权重
+    if os.path.exists(model_path):
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint['net_info']['best_model'][0])
+        print(f"✓ 已加载主任务模型: {model_path}")
+    else:
+        print(f"❌ 模型文件不存在: {model_path}")
+        return None
+
+    model = model.to(device)
+    model.train()  # 设置为训练模式，因为要进行微调
+
+    return model
+
+
+def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.001,
+                   device: str = 'cuda', eval_interval: int = 10, reconstructor=None,
+                   original_model_state=None, mnist_test_loader=None):
+    """
+    对模型进行微调训练（精简输出）
+    """
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+    criterion = nn.BCEWithLogitsLoss()
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=epochs//3, gamma=0.1)
+
+    model_states, performance_metrics = [], []
+    print(f"开始微调训练，共 {epochs} 轮，每 {eval_interval} 轮评估一次")
+
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0.0
+
+        for data, target in train_loader:
+            data, target = data.to(device), target.to(device)
+            optimizer.zero_grad()
+            loss = criterion(model(data), target.float())
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+
+        avg_loss = total_loss / len(train_loader)
+        scheduler.step()
+
+        if (epoch + 1) % eval_interval == 0 or epoch == epochs - 1:
+            # 保存状态
+            model_states.append(copy.deepcopy(model.state_dict()))
+
+            # 评估
+            model.eval()
+            test_loss, all_predictions, all_targets = 0.0, [], []
+            with torch.no_grad():
+                for data, target in test_loader:
+                    data, target = data.to(device), target.to(device)
+                    output = model(data)
+                    test_loss += criterion(output, target.float()).item()
+                    all_predictions.append(torch.sigmoid(output).cpu().numpy())
+                    all_targets.append(target.cpu().numpy())
+
+            avg_test_loss = test_loss / len(test_loader)
+            all_predictions = np.concatenate(all_predictions, axis=0)
+            all_targets = np.concatenate(all_targets, axis=0)
+
+            try:
+                from sklearn.metrics import roc_auc_score
+                auc_scores = [
+                    roc_auc_score(all_targets[:, i], all_predictions[:, i])
+                    for i in range(all_targets.shape[1])
+                    if len(np.unique(all_targets[:, i])) > 1
+                ]
+                mean_auc = np.mean(auc_scores) if auc_scores else 0.0
+            except ImportError:
+                mean_auc = 0.0
+
+            pred_binary = (all_predictions > 0.5).astype(int)
+            accuracy = np.mean((pred_binary == all_targets).astype(float))
+
+            metrics = {
+                'epoch': epoch + 1,
+                'train_loss': avg_loss,
+                'test_loss': avg_test_loss,
+                'test_auc': mean_auc,
+                'test_accuracy': accuracy,
+                'learning_rate': optimizer.param_groups[0]['lr']
+            }
+            
+            # 添加ΔPCC和侵权判断信息
+            if delta_pcc_result:
+                metrics.update({
+                    'perf_before': delta_pcc_result['perf_before'],
+                    'perf_fail': delta_pcc_result['perf_fail'],
+                    'tau': delta_pcc_result['tau'],
+                    'delta_perf': delta_pcc_result['delta_perf'],
+                    'delta_pcc': delta_pcc_result['delta_pcc'],
+                    'is_infringement': delta_pcc_result['is_infringement'],
+                    'result_text': delta_pcc_result['result_text']
+                })
+            else:
+                # 如果没有ΔPCC结果，填充默认值
+                metrics.update({
+                    'perf_before': None,
+                    'perf_fail': None,
+                    'tau': None,
+                    'delta_perf': None,
+                    'delta_pcc': None,
+                    'is_infringement': None,
+                    'result_text': 'N/A'
+                })
+            
+            performance_metrics.append(metrics)
+
+            # ΔPCC
+            delta_pcc_result = None
+            if reconstructor and original_model_state and mnist_test_loader:
+                delta_pcc_result = evaluate_delta_pcc(
+                    original_model_state, model_states[-1], reconstructor,
+                    mnist_test_loader, device, perf_fail_ratio=0.5
+                )
+
+            # 打印核心指标
+            print(f"\n=== 第 {epoch+1} 轮评估 ===")
+            print(f"训练损失: {avg_loss:.4f} | 测试损失: {avg_test_loss:.4f} | "
+                  f"AUC: {mean_auc:.4f} | 准确率: {accuracy:.2%}")
+            if delta_pcc_result:
+                print(f"性能基准: {delta_pcc_result['perf_before']:.6f} | 性能变化: {delta_pcc_result['delta_perf']:.6f}")
+                print(f"ΔPCC: {delta_pcc_result['delta_pcc']:.6f} | 侵权判断: {delta_pcc_result['result_text']}")
+            print("-" * 50)
+
+    return model_states, performance_metrics
+
+
+def evaluate_watermark_integrity(model_state_dict, reconstructor):
+    """
+    评估水印完整性
+
+    Args:
+        model_state_dict: 模型状态字典
+        reconstructor: 水印重建器
+
+    Returns:
+        水印完整性评估结果
+    """
+    try:
+        # 从模型状态字典重建自编码器
+        reconstructed_autoencoder = reconstructor.reconstruct_autoencoder_from_all_clients(model_state_dict)
+
+        if reconstructed_autoencoder is None:
+            return {
+                'watermark_integrity': 0.0,
+                'reconstruction_success': False,
+                'total_watermark_params': 0,
+                'damaged_watermark_params': 0
+            }
+
+        # 计算水印参数统计
+        key_manager = reconstructor.key_manager
+        all_client_ids = key_manager.list_clients()
+
+        total_watermark_params = 0
+        damaged_watermark_params = 0
+
+        for cid in all_client_ids:
+            try:
+                # 提取水印参数
+                watermark_values = key_manager.extract_watermark(model_state_dict, cid, check_pruning=True)
+                total_watermark_params += len(watermark_values)
+
+                # 检查被破坏的水印参数（完全等于0的参数）
+                damaged_count = (watermark_values == 0.0).sum().item()
+                damaged_watermark_params += damaged_count
+
+            except Exception as e:
+                pass  # 静默处理错误
+
+        # 计算水印完整性
+        if total_watermark_params > 0:
+            watermark_integrity = 1.0 - (damaged_watermark_params / total_watermark_params)
+        else:
+            watermark_integrity = 0.0
+
+        return {
+            'watermark_integrity': watermark_integrity,
+            'reconstruction_success': True,
+            'total_watermark_params': total_watermark_params,
+            'damaged_watermark_params': damaged_watermark_params
+        }
+
+    except Exception as e:
+        print(f"❌ 水印完整性评估失败: {e}")
+        return {
+            'watermark_integrity': 0.0,
+            'reconstruction_success': False,
+            'total_watermark_params': 0,
+            'damaged_watermark_params': 0
+        }
+
+
+def evaluate_delta_pcc(original_model_state, current_model_state, reconstructor, 
+                      mnist_test_loader, device: str = 'cuda', perf_fail_ratio: float = 0.1):
+    """
+    评估ΔPCC（精简输出）
+    """
+    try:
+        original_result = evaluate_encoder_decoder_from_all_clients(
+            reconstructor, original_model_state, mnist_test_loader, device
+        )
+        if not original_result['reconstruction_success']:
+            return None
+        perf_before = original_result['mse']
+        perf_fail = perf_before * (1 + perf_fail_ratio)
+        tau = perf_fail - perf_before
+
+        current_result = evaluate_encoder_decoder_from_all_clients(
+            reconstructor, current_model_state, mnist_test_loader, device
+        )
+        if not current_result['reconstruction_success']:
+            return None
+        perf_after = current_result['mse']
+
+        delta_perf = abs(perf_after - perf_before)
+        delta_pcc = delta_perf / tau if tau > 0 else float('inf')
+
+        is_infringement = delta_pcc < 1.0
+        result_text = "侵权" if is_infringement else "不侵权"
+
+        return {
+            'perf_before': perf_before,
+            'perf_after': perf_after,
+            'perf_fail': perf_fail,
+            'tau': tau,
+            'delta_perf': delta_perf,
+            'delta_pcc': delta_pcc,
+            'is_infringement': is_infringement,
+            'result_text': result_text
+        }
+    except Exception:
+        return None
+
+def test_autoencoder_mse(autoencoder, test_loader, device: str = 'cuda'):
+    """
+    测试自编码器在测试集上的MSE loss
+
+    Args:
+        autoencoder: 自编码器模型
+        test_loader: 测试数据加载器
+        device: 设备类型
+
+    Returns:
+        MSE loss值
+    """
+    if autoencoder is None:
+        return float('inf')
+
+    autoencoder.eval()
+    total_mse = 0.0
+    total_samples = 0
+
+    with torch.no_grad():
+        for data, _ in test_loader:
+            data = data.to(device)
+
+            # 前向传播
+            reconstructed = autoencoder(data)
+
+            # 计算MSE loss
+            mse_loss = torch.nn.functional.mse_loss(reconstructed, data, reduction='sum')
+            total_mse += mse_loss.item()
+            total_samples += data.size(0)
+
+    avg_mse = total_mse / total_samples
+    return avg_mse
+
+
+def save_results(results, save_dir: str = './save/finetune_attack'):
+    """
+    保存实验结果
+
+    Args:
+        results: 实验结果
+        save_dir: 保存目录
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    # 保存详细结果
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    results_file = os.path.join(save_dir, f'finetune_attack_results_{timestamp}.pkl')
+    torch.save(results, results_file)
+
+    # 保存CSV格式的简化结果
+    csv_file = os.path.join(save_dir, f'finetune_attack_summary_{timestamp}.csv')
+
+    import pandas as pd
+    df_data = []
+    for result in results:
+        df_data.append({
+            'epoch': result['epoch'],
+            'train_loss': result['train_loss'],
+            'test_loss': result['test_loss'],
+            'test_auc': result['test_auc'],
+            'test_accuracy': result['test_accuracy'],
+            'learning_rate': result['learning_rate']
+        })
+
+    df = pd.DataFrame(df_data)
+    df.to_csv(csv_file, index=False)
+
+    print(f"✓ 结果已保存到: {save_dir}")
+    print(f"  - 详细结果: {results_file}")
+    print(f"  - 汇总结果: {csv_file}")
+
 
 def main():
-    parser = argparse.ArgumentParser(description='微调攻击测试')
-    parser.add_argument('--model_path', type=str, required=True, help='待测试模型pkl文件路径')
-    parser.add_argument('--finetune_epochs', type=int, default=10, help='微调轮数')
-    parser.add_argument('--finetune_lr', type=float, default=0.001, help='微调学习率')
-    parser.add_argument('--seed', type=int, default=42, help='随机种子')
-    parser.add_argument('--key_matrix_dir', type=str, default='save/key_matrix', help='密钥矩阵目录')
-    parser.add_argument('--remove_watermark', action='store_true', help='是否在微调前移除水印')
-    parser.add_argument('--enable_watermark_reconstruction', action='store_true', 
-                       help='启用水印重建和侵权判断功能')
-    parser.add_argument('--autoencoder_weights_dir', type=str, default='save/autoencoder',
-                       help='自编码器权重目录')
-    parser.add_argument('--client_id', type=int, default=0, help='用于水印重建的客户端ID')
-    parser.add_argument('--use_deltapcc', action='store_true', default=True,
-                       help='使用ΔPCC方法进行侵权判断')
-    parser.add_argument('--perf_fail_mse', type=float, default=0.5,
-                       help='失效性能的MSE值（容忍下限）')
+    """主函数"""
+    # 设置设备
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"使用设备: {device}")
+
+    # 配置参数
+    model_path = './save/resnet/chestmnist/202509182256_Dp_False_sig_0.1_iid_True_ns_1_wt_gamma_lt_sign_bit_20_alp_0.2_nb_1_type_True_tri_40_ep_100_le_2_cn_10_fra_1.0000_acc_0.7004.pkl'
+    key_matrix_dir = './save/key_matrix'
+    autoencoder_dir = './save/autoencoder'
+
+    # 微调参数
+    finetune_epochs = 50
+    eval_interval = 1  # 每轮都评估
+    learning_rate = 0.001
+    batch_size = 128
+
+    print(f"微调攻击实验参数:")
+    print(f"  - 微调轮数: {finetune_epochs}")
+    print(f"  - 评估间隔: {eval_interval}")
+    print(f"  - 学习率: {learning_rate}")
+    print(f"  - 批次大小: {batch_size}")
+    print("-" * 60)
+
+    # 加载数据
+    print("加载数据...")
+    mnist_test_loader = load_mnist_test_data(batch_size=128)
+    chestmnist_train_set, chestmnist_test_set = load_chestmnist_data()
+
+    # 创建数据加载器
+    train_loader = DataLoader(chestmnist_train_set, batch_size=batch_size, shuffle=True, num_workers=2)
+    test_loader = DataLoader(chestmnist_test_set, batch_size=batch_size*2, shuffle=False, num_workers=2)
+
+    # 加载主任务模型
+    print("加载主任务模型...")
+    model = load_main_task_model(model_path, device)
+    if model is None:
+        print("❌ 主任务模型加载失败")
+        return
+
+    # 保存原始模型状态
+    original_model_state = copy.deepcopy(model.state_dict())
+
+    # 初始化水印重建器
+    print("初始化水印重建器...")
+    reconstructor = WatermarkReconstructor(key_matrix_dir, autoencoder_dir)
+
+    print("开始微调攻击实验...")
+    print("=" * 80)
     
-    args = parser.parse_args()
+    # 第0轮：测试微调前的水印检测
+    print("=== 第0轮评估（微调前）===")
+    delta_pcc_result_0 = evaluate_delta_pcc(
+        original_model_state, original_model_state, reconstructor,
+        mnist_test_loader, device, perf_fail_ratio=0.7
+    )
+    if delta_pcc_result_0:
+        print(f"性能基准 (perf_before): {delta_pcc_result_0['perf_before']:.6f}")
+        print(f"性能阈值 (perf_fail): {delta_pcc_result_0['perf_fail']:.6f}")
+        print(f"τ值: {delta_pcc_result_0['tau']:.6f}")
+        print(f"性能变化 (delta_perf): {delta_pcc_result_0['delta_perf']:.6f}")
+        print(f"ΔPCC: {delta_pcc_result_0['delta_pcc']:.6f} | 侵权判断: {delta_pcc_result_0['result_text']}")
+    print("-" * 50)
     
-    # 设置随机种子
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(args.seed)
-        torch.cuda.manual_seed_all(args.seed)
-    
-    # 加载模型
-    model_state, model_args, original_best_acc, original_best_auc = load_model_from_pkl(args.model_path)
-    
-    # 创建模型
-    model = create_model(model_args)
-    model.load_state_dict(model_state)
-    
-    if model_args.device == 'cuda' and torch.cuda.is_available():
-        model = model.cuda()
-    
-    # 加载数据集
-    print(f"\n加载数据集: {model_args.dataset}")
-    train_loader, val_loader, test_loader = get_dataset(model_args)
-    
-    # 如果启用水印重建功能，创建自编码器测试数据加载器
-    autoencoder_test_loader = None
-    if args.enable_watermark_reconstruction:
-        print("创建自编码器测试数据加载器...")
-        try:
-            autoencoder_test_loader = create_test_loader_for_autoencoder(
-                batch_size=model_args.batch_size, 
-                num_samples=1000
-            )
-            print("✓ 自编码器测试数据加载器创建成功")
-        except Exception as e:
-            print(f"❌ 创建自编码器测试数据加载器失败: {e}")
-            print("   将禁用水印重建功能")
-            args.enable_watermark_reconstruction = False
-    
-    # 评估原始模型性能
-    print(f"\n评估原始模型性能...")
-    original_loss, original_acc, original_auc, original_sample_acc = evaluate_model(model, test_loader, model_args)
-    print(f"原始模型 - Loss: {original_loss:.4f}, Acc: {original_acc:.2f}%, AUC: {original_auc:.4f}, Sample Acc: {original_sample_acc:.2f}%")
-    
-    # 加载密钥矩阵管理器（用于水印检测）
-    key_manager = None
-    if os.path.exists(args.key_matrix_dir):
-        try:
-            key_manager = KeyMatrixManager(args.key_matrix_dir)
-            print(f"成功加载密钥矩阵管理器")
-        except Exception as e:
-            print(f"加载密钥矩阵管理器失败: {e}")
-    
-    # 检测原始模型中的水印
-    if key_manager is not None:
-        has_watermark, watermark_strength = detect_watermark(model, key_manager, 0)  # 假设客户端0
-        print(f"原始模型水印检测 - 存在水印: {has_watermark}, 水印强度: {watermark_strength:.4f}")
-    
-    # 如果启用移除水印选项
-    if args.remove_watermark and key_manager is not None:
-        print(f"\n移除水印...")
-        try:
-            # 将水印位置设为0
-            model_state_dict = model.state_dict()
-            for param_name, param_tensor in model_state_dict.items():
-                if param_name in key_manager.load_positions(0):
-                    positions = key_manager.load_positions(0)[param_name]
-                    flat_param = param_tensor.flatten()
-                    for pos in positions:
-                        if pos < len(flat_param):
-                            flat_param[pos] = 0.0
-                    model_state_dict[param_name] = flat_param.reshape(param_tensor.shape)
-            model.load_state_dict(model_state_dict)
-            print("水印已移除")
-        except Exception as e:
-            print(f"移除水印失败: {e}")
-    
-    # 进行微调攻击
-    finetune_history = finetune_model(model, train_loader, val_loader, model_args, 
-                                    args.finetune_epochs, args.finetune_lr)
-    
-    # 评估微调后的模型性能
-    print(f"\n评估微调后模型性能...")
-    final_loss, final_acc, final_auc, final_sample_acc = evaluate_model(model, test_loader, model_args)
-    print(f"微调后模型 - Loss: {final_loss:.4f}, Acc: {final_acc:.2f}%, AUC: {final_auc:.4f}, Sample Acc: {final_sample_acc:.2f}%")
-    
-    # 检测微调后模型中的水印
-    if key_manager is not None:
-        has_watermark_after, watermark_strength_after = detect_watermark(model, key_manager, 0)
-        print(f"微调后模型水印检测 - 存在水印: {has_watermark_after}, 水印强度: {watermark_strength_after:.4f}")
-    
-    # 水印重建和侵权判断
-    watermark_results_after = {}
-    if args.enable_watermark_reconstruction and autoencoder_test_loader is not None:
-        print(f"\n评估微调后模型的水印重建...")
-        try:
-            reconstructor = WatermarkReconstructor(args.key_matrix_dir, args.autoencoder_weights_dir)
-            
-            if args.use_deltapcc:
-                # 使用ΔPCC方法
-                print("使用ΔPCC方法进行侵权判断...")
-                reconstructor.setup_deltapcc_evaluation(autoencoder_test_loader, args.perf_fail_mse)
-                
-                deltapcc_result = reconstructor.calculate_deltapcc(model.state_dict(), args.client_id)
-                
-                if deltapcc_result['reconstruction_success']:
-                    watermark_results_after = {
-                        'watermark_reconstruction_success': True,
-                        'infringement_detected': deltapcc_result['infringement_detected'],
-                        'delta_pcc': deltapcc_result['delta_pcc'],
-                        'perf_before': deltapcc_result['perf_before'],
-                        'perf_after': deltapcc_result['perf_after'],
-                        'perf_fail': deltapcc_result['perf_fail'],
-                        'delta_perf': deltapcc_result['delta_perf'],
-                        'tau': deltapcc_result['tau'],
-                        'psnr': deltapcc_result['psnr'],
-                        'ssim': deltapcc_result['ssim'],
-                        'method': 'deltapcc'
-                    }
-                    
-                    print(f"水印重建成功 - 侵权检测: {'是' if deltapcc_result['infringement_detected'] else '否'}")
-                    print(f"ΔPCC值: {deltapcc_result['delta_pcc']:.4f}")
-                    print(f"基准性能: {deltapcc_result['perf_before']:.6f}")
-                    print(f"测试后性能: {deltapcc_result['perf_after']:.6f}")
-                    print(f"性能变化: {deltapcc_result['delta_perf']:.6f}")
-                    print(f"阈值τ: {deltapcc_result['tau']:.6f}")
-                    print(f"PSNR: {deltapcc_result['psnr']:.2f}")
-                    print(f"SSIM: {deltapcc_result['ssim']:.4f}")
-                else:
-                    print("❌ 水印重建失败")
-                    watermark_results_after = {
-                        'watermark_reconstruction_success': False,
-                        'infringement_detected': False,
-                        'method': 'deltapcc'
-                    }
-            else:
-                # 使用传统方法
-                print("使用传统方法进行侵权判断...")
-                reconstructed_autoencoder = reconstructor.reconstruct_autoencoder_from_watermark(
-                    model.state_dict(), args.client_id
-                )
-                
-                if reconstructed_autoencoder is not None:
-                    # 比较性能
-                    comparison_results = reconstructor.compare_with_original_autoencoder(
-                        reconstructed_autoencoder, autoencoder_test_loader
-                    )
-                    
-                    # 侵权判断
-                    infringement_results = reconstructor.assess_infringement(comparison_results)
-                    
-                    watermark_results_after = {
-                        'watermark_reconstruction_success': True,
-                        'infringement_detected': infringement_results['overall_infringement'],
-                        'psnr_retention': comparison_results['retention']['psnr_retention'],
-                        'ssim_retention': comparison_results['retention']['ssim_retention'],
-                        'reconstruction_loss': comparison_results['reconstructed']['reconstruction_loss'],
-                        'original_reconstruction_loss': comparison_results['original']['reconstruction_loss'],
-                        'method': 'traditional'
-                    }
-                    
-                    print(f"水印重建成功 - 侵权检测: {'是' if infringement_results['overall_infringement'] else '否'}")
-                    print(f"PSNR保持率: {comparison_results['retention']['psnr_retention']:.2%}")
-                    print(f"SSIM保持率: {comparison_results['retention']['ssim_retention']:.2%}")
-                else:
-                    print("❌ 水印重建失败")
-                    watermark_results_after = {
-                        'watermark_reconstruction_success': False,
-                        'infringement_detected': False,
-                        'method': 'traditional'
-                    }
-        except Exception as e:
-            print(f"❌ 水印重建评估失败: {e}")
-            watermark_results_after = {
-                'watermark_reconstruction_success': False,
-                'infringement_detected': False,
-                'error': str(e),
-                'method': 'deltapcc' if args.use_deltapcc else 'traditional'
-            }
-    
-    # 计算性能变化
-    acc_change = final_acc - original_acc
-    auc_change = final_auc - original_auc
-    sample_acc_change = final_sample_acc - original_sample_acc
-    
-    print(f"\n性能变化:")
-    print(f"准确率变化: {acc_change:+.2f}%")
-    print(f"AUC变化: {auc_change:+.4f}")
-    print(f"样本准确率变化: {sample_acc_change:+.2f}%")
-    
-    # 保存结果
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    results_dir = "save/finetune_attack"
-    os.makedirs(results_dir, exist_ok=True)
-    
-    # 准备结果数据
-    results = []
-    for epoch_data in finetune_history:
-        results.append({
-            'epoch': epoch_data['epoch'],
-            'train_loss': epoch_data['train_loss'],
-            'train_acc': epoch_data['train_acc'],
-            'val_loss': epoch_data['val_loss'],
-            'val_acc': epoch_data['val_acc'],
-            'val_auc': epoch_data['val_auc'],
-            'val_sample_acc': epoch_data['val_sample_acc']
-        })
-    
-    # 添加最终测试结果
-    final_result = {
-        'epoch': 'final_test',
-        'train_loss': 0.0,
-        'train_acc': 0.0,
-        'val_loss': final_loss,
-        'val_acc': final_acc,
-        'val_auc': final_auc,
-        'val_sample_acc': final_sample_acc
+    # 创建第0轮的结果记录
+    initial_result = {
+        'epoch': 0,
+        'train_loss': 0.0,  # 第0轮没有训练
+        'test_loss': 0.0,   # 第0轮没有测试
+        'test_auc': 0.0,    # 第0轮没有测试
+        'test_accuracy': 0.0,  # 第0轮没有测试
+        'learning_rate': 0.0,  # 第0轮没有学习率
     }
     
-    # 添加水印重建结果
-    if watermark_results_after:
-        if watermark_results_after.get('method') == 'deltapcc':
-            # ΔPCC方法结果
-            final_result.update({
-                'watermark_reconstruction_success': watermark_results_after.get('watermark_reconstruction_success', False),
-                'infringement_detected': watermark_results_after.get('infringement_detected', False),
-                'delta_pcc': watermark_results_after.get('delta_pcc', float('inf')),
-                'perf_before': watermark_results_after.get('perf_before', float('inf')),
-                'perf_after': watermark_results_after.get('perf_after', float('inf')),
-                'perf_fail': watermark_results_after.get('perf_fail', float('inf')),
-                'delta_perf': watermark_results_after.get('delta_perf', float('inf')),
-                'tau': watermark_results_after.get('tau', float('inf')),
-                'psnr': watermark_results_after.get('psnr', 0.0),
-                'ssim': watermark_results_after.get('ssim', 0.0),
-                'method': 'deltapcc'
-            })
-        else:
-            # 传统方法结果
-            final_result.update({
-                'watermark_reconstruction_success': watermark_results_after.get('watermark_reconstruction_success', False),
-                'infringement_detected': watermark_results_after.get('infringement_detected', False),
-                'psnr_retention': watermark_results_after.get('psnr_retention', 0.0),
-                'ssim_retention': watermark_results_after.get('ssim_retention', 0.0),
-                'reconstruction_loss': watermark_results_after.get('reconstruction_loss', float('inf')),
-                'original_reconstruction_loss': watermark_results_after.get('original_reconstruction_loss', float('inf')),
-                'method': 'traditional'
-            })
-    
-    results.append(final_result)
-    
-    # 保存CSV
-    df = pd.DataFrame(results)
-    csv_filename = f"finetune_attack_{model_args.model}_{model_args.dataset}_{timestamp}.csv"
-    csv_path = os.path.join(results_dir, csv_filename)
-    df.to_csv(csv_path, index=False, encoding='utf-8-sig')
-    
-    # 添加模型信息作为注释
-    watermark_info = ""
-    if args.enable_watermark_reconstruction and watermark_results_after:
-        watermark_info = f"""# 水印重建功能: 已启用
-# 密钥矩阵目录: {args.key_matrix_dir}
-# 自编码器权重目录: {args.autoencoder_weights_dir}
-# 客户端ID: {args.client_id}
-# 水印重建成功: {watermark_results_after.get('watermark_reconstruction_success', False)}
-# 侵权检测: {watermark_results_after.get('infringement_detected', False)}
-# PSNR保持率: {watermark_results_after.get('psnr_retention', 0.0):.2%}
-# SSIM保持率: {watermark_results_after.get('ssim_retention', 0.0):.2%}
-#
-"""
+    # 添加第0轮的ΔPCC和侵权判断信息
+    if delta_pcc_result_0:
+        initial_result.update({
+            'perf_before': delta_pcc_result_0['perf_before'],
+            'perf_fail': delta_pcc_result_0['perf_fail'],
+            'tau': delta_pcc_result_0['tau'],
+            'delta_perf': delta_pcc_result_0['delta_perf'],
+            'delta_pcc': delta_pcc_result_0['delta_pcc'],
+            'is_infringement': delta_pcc_result_0['is_infringement'],
+            'result_text': delta_pcc_result_0['result_text']
+        })
     else:
-        watermark_info = "# 水印重建功能: 未启用\n"
-    
-    model_info = f"""# 微调攻击实验结果
-# 模型文件: {args.model_path}
-# 模型类型: {model_args.model}
-# 数据集: {model_args.dataset}
-# 设备: {model_args.device}
-# 批次大小: {model_args.batch_size}
-# 微调轮数: {args.finetune_epochs}
-# 微调学习率: {args.finetune_lr}
-# 随机种子: {args.seed}
-# 移除水印: {args.remove_watermark}
-# 原始最佳准确率: {original_best_acc:.4f}
-# 原始最佳AUC: {original_best_auc:.4f}
-# 原始测试准确率: {original_acc:.2f}%
-# 原始测试AUC: {original_auc:.4f}
-# 微调后测试准确率: {final_acc:.2f}%
-# 微调后测试AUC: {final_auc:.4f}
-# 准确率变化: {acc_change:+.2f}%
-# AUC变化: {auc_change:+.4f}
-# 实验时间: {time.strftime('%Y-%m-%d %H:%M:%S')}
-#
-{watermark_info}
-"""
-    
-    # 将注释写入CSV文件开头
-    with open(csv_path, 'r', encoding='utf-8') as f:
-        content = f.read()
-    
-    with open(csv_path, 'w', encoding='utf-8') as f:
-        f.write(model_info)
-        f.write(content)
-    
-    print(f"\n结果已保存到: {csv_path}")
-    
-    # 总结
-    print(f"\n{'='*80}")
-    print(f"微调攻击测试完成")
-    print(f"{'='*80}")
-    print(f"模型: {model_args.model} on {model_args.dataset}")
-    print(f"微调轮数: {args.finetune_epochs}")
-    print(f"微调学习率: {args.finetune_lr}")
-    print(f"原始性能: Acc={original_acc:.2f}%, AUC={original_auc:.4f}")
-    print(f"微调后性能: Acc={final_acc:.2f}%, AUC={final_auc:.4f}")
-    print(f"性能变化: Acc={acc_change:+.2f}%, AUC={auc_change:+.4f}")
-    if key_manager is not None:
-        print(f"水印状态: 微调前={has_watermark}, 微调后={has_watermark_after}")
-        print(f"水印强度变化: {watermark_strength_after - watermark_strength:+.4f}")
-    
-    # 水印重建和侵权判断总结
-    if args.enable_watermark_reconstruction and watermark_results_after:
-        print(f"\n水印重建和侵权判断总结:")
-        print(f"水印重建成功: {'是' if watermark_results_after.get('watermark_reconstruction_success', False) else '否'}")
-        print(f"侵权检测: {'是' if watermark_results_after.get('infringement_detected', False) else '否'}")
-        print(f"PSNR保持率: {watermark_results_after.get('psnr_retention', 0.0):.2%}")
-        print(f"SSIM保持率: {watermark_results_after.get('ssim_retention', 0.0):.2%}")
-        
-        # 侵权风险评估
-        psnr_retention = watermark_results_after.get('psnr_retention', 0.0)
-        ssim_retention = watermark_results_after.get('ssim_retention', 0.0)
-        infringement_detected = watermark_results_after.get('infringement_detected', False)
-        
-        if infringement_detected and psnr_retention >= 0.7 and ssim_retention >= 0.7:
-            risk_level = "高风险 (确认侵权)"
-        elif psnr_retention >= 0.5 or ssim_retention >= 0.5:
-            risk_level = "中风险 (可能侵权)"
-        else:
-            risk_level = "低风险 (未侵权)"
-        
-        print(f"侵权风险等级: {risk_level}")
+        initial_result.update({
+            'perf_before': None,
+            'perf_fail': None,
+            'tau': None,
+            'delta_perf': None,
+            'delta_pcc': None,
+            'is_infringement': None,
+            'result_text': 'N/A'
+        })
 
-if __name__ == "__main__":
+    # 进行微调训练
+    model_states, performance_metrics = finetune_model(
+        model, train_loader, test_loader,
+        epochs=finetune_epochs, lr=learning_rate,
+        device=device, eval_interval=eval_interval,
+        reconstructor=reconstructor, original_model_state=original_model_state,
+        mnist_test_loader=mnist_test_loader
+    )
+
+    # 微调训练已完成，ΔPCC和侵权判断已在训练过程中评估
+    print("\n" + "=" * 80)
+    print("微调攻击实验完成")
+    print("=" * 80)
+
+    # 将第0轮结果和训练结果合并
+    results = [initial_result] + performance_metrics
+
+    # 保存结果
+    print("\n" + "=" * 80)
+    print("保存实验结果...")
+    save_results(results)
+
+    # 输出总结
+    print("\n" + "=" * 80)
+    print("微调攻击实验总结")
+    print("=" * 80)
+    print(f"{'轮次':<4} {'训练损失':<10} {'测试损失':<10} {'测试AUC':<8} {'测试准确率%':<10} {'ΔPCC':<8} {'侵权判断':<8}")
+    print("-" * 80)
+
+    for result in results:
+        delta_pcc_str = f"{result['delta_pcc']:.4f}" if result['delta_pcc'] is not None else "N/A"
+        infringement_str = "是" if result['is_infringement'] else "否" if result['is_infringement'] is not None else "N/A"
+        
+        print(f"{result['epoch']:>3}  "
+              f"{result['train_loss']:>8.4f}  "
+              f"{result['test_loss']:>8.4f}  "
+              f"{result['test_auc']:>6.4f}  "
+              f"{result['test_accuracy']:>8.2%}  "
+              f"{delta_pcc_str:>6}  "
+              f"{infringement_str:>6}")
+
+    # 分析趋势
+    print("\n趋势分析:")
+    if len(results) > 1:
+        initial_auc = results[0]['test_auc']
+        final_auc = results[-1]['test_auc']
+        auc_change = final_auc - initial_auc
+
+        initial_acc = results[0]['test_accuracy']
+        final_acc = results[-1]['test_accuracy']
+        acc_change = final_acc - initial_acc
+
+        print(f"测试AUC变化: {initial_auc:.4f} → {final_auc:.4f} (变化: {auc_change:+.4f})")
+        print(f"测试准确率变化: {initial_acc:.2%} → {final_acc:.2%} (变化: {acc_change:+.2%})")
+        
+        # 分析ΔPCC趋势
+        delta_pcc_values = [r['delta_pcc'] for r in results if r['delta_pcc'] is not None]
+        if len(delta_pcc_values) > 1:
+            initial_delta_pcc = delta_pcc_values[0]
+            final_delta_pcc = delta_pcc_values[-1]
+            delta_pcc_change = final_delta_pcc - initial_delta_pcc
+            print(f"ΔPCC变化: {initial_delta_pcc:.4f} → {final_delta_pcc:.4f} (变化: {delta_pcc_change:+.4f})")
+        
+        # 分析侵权判断
+        infringement_count = sum(1 for r in results if r['is_infringement'] is True)
+        total_evaluations = sum(1 for r in results if r['is_infringement'] is not None)
+        if total_evaluations > 0:
+            infringement_rate = infringement_count / total_evaluations
+            print(f"侵权判断: {infringement_count}/{total_evaluations} 轮被判定为侵权 ({infringement_rate:.1%})")
+
+    print("\n微调攻击实验完成！")
+
+
+if __name__ == '__main__':
     main()
