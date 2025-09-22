@@ -129,7 +129,6 @@ def evaluate_encoder_decoder_from_all_clients(reconstructor, model_state_dict, t
         }
         
     except Exception as e:
-        print(f"❌ 自编码器重建和评估失败: {e}")
         return {
             'mse': float('inf'),
             'ssim': 0.0,
@@ -212,10 +211,15 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
     """
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
     criterion = nn.BCEWithLogitsLoss()
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=epochs//3, gamma=0.1)
+    # 确保step_size至少为1，避免除零错误
+    step_size = max(1, epochs//3) if epochs > 0 else 1
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=0.1)
 
     model_states, performance_metrics = [], []
     print(f"开始微调训练，共 {epochs} 轮，每 {eval_interval} 轮评估一次")
+    
+    # 初始化delta_pcc_result变量
+    delta_pcc_result = None
 
     for epoch in range(epochs):
         model.train()
@@ -307,6 +311,32 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
                     mnist_test_loader, device, perf_fail_ratio=0.5
                 )
 
+            # 保存第1轮和第2轮的ΔPCC结果到performance_metrics中
+            if delta_pcc_result:
+                # 更新当前轮次的metrics
+                current_metrics = performance_metrics[-1]  # 获取刚添加的metrics
+                current_metrics.update({
+                    'perf_before': delta_pcc_result['perf_before'],
+                    'perf_fail': delta_pcc_result['perf_fail'],
+                    'tau': delta_pcc_result['tau'],
+                    'delta_perf': delta_pcc_result['delta_perf'],
+                    'delta_pcc': delta_pcc_result['delta_pcc'],
+                    'is_infringement': delta_pcc_result['is_infringement'],
+                    'result_text': delta_pcc_result['result_text']
+                })
+            else:
+                # 如果没有ΔPCC结果，填充默认值
+                current_metrics = performance_metrics[-1]  # 获取刚添加的metrics
+                current_metrics.update({
+                    'perf_before': None,
+                    'perf_fail': None,
+                    'tau': None,
+                    'delta_perf': None,
+                    'delta_pcc': None,
+                    'is_infringement': None,
+                    'result_text': 'N/A'
+                })
+
             # 打印核心指标
             print(f"\n=== 第 {epoch+1} 轮评估 ===")
             print(f"训练损失: {avg_loss:.4f} | 测试损失: {avg_test_loss:.4f} | "
@@ -314,6 +344,8 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
             if delta_pcc_result:
                 print(f"性能基准: {delta_pcc_result['perf_before']:.6f} | 性能变化: {delta_pcc_result['delta_perf']:.6f}")
                 print(f"ΔPCC: {delta_pcc_result['delta_pcc']:.6f} | 侵权判断: {delta_pcc_result['result_text']}")
+            else:
+                print("ΔPCC: N/A | 侵权判断: N/A")
             print("-" * 50)
 
     return model_states, performance_metrics
@@ -391,15 +423,18 @@ def evaluate_delta_pcc(original_model_state, current_model_state, reconstructor,
     评估ΔPCC（精简输出）
     """
     try:
+        # 评估原始模型
         original_result = evaluate_encoder_decoder_from_all_clients(
             reconstructor, original_model_state, mnist_test_loader, device
         )
         if not original_result['reconstruction_success']:
             return None
         perf_before = original_result['mse']
+        
         perf_fail = perf_before * (1 + perf_fail_ratio)
         tau = perf_fail - perf_before
 
+        # 评估当前模型
         current_result = evaluate_encoder_decoder_from_all_clients(
             reconstructor, current_model_state, mnist_test_loader, device
         )
@@ -423,7 +458,7 @@ def evaluate_delta_pcc(original_model_state, current_model_state, reconstructor,
             'is_infringement': is_infringement,
             'result_text': result_text
         }
-    except Exception:
+    except Exception as e:
         return None
 
 def test_autoencoder_mse(autoencoder, test_loader, device: str = 'cuda'):
@@ -488,11 +523,18 @@ def save_results(results, save_dir: str = './save/finetune_attack'):
             'test_loss': result['test_loss'],
             'test_auc': result['test_auc'],
             'test_accuracy': result['test_accuracy'],
-            'learning_rate': result['learning_rate']
+            'learning_rate': result['learning_rate'],
+            'perf_before': result.get('perf_before', None),
+            'perf_fail': result.get('perf_fail', None),
+            'tau': result.get('tau', None),
+            'delta_perf': result.get('delta_perf', None),
+            'delta_pcc': result.get('delta_pcc', None),
+            'is_infringement': result.get('is_infringement', None),
+            'result_text': result.get('result_text', 'N/A')
         })
 
     df = pd.DataFrame(df_data)
-    df.to_csv(csv_file, index=False)
+    df.to_csv(csv_file, index=False, encoding='utf-8-sig')
 
     print(f"✓ 结果已保存到: {save_dir}")
     print(f"  - 详细结果: {results_file}")
@@ -511,7 +553,7 @@ def main():
     autoencoder_dir = './save/autoencoder'
 
     # 微调参数
-    finetune_epochs = 50
+    finetune_epochs = 10
     eval_interval = 1  # 每轮都评估
     learning_rate = 0.001
     batch_size = 128
@@ -543,7 +585,6 @@ def main():
     original_model_state = copy.deepcopy(model.state_dict())
 
     # 初始化水印重建器
-    print("初始化水印重建器...")
     reconstructor = WatermarkReconstructor(key_matrix_dir, autoencoder_dir)
 
     print("开始微调攻击实验...")
@@ -551,25 +592,55 @@ def main():
     
     # 第0轮：测试微调前的水印检测
     print("=== 第0轮评估（微调前）===")
+    
+    # 先进行AUC评估
+    model.eval()
+    test_loss, all_predictions, all_targets = 0.0, [], []
+    criterion = nn.BCEWithLogitsLoss()
+    
+    with torch.no_grad():
+        for data, target in test_loader:
+            data, target = data.to(device), target.to(device)
+            output = model(data)
+            test_loss += criterion(output, target.float()).item()
+            all_predictions.append(torch.sigmoid(output).cpu().numpy())
+            all_targets.append(target.cpu().numpy())
+
+    avg_test_loss = test_loss / len(test_loader)
+    all_predictions = np.concatenate(all_predictions, axis=0)
+    all_targets = np.concatenate(all_targets, axis=0)
+
+    # 计算AUC（使用与训练时相同的逻辑）
+    try:
+        from sklearn.metrics import roc_auc_score
+        auc_scores = [
+            roc_auc_score(all_targets[:, i], all_predictions[:, i])
+            for i in range(all_targets.shape[1])
+            if len(np.unique(all_targets[:, i])) > 1
+        ]
+        mean_auc = np.mean(auc_scores) if auc_scores else 0.0
+    except ImportError:
+        mean_auc = 0.0
+
+    # 计算准确率
+    pred_binary = (all_predictions > 0.5).astype(int)
+    accuracy = np.mean((pred_binary == all_targets).astype(float))
+    
+    print(f"测试损失: {avg_test_loss:.4f} | AUC: {mean_auc:.4f} | 准确率: {accuracy:.2%}")
+    
+    # 进行ΔPCC评估
     delta_pcc_result_0 = evaluate_delta_pcc(
         original_model_state, original_model_state, reconstructor,
         mnist_test_loader, device, perf_fail_ratio=0.7
     )
-    if delta_pcc_result_0:
-        print(f"性能基准 (perf_before): {delta_pcc_result_0['perf_before']:.6f}")
-        print(f"性能阈值 (perf_fail): {delta_pcc_result_0['perf_fail']:.6f}")
-        print(f"τ值: {delta_pcc_result_0['tau']:.6f}")
-        print(f"性能变化 (delta_perf): {delta_pcc_result_0['delta_perf']:.6f}")
-        print(f"ΔPCC: {delta_pcc_result_0['delta_pcc']:.6f} | 侵权判断: {delta_pcc_result_0['result_text']}")
-    print("-" * 50)
     
     # 创建第0轮的结果记录
     initial_result = {
         'epoch': 0,
         'train_loss': 0.0,  # 第0轮没有训练
-        'test_loss': 0.0,   # 第0轮没有测试
-        'test_auc': 0.0,    # 第0轮没有测试
-        'test_accuracy': 0.0,  # 第0轮没有测试
+        'test_loss': avg_test_loss,   # 第0轮测试损失
+        'test_auc': mean_auc,    # 第0轮测试AUC
+        'test_accuracy': accuracy,  # 第0轮测试准确率
         'learning_rate': 0.0,  # 第0轮没有学习率
     }
     

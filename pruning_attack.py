@@ -1,5 +1,7 @@
 import copy
 import os
+import pandas as pd
+from datetime import datetime
 
 import torch
 from torch.utils.data import DataLoader
@@ -331,6 +333,47 @@ def evaluate_watermark_after_pruning(model, reconstructor):
         print(f"❌ 水印评估失败: {e}")
         return None
 
+def save_pruning_results(results, save_dir='./save/pruning_results'):
+    """
+    保存剪枝攻击实验结果
+    
+    Args:
+        results: 实验结果列表
+        save_dir: 保存目录
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # 生成时间戳
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    # 保存详细结果（pickle格式）
+    results_file = os.path.join(save_dir, f'pruning_attack_results_{timestamp}.pkl')
+    torch.save(results, results_file)
+    
+    # 保存CSV格式的简化结果
+    csv_file = os.path.join(save_dir, f'pruning_attack_summary_{timestamp}.csv')
+    
+    df_data = []
+    for result in results:
+        df_data.append({
+            'pruning_ratio': result['pruning_ratio'],
+            'watermark_integrity': result['watermark_integrity'],
+            'total_watermark_params': result['total_watermark_params'],
+            'damaged_watermark_params': result['damaged_watermark_params'],
+            'perf_before': result.get('perf_before', float('inf')),
+            'perf_after': result.get('perf_after', float('inf')),
+            'delta_pcc': result.get('delta_pcc', float('inf')),
+            'is_infringement': result.get('is_infringement', False),
+            'result_text': result.get('result_text', '评估失败')
+        })
+    
+    df = pd.DataFrame(df_data)
+    df.to_csv(csv_file, index=False, encoding='utf-8-sig')
+    
+    print(f"✓ 结果已保存到: {save_dir}")
+    print(f"  - 详细结果: {results_file}")
+    print(f"  - 汇总结果: {csv_file}")
+
 def main():
     """主函数"""
     # 设置设备
@@ -427,6 +470,10 @@ def main():
             print(f"{result['pruning_ratio']:>4.0%} "
                   f"{result['watermark_integrity']:>11.2%} {result['delta_pcc']:>9.6f} "
                   f"{result['result_text']:>6}")
+        
+        # 保存实验结果
+        print("\n保存实验结果...")
+        save_pruning_results(results)
             
     else:
         print("主任务模型加载失败")
