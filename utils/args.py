@@ -15,7 +15,7 @@ def parser_args():
     parser.add_argument('--in_channels', type=int, default=3, help='input channels')
     
     # ========================= 联邦学习核心参数 ========================
-    parser.add_argument('--epochs', type=int, default=100, help='total communication rounds')
+    parser.add_argument('--epochs', type=int, default=10, help='total communication rounds')
     parser.add_argument('--local_ep', type=int, default=2, help="local epochs per client: E")
     parser.add_argument('--batch_size', type=int, default=128, help="local batch size: B")
     parser.add_argument('--client_num', type=int, default=10, help="number of clients: K")
@@ -70,6 +70,27 @@ def parser_args():
     # ========================= 差分隐私参数 ========================
     parser.add_argument('--dp', action='store_true', default=False, help='enable differential privacy')
     parser.add_argument('--sigma', type=float, default=0.1, help='Gaussian noise standard deviation')
+    
+    # ========================= 学习率调度参数 ========================
+    parser.add_argument('--lr_decay_gamma', type=float, default=0.1, help='learning rate decay factor')
+    parser.add_argument('--lr_decay_milestones', type=float, nargs='+', default=[0.5, 0.75], 
+                        help='learning rate decay milestones as fractions of total epochs')
+    
+    # ========================= 数据集特定参数 ========================
+    parser.add_argument('--num_classes', type=int, default=14, help='number of classes (14 for ChestMNIST)')
+    parser.add_argument('--in_channels', type=int, default=3, help='input channels (3 for RGB)')
+    
+    # ========================= 聚合算法参数 ========================
+    parser.add_argument('--weight_tolerance', type=float, default=1e-6, 
+                        help='tolerance for weight sum normalization check')
+    
+    # ========================= 保存路径参数 ========================
+    parser.add_argument('--save_excel_dir', type=str, default='save/excel', 
+                        help='directory to save Excel metrics')
+    parser.add_argument('--save_model_dir', type=str, default='save', 
+                        help='directory to save model files')
+    parser.add_argument('--log_file', type=str, default='./logs/console.logs', 
+                        help='log file path')
     
     # ========================= 其他参数 ========================
     parser.add_argument('--bp_interval', default=30, type=int, help='backpropagation interval')

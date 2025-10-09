@@ -16,13 +16,14 @@ from models.resnet import resnet18
 from utils.args import parser_args
 from utils.base import Experiment
 from utils.dataset import get_data, DatasetSplit, construct_random_wm_position
-from utils.trainer_private import TrainerPrivate, TesterPrivate
+from utils.trainer_private_enhanced import TrainerPrivateEnhanced, TesterPrivate
 import pandas as pd
 
 set_seed()
 
 # 配置 logging
-log_file_name = './logs/console.logs'
+args = parser_args()
+log_file_name = args.log_file
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -41,13 +42,16 @@ class FederatedLearningOnChestMNIST(Experiment):
         self.args = args
         self.dp = args.dp
         self.sigma = args.sigma
+        self.key_matrix_dir = getattr(args, 'key_matrix_dir', './save/key_matrix')
+        
         logging.info('--------------------------------Start--------------------------------------')
         logging.info(args)
         logging.info('==> Preparing data...')
+        logging.info('==> 使用增强水印系统（密钥矩阵 + 自编码器）')
         
-        # ChestMNIST多标签分类设置
-        self.num_classes = 14  # ChestMNIST是多标签分类，14个病理标签
-        self.in_channels = 3  # RGB图像
+        # 数据集配置
+        self.num_classes = args.num_classes
+        self.in_channels = args.in_channels
             
         self.train_set, self.test_set, self.dict_users = get_data(dataset_name=self.dataset,
                                                                   data_root=self.data_root,
@@ -62,7 +66,7 @@ class FederatedLearningOnChestMNIST(Experiment):
                      'best_model': [],
                      'local_loss': [],
                      # 独立跟踪历史最高指标
-                     'highest_acc_ever': -np.inf,      # 历史最高准确率（纯准确率）
+                     'highest_acc_ever': -np.inf,     # 历史最高准确率（纯准确率）
                      'highest_auc_ever': -np.inf,     # 历史最高AUC（纯AUC）
                      'acc_when_highest_auc': -np.inf, # 达到历史最高AUC时的准确率
                      'auc_when_highest_acc': -np.inf, # 达到历史最高准确率时的AUC
@@ -71,9 +75,13 @@ class FederatedLearningOnChestMNIST(Experiment):
         self.construct_model()
         self.w_t = copy.deepcopy(self.model.state_dict())
 
-        # 将随机参数位置分配给每个客户端
-        self.random_positions = construct_random_wm_position(self.model, self.client_num)
-        self.trainer = TrainerPrivate(self.model, self.device, self.dp, self.sigma, self.random_positions, self.args)
+        # 增强水印系统：使用密钥矩阵
+        self.random_positions = {}
+        # 设置密钥矩阵目录
+        self.args.key_matrix_dir = self.key_matrix_dir
+        self.args.use_key_matrix = True
+            
+        self.trainer = TrainerPrivateEnhanced(self.model, self.device, self.dp, self.sigma, self.random_positions, self.args)
         self.tester = TesterPrivate(self.model, self.device)
 
     def construct_model(self):
@@ -119,16 +127,23 @@ class FederatedLearningOnChestMNIST(Experiment):
             for idx in tqdm(idxs_users, desc='Progress: %d / %d' % (epoch + 1, self.epochs)):
                 self.model.load_state_dict(self.w_t)
 
-                # 传递客户端的ID给 TrainerPrivate
-                local_w, local_loss, local_acc = self.trainer.local_update(local_train_loader[idx], self.local_ep, self.lr, idx)
+                # 传递客户端的ID给 TrainerPrivateEnhanced，包含当前epoch信息
+                local_w, local_loss, local_acc = self.trainer.local_update(
+                    dataloader=local_train_loader[idx], 
+                    local_ep=self.local_ep, 
+                    lr=self.lr, 
+                    client_id=idx,
+                    current_epoch=epoch,
+                    total_epochs=self.epochs
+                )
 
                 local_ws.append(copy.deepcopy(local_w))
                 local_losses.append(local_loss)
 
-            # 学习率调度 - MultiStepLR (在50%和75%epoch时衰减)
-            milestones = [int(self.epochs * 0.5), int(self.epochs * 0.75)]
+            # 学习率调度 - MultiStepLR
+            milestones = [int(self.epochs * m) for m in self.args.lr_decay_milestones]
             if (epoch + 1) in milestones:
-                self.lr *= 0.1  # 使用MedMNIST2D的gamma=0.1
+                self.lr *= self.args.lr_decay_gamma
                 logging.info(f'LR decayed at epoch {epoch + 1} (milestone: {milestones}). New lr: {self.lr}')
 
             # 计算参与训练的客户端的权重（相对于总数据集）
@@ -180,6 +195,11 @@ class FederatedLearningOnChestMNIST(Experiment):
                     f"Train: acc(label) {acc_train_label_mean:.4f}, acc(sample) {acc_train_sample_mean:.4f} (AUC {auc_train:.4f}) | "
                     f"Val: acc(label) {acc_val_label_mean:.4f}, acc(sample) {acc_val_sample_mean:.4f} (AUC {auc_val:.4f}) | "
                     f"Highest ACC: {self.logs['highest_acc_ever']:.4f} | Highest AUC: {self.logs['highest_auc_ever']:.4f}")
+                
+                # 打印增强水印系统统计信息
+                if hasattr(self.trainer, 'multi_loss'):
+                    stats = self.trainer.multi_loss.get_stats()
+                    logging.info(f"MultiLoss统计 - prevGM: {stats['prevGM']:.6f}, prevGH: {stats['prevGH']:.6f}, prevRatio: {stats['prevRatio']:.6f}")
 
 
                 # Early Stopping：基于验证AUC
@@ -193,7 +213,7 @@ class FederatedLearningOnChestMNIST(Experiment):
                         break
 
                 # 记录本轮统计数据
-                stats_rows.append({
+                stats_row = {
                     'round': epoch + 1,
                     'lr': self.lr,
                     'train_loss': float(loss_train_mean),
@@ -206,7 +226,22 @@ class FederatedLearningOnChestMNIST(Experiment):
                     'best_val_auc_so_far': float(self.logs['highest_auc_ever']),
                     'train_acc_sample': float(acc_train_sample_mean),
                     'val_acc_sample': float(acc_val_sample_mean),
-                })
+                }
+                
+                # 添加增强水印系统统计信息
+                if hasattr(self.trainer, 'multi_loss'):
+                    multi_loss_stats = self.trainer.multi_loss.get_stats()
+                    stats_row.update({
+                        'prevGM': float(multi_loss_stats['prevGM']),
+                        'prevGH': float(multi_loss_stats['prevGH']),
+                        'prevRatio': float(multi_loss_stats['prevRatio']),
+                        'current_grad_M': float(multi_loss_stats['current_grad_M']),
+                        'current_grad_H': float(multi_loss_stats['current_grad_H']),
+                        'current_var_M': float(multi_loss_stats['current_var_M']),
+                        'current_var_H': float(multi_loss_stats['current_var_H']),
+                    })
+                
+                stats_rows.append(stats_row)
 
         logging.info('-------------------------------Result--------------------------------------')
         logging.info(
@@ -222,13 +257,15 @@ class FederatedLearningOnChestMNIST(Experiment):
 
         # 导出Excel
         try:
-            os.makedirs('save/excel', exist_ok=True)
+            os.makedirs(self.args.save_excel_dir, exist_ok=True)
+            # 基础列 + 增强水印系统统计列
             columns = ['round', 'lr', 'train_loss', 'val_loss', 'train_acc_label', 'train_auc', 
                      'val_acc_label', 'val_auc', 'best_val_acc_so_far', 'best_val_auc_so_far', 
-                     'train_acc_sample', 'val_acc_sample']
+                     'train_acc_sample', 'val_acc_sample', 'prevGM', 'prevGH', 'prevRatio', 
+                     'current_grad_M', 'current_grad_H', 'current_var_M', 'current_var_H']
             df = pd.DataFrame(stats_rows, columns=columns)
             now = datetime.now().strftime('%Y%m%d%H%M%S')
-            excel_path = f'save/excel/metrics_{self.model_name}_{self.dataset}_{now}.xlsx'
+            excel_path = f'{self.args.save_excel_dir}/metrics_{self.model_name}_{self.dataset}_{now}.xlsx'
             df.to_excel(excel_path, index=False, engine='openpyxl')
             logging.info(f'Excel metrics saved to: {excel_path}')
         except Exception as e:
@@ -247,7 +284,7 @@ class FederatedLearningOnChestMNIST(Experiment):
         
         # 验证权重和是否为1
         weight_sum = sum(normalized_weights)
-        if abs(weight_sum - 1.0) > 1e-6:
+        if abs(weight_sum - 1.0) > self.args.weight_tolerance:
             logging.warning(f"Weight sum is {weight_sum:.6f}, not 1.0. Normalizing...")
             normalized_weights = [w / weight_sum for w in normalized_weights]
         
@@ -261,16 +298,16 @@ class FederatedLearningOnChestMNIST(Experiment):
             for k in w_avg.keys():
                 w_avg[k] += local_ws[i][k] * normalized_weights[i]
 
-        # 独占式水印聚合：每个客户端的水印位置只使用该客户端的参数
-        self._exclusive_watermark_aggregation(local_ws, idxs_users, w_avg)
+        # 水印聚合：使用密钥矩阵的独占式聚合
+        self._watermark_aggregation(local_ws, idxs_users, w_avg)
 
         # 更新全局模型权重
         for k in w_avg.keys():
             self.w_t[k] = w_avg[k]
 
-    def _exclusive_watermark_aggregation(self, local_ws, idxs_users, w_avg):
+    def _watermark_aggregation(self, local_ws, idxs_users, w_avg):
         """
-        独占式水印聚合：每个客户端的水印位置只使用该客户端的参数
+        水印聚合：使用密钥矩阵的独占式聚合
         
         Args:
             local_ws: 本地模型权重列表
@@ -281,7 +318,7 @@ class FederatedLearningOnChestMNIST(Experiment):
             from utils.key_matrix_utils import KeyMatrixManager
             
             # 加载密钥矩阵管理器
-            key_manager = KeyMatrixManager('./save/key_matrix')
+            key_manager = KeyMatrixManager(self.key_matrix_dir)
             
             # 对每个客户端的水印位置进行独占式聚合
             for i, client_id in enumerate(idxs_users):
@@ -307,11 +344,11 @@ class FederatedLearningOnChestMNIST(Experiment):
                                     param_flat[param_idx] = local_flat[param_idx]
                                     
                 except Exception as e:
-                    logging.warning(f"Failed to apply exclusive watermark aggregation for client {client_id}: {e}")
+                    logging.warning(f"Failed to apply watermark aggregation for client {client_id}: {e}")
                     continue
                     
         except Exception as e:
-            logging.warning(f"Failed to load key matrix manager for exclusive watermark aggregation: {e}")
+            logging.warning(f"Failed to load key matrix manager for watermark aggregation: {e}")
 
 def main(args):
     logs = {'net_info': None,
@@ -339,26 +376,28 @@ def main(args):
     logs['test_auc'] = {'value': test_auc}
     logs['bp_local'] = {'value': True if args.bp_interval == 0 else False}
 
-    save_dir = './save/'
+    save_dir = args.save_model_dir + '/'
 
     if not os.path.exists(save_dir + args.model_name + '/' + args.dataset):
         os.makedirs(save_dir + args.model_name + '/' + args.dataset)
 
     now = datetime.now()
     formatted_now = now.strftime("%Y%m%d%H%M")
+    # 构建文件名，包含增强水印系统标识
+    enhanced_suffix = "_enhanced"
+    
     torch.save(logs,
                save_dir + args.model_name + '/' + args.dataset + '/{}_Dp_{}_sig_{}_iid_{}_ns_{}_wt_{}_lt_{}_bit_{}_'
                                                                  'alp_{}_nb_{}_type_{}_tri_{}_ep_{}_le_{}_cn_{}_'
-                                                                 'fra_{:.4f}_acc_{:.4f}.pkl'.format(
+                                                                 'fra_{:.4f}_acc_{:.4f}{}.pkl'.format(
                    formatted_now, args.dp, args.sigma, args.iid, args.num_sign, args.weight_type, args.loss_type, args.num_bit,
                    args.loss_alpha, args.num_back, args.backdoor_indis, args.num_trigger, args.epochs, args.local_ep,
-                   args.client_num, args.frac, test_auc
+                   args.client_num, args.frac, test_auc, enhanced_suffix
                ))
 
     return
 
 if __name__ == '__main__':
-    args = parser_args()
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
     main(args)
