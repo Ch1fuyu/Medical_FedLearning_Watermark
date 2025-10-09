@@ -227,7 +227,7 @@ class WatermarkReconstructor:
     
     def evaluate_classification_performance(self, model, test_loader) -> Dict[str, float]:
         """
-        评估模型在分类任务上的性能（适用于多标签任务如ChestMNIST）
+        评估模型在分类任务上的性能（适用于ChestMNIST任务）
         
         Args:
             model: 分类模型（如ResNet18）
@@ -248,7 +248,7 @@ class WatermarkReconstructor:
                 # 获取模型预测
                 output = model(data)
                 
-                # 对于多标签任务，使用sigmoid激活
+                # 使用sigmoid激活
                 if len(target.shape) == 2 and target.shape[1] > 1:
                     pred_prob = torch.sigmoid(output)
                 else:
@@ -261,11 +261,11 @@ class WatermarkReconstructor:
         all_predictions = np.concatenate(all_predictions, axis=0)
         all_targets = np.concatenate(all_targets, axis=0)
         
-        # 计算AUC（多标签任务）
+        # 计算AUC
         try:
             from sklearn.metrics import roc_auc_score
             if len(all_targets.shape) == 2 and all_targets.shape[1] > 1:
-                # 多标签分类：计算每个标签的AUC，然后取平均
+                # 计算每个标签的AUC，然后取平均
                 auc_scores = []
                 for i in range(all_targets.shape[1]):
                     if len(np.unique(all_targets[:, i])) > 1:  # 确保标签有变化
@@ -273,17 +273,17 @@ class WatermarkReconstructor:
                         auc_scores.append(auc)
                 mean_auc = np.mean(auc_scores) if auc_scores else 0.0
             else:
-                # 单标签分类：使用one-vs-rest策略
+                # 使用one-vs-rest策略
                 mean_auc = roc_auc_score(all_targets, all_predictions, multi_class='ovr')
         except ImportError:
             print("警告: sklearn未安装，无法计算AUC，使用准确率代替")
             # 使用准确率作为替代指标
             if len(all_targets.shape) == 2 and all_targets.shape[1] > 1:
-                # 多标签：使用阈值0.5进行二值化
+                # 使用阈值0.5进行二值化
                 pred_binary = (all_predictions > 0.5).astype(int)
                 mean_auc = np.mean((pred_binary == all_targets).astype(float))
             else:
-                # 单标签：使用argmax
+                # 使用argmax
                 pred_labels = np.argmax(all_predictions, axis=1)
                 mean_auc = np.mean((pred_labels == all_targets).astype(float))
         

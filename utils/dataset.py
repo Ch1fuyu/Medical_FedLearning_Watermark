@@ -23,14 +23,14 @@ class LocalChestMNISTDataset(Dataset):
         else:
             raise ValueError(f"Unsupported split: {split}")
         
-        # 对于多标签分类，保持标签的2D格式 (样本数, 标签数)
-        # 对于单标签分类，确保标签是1D数组
+        # 保持标签的2D格式 (样本数, 标签数)
+        # 确保标签是1D数组
         if len(self.labels.shape) > 1:
             if self.labels.shape[1] > 1:
-                # 多标签分类，保持2D格式
+                # 保持2D格式
                 pass
             else:
-                # 单标签分类，squeeze为1D
+                # squeeze为1D
                 self.labels = self.labels.squeeze()
     
     def __len__(self):
@@ -70,11 +70,8 @@ class LocalChestMNISTDataset(Dataset):
             image = self.transform(image)
         
         # 确保标签保持正确的形状
-        # 对于ChestMNIST多标签分类，标签应该是 (14,) 形状
-        if len(label.shape) == 1 and label.shape[0] == 14:
-            # 这是正确的多标签格式
-            pass
-        elif len(label.shape) == 2 and label.shape[1] == 14:
+        # 对于ChestMNIST分类，标签应该是 (14,) 形状
+        if len(label.shape) == 2 and label.shape[1] == 14:
             # 如果是 (1, 14) 形状，squeeze为 (14,)
             label = label.squeeze()
         
@@ -109,7 +106,7 @@ def get_data(dataset_name, data_root, iid, client_num):
         
         # ChestMNIST参数
         normalize = transforms.Normalize(mean=[0.5], std=[0.5])
-        num_classes = 14  # 多标签分类，14个病理标签
+        num_classes = 14  # 14个病理标签
         
         transform_train = transforms.Compose([
             transforms.RandomHorizontalFlip(),
@@ -148,7 +145,7 @@ def get_data_no_fl(dataset_name, data_root, dataset_file=None):
         
         # ChestMNIST参数
         normalize = transforms.Normalize(mean=[0.5], std=[0.5])
-        num_classes = 14  # 多标签分类，14个病理标签
+        num_classes = 14  # 14个病理标签
         print("Using ChestMNIST multi-label classification setup (14 pathology labels)")
         
         transform_train = transforms.Compose([

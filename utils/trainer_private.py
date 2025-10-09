@@ -12,34 +12,18 @@ except Exception:
 
 def accuracy(output, target, top_k=(1,)):
     with torch.no_grad():
-        # 检查是否为多标签分类（ChestMNIST: batch_size x 14）
-        if len(target.shape) == 2 and target.shape[1] == 14:
-            # 多标签分类：使用sigmoid和阈值
-            pred_prob = torch.sigmoid(output)
-            pred_binary = pred_prob > 0.5
-            
-            # 标签级准确率
-            label_correct = (pred_binary == target).float().mean()
-            
-            # 样本级准确率
-            sample_correct = torch.all(pred_binary == target, dim=1).float().mean()
-            
-            # 返回标签级准确率作为主要指标
-            return [label_correct * 100.0, sample_correct * 100.0]
-        else:
-            # 单标签分类：使用top-k准确率
-            max_k = max(top_k)
-            batch_size = target.size(0)
-
-            _, pred = output.topk(max_k, 1, True, True)
-            pred = pred.t()
-            correct = pred.eq(target.view(1, -1).expand_as(pred))
-
-            res = []
-            for k in top_k:
-                correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
-                res.append(correct_k.mul_(100.0 / batch_size))
-            return res
+        # 使用sigmoid和阈值
+        pred_prob = torch.sigmoid(output)
+        pred_binary = pred_prob > 0.5
+        
+        # 标签级准确率
+        label_correct = (pred_binary == target).float().mean()
+        
+        # 样本级准确率
+        sample_correct = torch.all(pred_binary == target, dim=1).float().mean()
+        
+        # 返回标签级准确率作为主要指标
+        return [label_correct * 100.0, sample_correct * 100.0]
 
 class TesterPrivate(object):
     def __init__(self, model, device, verbose=False):
@@ -52,8 +36,8 @@ class TesterPrivate(object):
         self.model.eval()
 
         loss_meter = 0
-        acc_meter = 0  # 标签级准确率（多标签时）或普通准确率（单标签）
-        sample_acc_meter = 0  # 样本级准确率（多标签时），单标签退化为与acc相同
+        acc_meter = 0  # 标签级准确率
+        sample_acc_meter = 0  # 样本级准确率
         run_count = 0
         
         # 用于AUC计算的累积数据
@@ -68,38 +52,26 @@ class TesterPrivate(object):
 
                 pred = self.model(data)
                 
-                # 检查是否为多标签分类
-                if len(target.shape) == 2 and target.shape[1] == 14:
-                    # 多标签分类：使用普通BCEWithLogitsLoss进行评估
-                    loss_meter += F.binary_cross_entropy_with_logits(pred, target.float(), reduction='sum').item()
-                    # 使用新的准确率计算函数
-                    acc_results = accuracy(pred, target)
-                    label_acc = acc_results[0]  # 标签级准确率（主要指标）
-                    sample_acc = acc_results[1]  # 样本级准确率
-                    acc_meter += label_acc.item() * data.size(0) / 100.0  # 标签级准确率
-                    sample_acc_meter += sample_acc.item() * data.size(0) / 100.0  # 样本级准确率
-                    
-                    # 计算sigmoid概率用于AUC计算
-                    pred_prob = torch.sigmoid(pred)
-                    
-                    # 调试信息（仅在verbose模式下且是第一个batch时显示）
-                    if self.verbose and run_count == 0:
-                        pred_normal = torch.all(pred_prob < 0.5, dim=1).sum().item()
-                        print(f"First batch - Label-level accuracy: {label_acc:.4f}%, Sample-level accuracy: {sample_acc:.4f}%, Predicted normal samples: {pred_normal}/{data.size(0)}")
-                    
-                    # 累积AUC计算数据
-                    all_y_true.append(target.detach().cpu().numpy())
-                    all_y_score.append(pred_prob.detach().cpu().numpy())
-                else:
-                    # 单标签分类：使用CrossEntropyLoss
-                    loss_meter += F.cross_entropy(pred, target, reduction='sum').item()
-                    pred = pred.max(1, keepdim=True)[1]
-                    acc_meter += pred.eq(target.view_as(pred)).sum().item()
-                    sample_acc_meter += pred.eq(target.view_as(pred)).sum().item()
-                    # 累积单标签分类的AUC计算数据
-                    prob = F.softmax(self.model(data), dim=1)
-                    all_y_true.append(target.detach().cpu().numpy())
-                    all_y_score.append(prob.detach().cpu().numpy())
+                # 使用普通BCEWithLogitsLoss进行评估
+                loss_meter += F.binary_cross_entropy_with_logits(pred, target.float(), reduction='sum').item()
+                # 使用新的准确率计算函数
+                acc_results = accuracy(pred, target)
+                label_acc = acc_results[0]  # 标签级准确率（主要指标）
+                sample_acc = acc_results[1]  # 样本级准确率
+                acc_meter += label_acc.item() * data.size(0) / 100.0  # 标签级准确率
+                sample_acc_meter += sample_acc.item() * data.size(0) / 100.0  # 样本级准确率
+                
+                # 计算sigmoid概率用于AUC计算
+                pred_prob = torch.sigmoid(pred)
+                
+                # 调试信息（仅在verbose模式下且是第一个batch时显示）
+                if self.verbose and run_count == 0:
+                    pred_normal = torch.all(pred_prob < 0.5, dim=1).sum().item()
+                    print(f"First batch - Label-level accuracy: {label_acc:.4f}%, Sample-level accuracy: {sample_acc:.4f}%, Predicted normal samples: {pred_normal}/{data.size(0)}")
+                
+                # 累积AUC计算数据
+                all_y_true.append(target.detach().cpu().numpy())
+                all_y_score.append(pred_prob.detach().cpu().numpy())
                 
                 run_count += data.size(0)
 
@@ -119,30 +91,23 @@ class TesterPrivate(object):
                 y_true_all = np.concatenate(all_y_true, axis=0)
                 y_score_all = np.concatenate(all_y_score, axis=0)
                 
-                # 检查是否为多标签分类
-                if len(y_true_all.shape) == 2 and y_true_all.shape[1] == 14:
-                    # 多标签分类：宏平均AUC
-                    valid_classes = []
-                    for i in range(y_true_all.shape[1]):
-                        if len(np.unique(y_true_all[:, i])) > 1:  # 确保有0和1两种标签
-                            valid_classes.append(i)
+                # 宏平均AUC
+                valid_classes = []
+                for i in range(y_true_all.shape[1]):
+                    if len(np.unique(y_true_all[:, i])) > 1:  # 确保有0和1两种标签
+                        valid_classes.append(i)
+                
+                if len(valid_classes) > 0:
+                    auc_scores = []
+                    for i in valid_classes:
+                        try:
+                            auc_i = roc_auc_score(y_true_all[:, i], y_score_all[:, i])
+                            auc_scores.append(auc_i)
+                        except Exception:
+                            continue
                     
-                    if len(valid_classes) > 0:
-                        auc_scores = []
-                        for i in valid_classes:
-                            try:
-                                auc_i = roc_auc_score(y_true_all[:, i], y_score_all[:, i])
-                                auc_scores.append(auc_i)
-                            except Exception:
-                                continue
-                        
-                        if len(auc_scores) > 0:
-                            auc_val = np.mean(auc_scores)  # 宏平均
-                else:
-                    # 单标签分类：多类AUC
-                    unique_classes = np.unique(y_true_all)
-                    if len(unique_classes) > 1:
-                        auc_val = roc_auc_score(y_true_all, y_score_all, multi_class='ovr', average='macro')
+                    if len(auc_scores) > 0:
+                        auc_val = np.mean(auc_scores)  # 宏平均
             except Exception as e:
                 print(f"AUC计算错误: {e}")
                 auc_val = 0.0
@@ -201,10 +166,7 @@ class TrainerPrivate(object):
                 pred = self.model(x)
 
                 # 计算损失
-                if len(y.shape) == 2 and y.shape[1] == 14:  # 多标签
-                    loss = self.get_loss_function(pred, y)
-                else:  # 单标签
-                    loss = F.cross_entropy(pred, y)
+                loss = self.get_loss_function(pred, y)
 
                 # 计算准确率（按样本加权）
                 acc_results = accuracy(pred, y)
@@ -304,10 +266,7 @@ class TrainerPrivate(object):
                 pred = self.model(x)
 
                 # 计算损失
-                if len(y.shape) == 2 and y.shape[1] == 14:  # 多标签
-                    loss = self.get_loss_function(pred, y)
-                else:  # 单标签
-                    loss = F.cross_entropy(pred, y)
+                loss = self.get_loss_function(pred, y)
 
                 # 计算准确率（按样本加权）
                 acc_results = accuracy(pred, y)
