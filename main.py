@@ -48,7 +48,6 @@ class FederatedLearningOnChestMNIST(Experiment):
         logging.info('--------------------------------Start--------------------------------------')
         logging.info(args)
         logging.info('==> Preparing data...')
-        logging.info('==> 使用普通水印系统')
         
         # 数据集配置
         self.num_classes = args.num_classes
