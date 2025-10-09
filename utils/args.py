@@ -42,6 +42,8 @@ def parser_args():
                         help='factor to adjust positive class weights')
     
     # ========================= 水印与密钥矩阵配置 ========================
+    parser.add_argument('--watermark_mode', type=str, default='normal', choices=['enhanced', 'normal'],
+                        help='watermark embedding mode: enhanced (每5轮融合) or normal (训练后嵌入)')
     parser.add_argument('--use_key_matrix', action='store_true', default=True,
                         help='use saved key matrices to embed watermark after local training')
     parser.add_argument('--key_matrix_dir', type=str, default='save/key_matrix',
@@ -75,10 +77,7 @@ def parser_args():
     parser.add_argument('--lr_decay_gamma', type=float, default=0.1, help='learning rate decay factor')
     parser.add_argument('--lr_decay_milestones', type=float, nargs='+', default=[0.5, 0.75], 
                         help='learning rate decay milestones as fractions of total epochs')
-    
-    # ========================= 数据集特定参数 ========================
-    parser.add_argument('--num_classes', type=int, default=14, help='number of classes (14 for ChestMNIST)')
-    parser.add_argument('--in_channels', type=int, default=3, help='input channels (3 for RGB)')
+
     
     # ========================= 聚合算法参数 ========================
     parser.add_argument('--weight_tolerance', type=float, default=1e-6, 

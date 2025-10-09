@@ -7,6 +7,7 @@
 
 import copy
 import os
+import sys
 from datetime import datetime
 
 import numpy as np
@@ -17,9 +18,43 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from tqdm import tqdm
 
+# Windows多进程兼容性处理
+if sys.platform.startswith('win'):
+    import multiprocessing
+    multiprocessing.set_start_method('spawn', force=True)
+
 from models.resnet import resnet18
 from utils.dataset import LocalChestMNISTDataset
 from utils.watermark_reconstruction import WatermarkReconstructor
+
+
+def create_safe_dataloader(dataset, batch_size, shuffle=False, num_workers=None):
+    """
+    创建安全的数据加载器，自动处理Windows多进程问题
+    
+    Args:
+        dataset: 数据集
+        batch_size: 批次大小
+        shuffle: 是否打乱数据
+        num_workers: 工作进程数，None时自动选择
+        
+    Returns:
+        数据加载器
+    """
+    import sys
+    
+    # Windows系统自动设置num_workers=0避免多进程问题
+    if num_workers is None:
+        if sys.platform.startswith('win'):
+            num_workers = 0
+        else:
+            num_workers = 2
+    
+    try:
+        return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
+    except Exception as e:
+        print(f"⚠️  多进程数据加载失败，回退到单进程模式: {e}")
+        return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=0)
 
 
 def load_mnist_test_data(batch_size: int = 128, data_dir: str = './data'):
@@ -41,7 +76,7 @@ def load_mnist_test_data(batch_size: int = 128, data_dir: str = './data'):
 
     # 加载MNIST测试集
     test_dataset = datasets.MNIST(data_dir, train=False, download=True, transform=transform)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = create_safe_dataloader(test_dataset, batch_size=batch_size, shuffle=False)
 
     print(f"✓ 已加载MNIST测试集: {len(test_dataset)} 个样本")
     return test_loader
@@ -225,13 +260,20 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
         model.train()
         total_loss = 0.0
 
-        for data, target in train_loader:
-            data, target = data.to(device), target.to(device)
-            optimizer.zero_grad()
-            loss = criterion(model(data), target.float())
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
+        try:
+            for data, target in train_loader:
+                data, target = data.to(device), target.to(device)
+                optimizer.zero_grad()
+                loss = criterion(model(data), target.float())
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
+        except Exception as e:
+            print(f"❌ 训练过程中发生错误: {e}")
+            print("尝试重新创建数据加载器...")
+            # 重新创建数据加载器
+            train_loader = create_safe_dataloader(train_loader.dataset, train_loader.batch_size, shuffle=True, num_workers=0)
+            continue
 
         avg_loss = total_loss / len(train_loader)
         scheduler.step()
@@ -548,7 +590,7 @@ def main():
     print(f"使用设备: {device}")
 
     # 配置参数
-    model_path = './save/resnet/chestmnist/202509182256_Dp_False_sig_0.1_iid_True_ns_1_wt_gamma_lt_sign_bit_20_alp_0.2_nb_1_type_True_tri_40_ep_100_le_2_cn_10_fra_1.0000_acc_0.7004.pkl'
+    model_path = './save/resnet/chestmnist/202510091431_Dp_0.1_iid_True_ns_1_wt_gamma_lt_sign_ep_10_le_2_cn_10_fra_1.0000_auc_0.5964_enhanced.pkl'
     key_matrix_dir = './save/key_matrix'
     autoencoder_dir = './save/autoencoder'
 
@@ -570,9 +612,9 @@ def main():
     mnist_test_loader = load_mnist_test_data(batch_size=128)
     chestmnist_train_set, chestmnist_test_set = load_chestmnist_data()
 
-    # 创建数据加载器
-    train_loader = DataLoader(chestmnist_train_set, batch_size=batch_size, shuffle=True, num_workers=2)
-    test_loader = DataLoader(chestmnist_test_set, batch_size=batch_size*2, shuffle=False, num_workers=2)
+    # 创建数据加载器 (使用安全的数据加载器创建函数)
+    train_loader = create_safe_dataloader(chestmnist_train_set, batch_size=batch_size, shuffle=True)
+    test_loader = create_safe_dataloader(chestmnist_test_set, batch_size=batch_size*2, shuffle=False)
 
     # 加载主任务模型
     print("加载主任务模型...")

@@ -147,7 +147,7 @@ class TrainerPrivate(object):
         
         return F.binary_cross_entropy_with_logits(pred, target.float(), pos_weight=pos_weights)
 
-    def local_update(self, dataloader, local_ep, lr, client_id):
+    def local_update(self, dataloader, local_ep, lr, client_id, **kwargs):
         self.model.train()
         self.optimizer = torch.optim.SGD(self.model.parameters(), lr=lr, momentum=0.9)
 

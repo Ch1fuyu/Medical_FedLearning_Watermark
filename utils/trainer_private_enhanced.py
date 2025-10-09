@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import optim
+import os
 from models.light_autoencoder import LightAutoencoder
 from utils.key_matrix_utils import KeyMatrixManager
 from models.losses.multi_loss import MultiLoss
@@ -134,7 +135,6 @@ class TrainerPrivateEnhanced(object):
         self.multi_loss = MultiLoss()
         self.mask_manager = None
         self.autoencoder = None
-        self.autoencoder_optimizer = None
         
         # 初始化掩码管理器
         if args and getattr(args, 'use_key_matrix', False):
@@ -164,47 +164,22 @@ class TrainerPrivateEnhanced(object):
         return F.binary_cross_entropy_with_logits(pred, target.float(), pos_weight=pos_weights)
 
     def _initialize_autoencoder(self):
-        """初始化自编码器"""
+        """从预训练模型加载自编码器"""
         if self.autoencoder is None:
             self.autoencoder = LightAutoencoder().to(self.device)
-            self.autoencoder_optimizer = torch.optim.Adam(self.autoencoder.parameters(), lr=0.001)
+            # 加载预训练的自编码器参数
+            pretrained_path = './save/autoencoder/autoencoder.pth'
+            if os.path.exists(pretrained_path):
+                self.autoencoder.load_state_dict(torch.load(pretrained_path, map_location=self.device, weights_only=False))
+                print(f"✓ 已加载预训练自编码器: {pretrained_path}")
+            else:
+                raise FileNotFoundError(f"预训练自编码器不存在: {pretrained_path}")
 
-    def _train_autoencoder_epoch(self, dataloader):
-        """训练自编码器一个epoch"""
-        self._initialize_autoencoder()
-        self.autoencoder.train()
-        
-        total_loss = 0.0
-        batch_count = 0
-        
-        for batch_idx, (x, y) in enumerate(dataloader):
-            x = x.to(self.device)
-            
-            # 只使用第一个通道作为自编码器输入
-            if len(x.shape) == 4 and x.shape[1] == 3:
-                x = x[:, 0:1, :, :]  # 取第一个通道
-            
-            self.autoencoder_optimizer.zero_grad()
-            
-            # 前向传播
-            reconstructed = self.autoencoder(x)
-            
-            # 计算重建损失
-            loss = F.mse_loss(reconstructed, x)
-            
-            # 反向传播
-            loss.backward()
-            self.autoencoder_optimizer.step()
-            
-            total_loss += loss.item()
-            batch_count += 1
-            
-        return total_loss / batch_count if batch_count > 0 else 0.0
 
     def _extract_encoder_parameters(self):
-        """提取编码器参数"""
+        """提取预训练编码器参数作为水印"""
         if self.autoencoder is None:
-            return None
+            self._initialize_autoencoder()
         
         encoder_params = []
         for param in self.autoencoder.encoder.parameters():
@@ -327,10 +302,6 @@ class TrainerPrivateEnhanced(object):
             if epoch + 1 == local_ep:
                 print(f"Client {client_id} - Epoch {epoch+1}/{local_ep}: "
                       f"Loss={loss_meter:.4f}, Acc={acc_meter:.4f}, LR={lr:.6f}")
-
-        # 训练自编码器
-        autoencoder_loss = self._train_autoencoder_epoch(dataloader)
-        print(f"Client {client_id} - Autoencoder Loss: {autoencoder_loss:.4f}")
 
         # 每5个epoch进行水印融合
         if (current_epoch + 1) % 5 == 0:

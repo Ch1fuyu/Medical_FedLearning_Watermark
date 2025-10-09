@@ -379,7 +379,7 @@ def main():
     # 设置设备
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # 模型路径
-    model_path = './save/resnet/chestmnist/202509182256_Dp_False_sig_0.1_iid_True_ns_1_wt_gamma_lt_sign_bit_20_alp_0.2_nb_1_type_True_tri_40_ep_100_le_2_cn_10_fra_1.0000_acc_0.7004.pkl'
+    model_path = './save/resnet/chestmnist/202510091107_Dp_False_sig_0.1_iid_True_ns_1_wt_gamma_lt_sign_bit_20_alp_0.2_nb_1_type_True_tri_40_ep_10_le_2_cn_10_fra_1.0000_acc_0.5892_enhanced.pkl'
     
     # 密钥矩阵目录
     key_matrix_dir = './save/key_matrix'

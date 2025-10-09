@@ -15,8 +15,9 @@ from models.alexnet import AlexNet
 from models.resnet import resnet18
 from utils.args import parser_args
 from utils.base import Experiment
-from utils.dataset import get_data, DatasetSplit, construct_random_wm_position
-from utils.trainer_private_enhanced import TrainerPrivateEnhanced, TesterPrivate
+from utils.dataset import get_data, DatasetSplit
+from utils.trainer_private import TrainerPrivate, TesterPrivate
+from utils.trainer_private_enhanced import TrainerPrivateEnhanced
 import pandas as pd
 
 set_seed()
@@ -47,7 +48,7 @@ class FederatedLearningOnChestMNIST(Experiment):
         logging.info('--------------------------------Start--------------------------------------')
         logging.info(args)
         logging.info('==> Preparing data...')
-        logging.info('==> 使用增强水印系统（密钥矩阵 + 自编码器）')
+        logging.info('==> 使用普通水印系统')
         
         # 数据集配置
         self.num_classes = args.num_classes
@@ -75,13 +76,20 @@ class FederatedLearningOnChestMNIST(Experiment):
         self.construct_model()
         self.w_t = copy.deepcopy(self.model.state_dict())
 
-        # 增强水印系统：使用密钥矩阵
+        # 根据参数选择水印模式
         self.random_positions = {}
         # 设置密钥矩阵目录
         self.args.key_matrix_dir = self.key_matrix_dir
         self.args.use_key_matrix = True
+        
+        # 根据watermark_mode参数选择trainer
+        if self.args.watermark_mode == 'enhanced':
+            logging.info('==> 使用增强水印系统（密钥矩阵 + 自编码器）')
+            self.trainer = TrainerPrivateEnhanced(self.model, self.device, self.dp, self.sigma, self.random_positions, self.args)
+        else:
+            logging.info('==> 使用普通水印系统')
+            self.trainer = TrainerPrivate(self.model, self.device, self.dp, self.sigma, self.random_positions, self.args)
             
-        self.trainer = TrainerPrivateEnhanced(self.model, self.device, self.dp, self.sigma, self.random_positions, self.args)
         self.tester = TesterPrivate(self.model, self.device)
 
     def construct_model(self):
@@ -127,7 +135,8 @@ class FederatedLearningOnChestMNIST(Experiment):
             for idx in tqdm(idxs_users, desc='Progress: %d / %d' % (epoch + 1, self.epochs)):
                 self.model.load_state_dict(self.w_t)
 
-                # 传递客户端的ID给 TrainerPrivateEnhanced，包含当前epoch信息
+                # 统一调用：始终传入 current_epoch/total_epochs；
+                # 普通 Trainer 会通过 **kwargs 忽略
                 local_w, local_loss, local_acc = self.trainer.local_update(
                     dataloader=local_train_loader[idx], 
                     local_ep=self.local_ep, 
@@ -376,24 +385,19 @@ def main(args):
     logs['test_auc'] = {'value': test_auc}
     logs['bp_local'] = {'value': True if args.bp_interval == 0 else False}
 
-    save_dir = args.save_model_dir + '/'
-
-    if not os.path.exists(save_dir + args.model_name + '/' + args.dataset):
-        os.makedirs(save_dir + args.model_name + '/' + args.dataset)
+    save_dir = os.path.join(args.save_model_dir, args.model_name, args.dataset)
+    os.makedirs(save_dir, exist_ok=True)
 
     now = datetime.now()
     formatted_now = now.strftime("%Y%m%d%H%M")
-    # 构建文件名，包含增强水印系统标识
-    enhanced_suffix = "_enhanced"
-    
-    torch.save(logs,
-               save_dir + args.model_name + '/' + args.dataset + '/{}_Dp_{}_sig_{}_iid_{}_ns_{}_wt_{}_lt_{}_bit_{}_'
-                                                                 'alp_{}_nb_{}_type_{}_tri_{}_ep_{}_le_{}_cn_{}_'
-                                                                 'fra_{:.4f}_acc_{:.4f}{}.pkl'.format(
-                   formatted_now, args.dp, args.sigma, args.iid, args.num_sign, args.weight_type, args.loss_type, args.num_bit,
-                   args.loss_alpha, args.num_back, args.backdoor_indis, args.num_trigger, args.epochs, args.local_ep,
-                   args.client_num, args.frac, test_auc, enhanced_suffix
-               ))
+    # 构建文件名
+    enhanced = "_enhanced" if args.watermark_mode == 'enhanced' else ""
+
+    file_name = '{}_Dp_{}_iid_{}_ns_{}_wt_{}_lt_{}_ep_{}_le_{}_cn_{}_fra_{:.4f}_auc_{:.4f}{}.pkl'.format(
+        formatted_now, args.sigma, args.iid, args.num_sign, args.weight_type, args.loss_type,
+        args.epochs, args.local_ep, args.client_num, args.frac, test_auc, enhanced
+    )
+    torch.save(logs, os.path.join(save_dir, file_name))
 
     return
 
