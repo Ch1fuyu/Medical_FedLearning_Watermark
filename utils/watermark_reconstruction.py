@@ -17,17 +17,20 @@ from utils.key_matrix_utils import KeyMatrixManager
 class WatermarkReconstructor:
     """水印重建器，用于从水印模型中重建自编码器"""
     
-    def __init__(self, key_matrix_dir: str, autoencoder_weights_dir: str = './save/autoencoder'):
+    def __init__(self, key_matrix_dir: str, autoencoder_weights_dir: str = './save/autoencoder', 
+                 enable_scaling: bool = True, scaling_factor: float = 0.1):
         """
         初始化水印重建器
         
         Args:
             key_matrix_dir: 密钥矩阵目录
             autoencoder_weights_dir: 自编码器权重目录
+            enable_scaling: 是否启用水印参数缩放
+            scaling_factor: 固定缩放因子（默认0.1）
         """
         self.key_matrix_dir = key_matrix_dir
         self.autoencoder_weights_dir = autoencoder_weights_dir
-        self.key_manager = KeyMatrixManager(key_matrix_dir)
+        self.key_manager = KeyMatrixManager(key_matrix_dir, enable_scaling, scaling_factor)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # 加载原始自编码器作为参考

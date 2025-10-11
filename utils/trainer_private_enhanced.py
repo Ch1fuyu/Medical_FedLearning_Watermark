@@ -205,7 +205,15 @@ class TrainerPrivateEnhanced(object):
             # 获取位置信息
             if self._key_manager is None:
                 try:
-                    self._key_manager = KeyMatrixManager(self.args.key_matrix_dir)
+                    # 初始化KeyMatrixManager，支持水印缩放
+                    enable_scaling = getattr(self.args, 'enable_watermark_scaling', True)
+                    scaling_factor = getattr(self.args, 'scaling_factor', 0.1)
+                    
+                    self._key_manager = KeyMatrixManager(
+                        self.args.key_matrix_dir,
+                        enable_scaling=enable_scaling,
+                        scaling_factor=scaling_factor
+                    )
                 except Exception as e:
                     print(f"加载密钥矩阵管理器失败: {e}")
                     return
@@ -216,18 +224,22 @@ class TrainerPrivateEnhanced(object):
                 print(f"加载客户端 {client_id} 位置信息失败: {e}")
                 return
             
-            # 嵌入水印
+            # 嵌入水印（使用KeyMatrixManager的embed_watermark方法，支持自动缩放）
             with torch.no_grad():
-                wm_idx = 0
-                for param_name, param_idx in position_dict:
-                    if wm_idx < encoder_params.numel():
-                        for name, param in self.model.named_parameters():
-                            if name == param_name:
-                                param_flat = param.view(-1)
-                                if param_idx < param_flat.numel():
-                                    param_flat[param_idx] = encoder_params[wm_idx]
-                                wm_idx += 1
-                                break
+                # 获取模型参数字典
+                model_params = dict(self.model.named_parameters())
+                
+                # 使用KeyMatrixManager的embed_watermark方法，自动处理缩放
+                watermarked_params = self._key_manager.embed_watermark(
+                    model_params, client_id, encoder_params
+                )
+                
+                # 将水印参数更新到模型中
+                for name, param in self.model.named_parameters():
+                    if name in watermarked_params:
+                        param.data.copy_(watermarked_params[name])
+                
+                print(f"🔧 水印嵌入完成，使用KeyMatrixManager自动缩放")
                                 
         except Exception as e:
             print(f"嵌入水印失败: {e}")

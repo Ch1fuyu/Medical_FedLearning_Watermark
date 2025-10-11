@@ -198,7 +198,15 @@ class TrainerPrivate(object):
                 # 获取该客户端的水印位置：优先使用保存的密钥矩阵；否则回退到随机位置
                 if self._key_manager is None:
                     try:
-                        self._key_manager = KeyMatrixManager(self.args.key_matrix_dir)
+                        # 初始化KeyMatrixManager，支持水印缩放
+                        enable_scaling = getattr(self.args, 'enable_watermark_scaling', True)
+                        scaling_factor = getattr(self.args, 'scaling_factor', 0.1)
+                        
+                        self._key_manager = KeyMatrixManager(
+                            self.args.key_matrix_dir,
+                            enable_scaling=enable_scaling,
+                            scaling_factor=scaling_factor
+                        )
                     except Exception as e:
                         print(f"[Watermark Warning] Failed to load KeyMatrixManager: {e}. Fallback to random positions.")
                         self._key_manager = None
@@ -222,20 +230,30 @@ class TrainerPrivate(object):
                 with torch.no_grad():
                     encoder_flat = torch.cat([param.view(-1) for param in encoder.parameters()])
 
-                    # 按顺序将编码器参数拷贝到水印位置
-                    # position_dict 存储的是 (param_name, local_idx) 对
-                    wm_idx = 0
-                    for param_name, param_idx in position_dict:
-                        if wm_idx < encoder_flat.numel():
-                            # 找到对应的参数
-                            for name, param in self.model.named_parameters():
-                                if name == param_name:
-                                    # param_idx 是局部索引，直接使用
-                                    param_flat = param.view(-1)
-                                    if param_idx < param_flat.numel():
-                                        param_flat[param_idx] = encoder_flat[wm_idx]
-                                    wm_idx += 1
-                                    break
+                    # ==================== 水印参数自适应缩放 ====================
+                    # 分析主任务参数和水印参数的数值范围
+                    main_params = []
+                    for name, param in self.model.named_parameters():
+                        main_params.extend(param.view(-1).tolist())
+                    
+                    main_params = torch.tensor(main_params)
+                    main_std = main_params.std().item()
+                    main_mean_abs = main_params.abs().mean().item()
+                    watermark_std = encoder_flat.std().item()
+                    watermark_mean_abs = encoder_flat.abs().mean().item()
+                    
+                    # 使用KeyMatrixManager的embed_watermark方法，自动处理缩放
+                    model_params = dict(self.model.named_parameters())
+                    watermarked_params = self._key_manager.embed_watermark(
+                        model_params, client_id, encoder_flat
+                    )
+                    
+                    # 将水印参数更新到模型中
+                    for name, param in self.model.named_parameters():
+                        if name in watermarked_params:
+                            param.data.copy_(watermarked_params[name])
+                    
+                    print(f"🔧 水印嵌入完成，使用KeyMatrixManager自动缩放")
                         
             except Exception as e:
                 print(f"[Watermark Warning] Failed to embed watermark for client {client_id}: {e}")

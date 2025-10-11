@@ -26,6 +26,7 @@ if sys.platform.startswith('win'):
 from models.resnet import resnet18
 from utils.dataset import LocalChestMNISTDataset
 from utils.watermark_reconstruction import WatermarkReconstructor
+from utils.delta_pcc_utils import evaluate_delta_pcc, calculate_fixed_tau, format_delta_pcc_result, print_delta_pcc_summary
 
 
 def create_safe_dataloader(dataset, batch_size, shuffle=False, num_workers=None):
@@ -80,97 +81,6 @@ def load_mnist_test_data(batch_size: int = 128, data_dir: str = './data'):
 
     print(f"✓ 已加载MNIST测试集: {len(test_dataset)} 个样本")
     return test_loader
-
-
-def test_autoencoder_mse(autoencoder, test_loader, device: str = 'cuda'):
-    """
-    测试自编码器在测试集上的MSE loss（统一使用剪枝攻击的计算方式）
-    
-    Args:
-        autoencoder: 自编码器模型
-        test_loader: 测试数据加载器
-        device: 设备类型
-        
-    Returns:
-        MSE loss值
-    """
-    if autoencoder is None:
-        return float('inf')
-    
-    autoencoder.eval()
-    total_mse = 0.0
-    total_samples = 0
-    
-    with torch.no_grad():
-        for data, _ in test_loader:
-            data = data.to(device)
-            
-            # 前向传播
-            reconstructed = autoencoder(data)
-            
-            # 计算MSE loss (使用sum reduction，然后手动平均)
-            mse_loss = torch.nn.functional.mse_loss(reconstructed, data, reduction='sum')
-            total_mse += mse_loss.item()
-            total_samples += data.size(0)  # 累加样本数
-    
-    avg_mse = total_mse / total_samples
-    return avg_mse
-
-
-def evaluate_encoder_decoder_from_all_clients(reconstructor, model_state_dict, test_loader, device: str = 'cuda'):
-    """
-    从所有客户端的水印参数重建自编码器并评估性能（统一使用剪枝攻击的MSE计算方式）
-    
-    Args:
-        reconstructor: 水印重建器
-        model_state_dict: 模型状态字典
-        test_loader: 测试数据加载器
-        device: 设备类型
-        
-    Returns:
-        评估结果字典
-    """
-    try:
-        # 使用所有客户端的密钥矩阵重建自编码器
-        reconstructed_autoencoder = reconstructor.reconstruct_autoencoder_from_all_clients(model_state_dict)
-        
-        if reconstructed_autoencoder is None:
-            return {
-                'mse': float('inf'),
-                'ssim': 0.0,
-                'psnr': 0.0,
-                'reconstruction_success': False,
-                'watermark_damaged': False
-            }
-
-        # 使用统一的MSE计算方式
-        mse = test_autoencoder_mse(reconstructed_autoencoder, test_loader, device)
-        
-        # 计算其他指标（如果需要的话）
-        try:
-            metrics = reconstructor.evaluate_autoencoder_performance(reconstructed_autoencoder, test_loader)
-            ssim = metrics.get('ssim', 0.0)
-            psnr = metrics.get('psnr', 0.0)
-        except:
-            ssim = 0.0
-            psnr = 0.0
-        
-        return {
-            'mse': mse,
-            'ssim': ssim,
-            'psnr': psnr,
-            'reconstruction_success': True,
-            'watermark_damaged': False
-        }
-        
-    except Exception as e:
-        return {
-            'mse': float('inf'),
-            'ssim': 0.0,
-            'psnr': 0.0,
-            'reconstruction_success': False,
-            'watermark_damaged': False
-        }
 
 
 def load_chestmnist_data(data_root: str = './data'):
@@ -240,7 +150,7 @@ def load_main_task_model(model_path: str, device: str = 'cuda'):
 
 def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.001,
                    device: str = 'cuda', eval_interval: int = 10, reconstructor=None,
-                   original_model_state=None, mnist_test_loader=None):
+                   original_model_state=None, mnist_test_loader=None, fixed_tau=None):
     """
     对模型进行微调训练（精简输出）
     """
@@ -350,44 +260,18 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
             if reconstructor and original_model_state and mnist_test_loader:
                 delta_pcc_result = evaluate_delta_pcc(
                     original_model_state, model_states[-1], reconstructor,
-                    mnist_test_loader, device, perf_fail_ratio=0.5
+                    mnist_test_loader, device, perf_fail_ratio=0.1, fixed_tau=fixed_tau
                 )
 
             # 保存第1轮和第2轮的ΔPCC结果到performance_metrics中
-            if delta_pcc_result:
-                # 更新当前轮次的metrics
-                current_metrics = performance_metrics[-1]  # 获取刚添加的metrics
-                current_metrics.update({
-                    'perf_before': delta_pcc_result['perf_before'],
-                    'perf_fail': delta_pcc_result['perf_fail'],
-                    'tau': delta_pcc_result['tau'],
-                    'delta_perf': delta_pcc_result['delta_perf'],
-                    'delta_pcc': delta_pcc_result['delta_pcc'],
-                    'is_infringement': delta_pcc_result['is_infringement'],
-                    'result_text': delta_pcc_result['result_text']
-                })
-            else:
-                # 如果没有ΔPCC结果，填充默认值
-                current_metrics = performance_metrics[-1]  # 获取刚添加的metrics
-                current_metrics.update({
-                    'perf_before': None,
-                    'perf_fail': None,
-                    'tau': None,
-                    'delta_perf': None,
-                    'delta_pcc': None,
-                    'is_infringement': None,
-                    'result_text': 'N/A'
-                })
+            current_metrics = performance_metrics[-1]  # 获取刚添加的metrics
+            current_metrics.update(format_delta_pcc_result(delta_pcc_result))
 
             # 打印核心指标
             print(f"\n=== 第 {epoch+1} 轮评估 ===")
             print(f"训练损失: {avg_loss:.4f} | 测试损失: {avg_test_loss:.4f} | "
                   f"AUC: {mean_auc:.4f} | 准确率: {accuracy:.2%}")
-            if delta_pcc_result:
-                print(f"性能基准: {delta_pcc_result['perf_before']:.6f} | 性能变化: {delta_pcc_result['delta_perf']:.6f}")
-                print(f"ΔPCC: {delta_pcc_result['delta_pcc']:.6f} | 侵权判断: {delta_pcc_result['result_text']}")
-            else:
-                print("ΔPCC: N/A | 侵权判断: N/A")
+            print_delta_pcc_summary(delta_pcc_result)
             print("-" * 50)
 
     return model_states, performance_metrics
@@ -459,84 +343,6 @@ def evaluate_watermark_integrity(model_state_dict, reconstructor):
         }
 
 
-def evaluate_delta_pcc(original_model_state, current_model_state, reconstructor, 
-                      mnist_test_loader, device: str = 'cuda', perf_fail_ratio: float = 0.1):
-    """
-    评估ΔPCC（精简输出）
-    """
-    try:
-        # 评估原始模型
-        original_result = evaluate_encoder_decoder_from_all_clients(
-            reconstructor, original_model_state, mnist_test_loader, device
-        )
-        if not original_result['reconstruction_success']:
-            return None
-        perf_before = original_result['mse']
-        
-        perf_fail = perf_before * (1 + perf_fail_ratio)
-        tau = perf_fail - perf_before
-
-        # 评估当前模型
-        current_result = evaluate_encoder_decoder_from_all_clients(
-            reconstructor, current_model_state, mnist_test_loader, device
-        )
-        if not current_result['reconstruction_success']:
-            return None
-        perf_after = current_result['mse']
-
-        delta_perf = abs(perf_after - perf_before)
-        delta_pcc = delta_perf / tau if tau > 0 else float('inf')
-
-        is_infringement = delta_pcc < 1.0
-        result_text = "侵权" if is_infringement else "不侵权"
-
-        return {
-            'perf_before': perf_before,
-            'perf_after': perf_after,
-            'perf_fail': perf_fail,
-            'tau': tau,
-            'delta_perf': delta_perf,
-            'delta_pcc': delta_pcc,
-            'is_infringement': is_infringement,
-            'result_text': result_text
-        }
-    except Exception as e:
-        return None
-
-def test_autoencoder_mse(autoencoder, test_loader, device: str = 'cuda'):
-    """
-    测试自编码器在测试集上的MSE loss
-
-    Args:
-        autoencoder: 自编码器模型
-        test_loader: 测试数据加载器
-        device: 设备类型
-
-    Returns:
-        MSE loss值
-    """
-    if autoencoder is None:
-        return float('inf')
-
-    autoencoder.eval()
-    total_mse = 0.0
-    total_samples = 0
-
-    with torch.no_grad():
-        for data, _ in test_loader:
-            data = data.to(device)
-
-            # 前向传播
-            reconstructed = autoencoder(data)
-
-            # 计算MSE loss
-            mse_loss = torch.nn.functional.mse_loss(reconstructed, data, reduction='sum')
-            total_mse += mse_loss.item()
-            total_samples += data.size(0)
-
-    avg_mse = total_mse / total_samples
-    return avg_mse
-
 
 def save_results(results, save_dir: str = './save/finetune_attack'):
     """
@@ -590,12 +396,12 @@ def main():
     print(f"使用设备: {device}")
 
     # 配置参数
-    model_path = './save/resnet/chestmnist/202510091431_Dp_0.1_iid_True_ns_1_wt_gamma_lt_sign_ep_10_le_2_cn_10_fra_1.0000_auc_0.5964_enhanced.pkl'
+    model_path = './save/resnet/chestmnist/202510111552_Dp_0.1_iid_True_ns_1_wt_gamma_lt_sign_ep_50_le_2_cn_10_fra_1.0000_auc_0.6728_enhanced.pkl'
     key_matrix_dir = './save/key_matrix'
     autoencoder_dir = './save/autoencoder'
 
     # 微调参数
-    finetune_epochs = 10
+    finetune_epochs = 30
     eval_interval = 1  # 每轮都评估
     learning_rate = 0.001
     batch_size = 128
@@ -626,11 +432,19 @@ def main():
     # 保存原始模型状态
     original_model_state = copy.deepcopy(model.state_dict())
 
-    # 初始化水印重建器
-    reconstructor = WatermarkReconstructor(key_matrix_dir, autoencoder_dir)
+    # 初始化水印重建器（使用args中的统一设置）
+    from utils.args import parser_args
+    args = parser_args()
+    reconstructor = WatermarkReconstructor(
+        key_matrix_dir, 
+        autoencoder_dir, 
+        enable_scaling=args.enable_watermark_scaling, 
+        scaling_factor=args.scaling_factor
+    )
 
     print("开始微调攻击实验...")
     print("=" * 80)
+    
     
     # 第0轮：测试微调前的水印检测
     print("=== 第0轮评估（微调前）===")
@@ -670,10 +484,22 @@ def main():
     
     print(f"测试损失: {avg_test_loss:.4f} | AUC: {mean_auc:.4f} | 准确率: {accuracy:.2%}")
     
+    # ==================== 水印检测容忍度设置 ====================
+    PERF_FAIL_RATIO = 0.1
+    # =========================================================
+    
+    # 计算固定阈值τ（基于原始模型）
+    fixed_tau = None
+    if reconstructor and original_model_state and mnist_test_loader:
+        print("计算固定阈值τ...")
+        fixed_tau = calculate_fixed_tau(original_model_state, reconstructor, mnist_test_loader, device, perf_fail_ratio=PERF_FAIL_RATIO)
+        if fixed_tau is None:
+            print("❌ 无法计算固定阈值，将使用动态阈值")
+    
     # 进行ΔPCC评估
     delta_pcc_result_0 = evaluate_delta_pcc(
         original_model_state, original_model_state, reconstructor,
-        mnist_test_loader, device, perf_fail_ratio=0.7
+        mnist_test_loader, device, perf_fail_ratio=PERF_FAIL_RATIO, fixed_tau=fixed_tau
     )
     
     # 创建第0轮的结果记录
@@ -687,26 +513,7 @@ def main():
     }
     
     # 添加第0轮的ΔPCC和侵权判断信息
-    if delta_pcc_result_0:
-        initial_result.update({
-            'perf_before': delta_pcc_result_0['perf_before'],
-            'perf_fail': delta_pcc_result_0['perf_fail'],
-            'tau': delta_pcc_result_0['tau'],
-            'delta_perf': delta_pcc_result_0['delta_perf'],
-            'delta_pcc': delta_pcc_result_0['delta_pcc'],
-            'is_infringement': delta_pcc_result_0['is_infringement'],
-            'result_text': delta_pcc_result_0['result_text']
-        })
-    else:
-        initial_result.update({
-            'perf_before': None,
-            'perf_fail': None,
-            'tau': None,
-            'delta_perf': None,
-            'delta_pcc': None,
-            'is_infringement': None,
-            'result_text': 'N/A'
-        })
+    initial_result.update(format_delta_pcc_result(delta_pcc_result_0))
 
     # 进行微调训练
     model_states, performance_metrics = finetune_model(
@@ -714,7 +521,7 @@ def main():
         epochs=finetune_epochs, lr=learning_rate,
         device=device, eval_interval=eval_interval,
         reconstructor=reconstructor, original_model_state=original_model_state,
-        mnist_test_loader=mnist_test_loader
+        mnist_test_loader=mnist_test_loader, fixed_tau=fixed_tau
     )
 
     # 微调训练已完成，ΔPCC和侵权判断已在训练过程中评估

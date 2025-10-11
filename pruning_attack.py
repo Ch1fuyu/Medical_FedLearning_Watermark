@@ -10,6 +10,7 @@ from torchvision import datasets, transforms
 from models.light_autoencoder import LightAutoencoder
 from models.resnet import resnet18
 from utils.watermark_reconstruction import WatermarkReconstructor
+from utils.delta_pcc_utils import evaluate_delta_pcc, calculate_fixed_tau, format_delta_pcc_result, print_delta_pcc_summary
 
 
 def load_mnist_test_data(batch_size: int = 128, data_dir: str = './data'):
@@ -82,117 +83,7 @@ def build_autoencoder_from_watermark(watermark_params, decoder_path: str, device
         print(f"❌ 构建自编码器失败: {e}")
         return None
 
-def test_autoencoder_mse(autoencoder, test_loader, device: str = 'cuda'):
-    """
-    测试自编码器在测试集上的MSE loss
-    
-    Args:
-        autoencoder: 自编码器模型
-        test_loader: 测试数据加载器
-        device: 设备类型
-        
-    Returns:
-        MSE loss值
-    """
-    if autoencoder is None:
-        return float('inf')
-    
-    autoencoder.eval()
-    total_mse = 0.0
-    total_samples = 0
-    
-    with torch.no_grad():
-        for data, _ in test_loader:
-            data = data.to(device)
-            
-            # 前向传播
-            reconstructed = autoencoder(data)
-            
-            # 计算MSE loss (使用sum reduction，然后手动平均)
-            mse_loss = torch.nn.functional.mse_loss(reconstructed, data, reduction='sum')
-            total_mse += mse_loss.item()
-            total_samples += data.size(0)  # 累加样本数
-    
-    avg_mse = total_mse / total_samples
-    return avg_mse
 
-def evaluate_delta_pcc(original_model, pruned_model, reconstructor, test_loader, device: str = 'cuda', 
-                      perf_fail_ratio: float = 0.1):
-    """
-    评估ΔPCC（性能变化百分比）
-    
-    Args:
-        original_model: 剪枝前的模型（嵌入水印但未剪枝）
-        pruned_model: 剪枝后的模型
-        reconstructor: 水印重建器实例
-        test_loader: MNIST测试数据加载器
-        device: 设备类型
-        perf_fail_ratio: 失效性能比例（相对于基准性能的倍数）
-        
-    Returns:
-        包含ΔPCC评估结果的字典
-    """
-    try:
-        # 1. 从剪枝前的模型重建自编码器作为基准
-        original_model_state_dict = original_model.state_dict()
-        original_reconstructed_autoencoder = reconstructor.reconstruct_autoencoder_from_all_clients(original_model_state_dict)
-        
-        if original_reconstructed_autoencoder is None:
-            print("❌ 无法从剪枝前模型重建自编码器")
-            return None
-        
-        # 2. 测试剪枝前重建自编码器的基准性能
-        perf_before = test_autoencoder_mse(original_reconstructed_autoencoder, test_loader, device)
-        
-        # 3. 计算阈值τ（性能下降容忍度）
-        # 对于MSE损失，性能下降意味着损失增加，所以失效性能应该比基准性能大
-        perf_fail = perf_before * (1 + perf_fail_ratio)
-        tau = perf_fail - perf_before
-        
-        # 4. 从剪枝后的模型重建自编码器
-        pruned_model_state_dict = pruned_model.state_dict()
-        
-        # 重建自编码器
-        reconstructed_autoencoder = reconstructor.reconstruct_autoencoder_from_all_clients(pruned_model_state_dict)
-        
-        if reconstructed_autoencoder is None:
-            print("❌ 自编码器重建失败")
-            return None
-        
-        # 5. 测试重建自编码器的性能
-        perf_after = test_autoencoder_mse(reconstructed_autoencoder, test_loader, device)
-        
-        # 6. 计算性能变化
-        delta_perf = abs(perf_after - perf_before)
-        
-        # 调试信息
-        print(f"    性能: 剪枝前={perf_before:.6f}, 剪枝后={perf_after:.6f}, 变化={delta_perf:.6f}")
-        print(f"    阈值τ={tau:.6f}, 失效性能={perf_fail:.6f}")
-        
-        # 7. 计算ΔPCC
-        if tau > 0:
-            delta_pcc = delta_perf / tau
-        else:
-            delta_pcc = float('inf')
-        
-        # 8. 判断侵权
-        is_infringement = delta_pcc < 1.0
-        result_text = "侵权" if is_infringement else "不侵权"
-        
-        return {
-            'perf_before': perf_before,
-            'perf_after': perf_after,
-            'perf_fail': perf_fail,
-            'tau': tau,
-            'delta_perf': delta_perf,
-            'delta_pcc': delta_pcc,
-            'is_infringement': is_infringement,
-            'result_text': result_text
-        }
-        
-    except Exception as e:
-        print(f"❌ ΔPCC评估失败: {e}")
-        return None
 
 def load_main_task_model(model_path: str, device: str = 'cuda'):
     """
@@ -379,7 +270,7 @@ def main():
     # 设置设备
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # 模型路径
-    model_path = './save/resnet/chestmnist/202510091107_Dp_False_sig_0.1_iid_True_ns_1_wt_gamma_lt_sign_bit_20_alp_0.2_nb_1_type_True_tri_40_ep_10_le_2_cn_10_fra_1.0000_acc_0.5892_enhanced.pkl'
+    model_path = './save/resnet/chestmnist/202510111552_Dp_0.1_iid_True_ns_1_wt_gamma_lt_sign_ep_50_le_2_cn_10_fra_1.0000_auc_0.6728_enhanced.pkl'
     
     # 密钥矩阵目录
     key_matrix_dir = './save/key_matrix'
@@ -394,8 +285,25 @@ def main():
     if model is not None:
         print(f"开始剪枝攻击实验 (设备: {device})")
         
-        # 初始化水印重建器（只初始化一次）
-        reconstructor = WatermarkReconstructor(key_matrix_dir, autoencoder_dir)
+        # 初始化水印重建器（使用args中的统一设置）
+        from utils.args import parser_args
+        args = parser_args()
+        reconstructor = WatermarkReconstructor(
+            key_matrix_dir, 
+            autoencoder_dir, 
+            enable_scaling=args.enable_watermark_scaling, 
+            scaling_factor=args.scaling_factor
+        )
+        
+        # ==================== 水印检测容忍度设置 ====================
+        PERF_FAIL_RATIO = 0.1
+        # =========================================================
+        
+        # 计算固定阈值τ（基于原始未剪枝模型）
+        print("计算固定阈值τ...")
+        fixed_tau = calculate_fixed_tau(model.state_dict(), reconstructor, test_loader, device, perf_fail_ratio=PERF_FAIL_RATIO)
+        if fixed_tau is None:
+            print("❌ 无法计算固定阈值，将使用动态阈值")
         
         # 定义剪枝比例：从0%到100%，步长10%
         pruning_ratios = [i/10.0 for i in range(0, 11)]  # [0.0, 0.1, 0.2, ..., 1.0]
@@ -415,8 +323,8 @@ def main():
             # 评估ΔPCC
             # 使用原始模型作为基准，比较剪枝前后的性能
             delta_pcc_result = evaluate_delta_pcc(
-                model, pruned_model, reconstructor, test_loader, device, 
-                perf_fail_ratio=0.1
+                model.state_dict(), pruned_model.state_dict(), reconstructor, test_loader, device, 
+                perf_fail_ratio=PERF_FAIL_RATIO, fixed_tau=fixed_tau
             )
             
             # 记录结果
@@ -437,22 +345,18 @@ def main():
                     'damaged_watermark_params': 0
                 })
             
-            if delta_pcc_result is not None:
-                result.update({
-                    'perf_before': delta_pcc_result['perf_before'],
-                    'perf_after': delta_pcc_result['perf_after'],
-                    'delta_pcc': delta_pcc_result['delta_pcc'],
-                    'is_infringement': delta_pcc_result['is_infringement'],
-                    'result_text': delta_pcc_result['result_text']
-                })
-            else:
-                result.update({
-                    'perf_before': float('inf'),
-                    'perf_after': float('inf'),
-                    'delta_pcc': float('inf'),
-                    'is_infringement': False,
-                    'result_text': '评估失败'
-                })
+            # 添加ΔPCC结果
+            delta_pcc_default = {
+                'perf_before': float('inf'),
+                'perf_after': float('inf'),
+                'perf_fail': float('inf'),
+                'tau': float('inf'),
+                'delta_perf': float('inf'),
+                'delta_pcc': float('inf'),
+                'is_infringement': False,
+                'result_text': '评估失败'
+            }
+            result.update(format_delta_pcc_result(delta_pcc_result, delta_pcc_default))
             
             results.append(result)
             

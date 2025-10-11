@@ -15,7 +15,7 @@ def parser_args():
     parser.add_argument('--in_channels', type=int, default=3, help='input channels')
     
     # ========================= 联邦学习核心参数 ========================
-    parser.add_argument('--epochs', type=int, default=100, help='total communication rounds')
+    parser.add_argument('--epochs', type=int, default=50, help='total communication rounds')
     parser.add_argument('--local_ep', type=int, default=2, help="local epochs per client: E")
     parser.add_argument('--batch_size', type=int, default=128, help="local batch size: B")
     parser.add_argument('--client_num', type=int, default=10, help="number of clients: K")
@@ -50,6 +50,12 @@ def parser_args():
                         help='directory containing generated key matrices')
     parser.add_argument('--encoder_path', type=str, default='save/autoencoder/encoder.pth',
                         help='path to the trained autoencoder encoder weights')
+    
+    # ========================= 水印缩放参数 ========================
+    parser.add_argument('--enable_watermark_scaling', action='store_true', default=True,
+                        help='enable watermark parameter scaling for better embedding')
+    parser.add_argument('--scaling_factor', type=float, default=0.1,
+                        help='fixed scaling factor for watermark parameters')
 
     # ========================= 水印和IPR参数 ========================
     parser.add_argument('--wm_length', type=int, default=1000, help='watermark length')
