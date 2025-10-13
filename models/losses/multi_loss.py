@@ -59,35 +59,35 @@ class MultiLoss:
             encoder_mask: 编码器区域掩码
             effective_mask: 编码器有效梯度掩码 (encoder_mask × target_mask)
         """
-        # 计算目标模型梯度量级
+        # 计算目标模型梯度量级（target_gradients是完整模型梯度）
         target_grad_abs = torch.abs(target_gradients)
-        masked_target_grad = torch.mul(target_grad_abs, target_mask)
-        self.current_grad_M = torch.sum(masked_target_grad).item()
+        self.current_grad_M = torch.sum(target_grad_abs).item()
         
-        # 计算编码器梯度量级
+        # 计算编码器梯度量级（encoder_gradients是掩码后的编码器区域梯度）
         encoder_grad_abs = torch.abs(encoder_gradients)
-        masked_encoder_grad = torch.mul(encoder_grad_abs, effective_mask)
-        self.current_grad_H = torch.sum(masked_encoder_grad).item()
+        self.current_grad_H = torch.sum(encoder_grad_abs).item()
         
         # 计算非零梯度数量
         target_nonzero = torch.sum(target_mask).item()
         encoder_nonzero = torch.sum(effective_mask).item()
         
         # 计算平均梯度量级
+        # prevGM: 整个目标模型的平均梯度量级
         if target_nonzero > 0:
             self.prevGM = self.current_grad_M / target_nonzero
+        # prevGH: 编码器区域的平均梯度量级
         if encoder_nonzero > 0:
             self.prevGH = self.current_grad_H / encoder_nonzero
             
         # 计算梯度方差
         if target_nonzero > 0:
-            target_mean = torch.sum(masked_target_grad) / target_nonzero
-            target_var = torch.sum(torch.pow(masked_target_grad - target_mean, 2)) / target_nonzero
+            target_mean = torch.sum(target_grad_abs) / target_nonzero
+            target_var = torch.sum(torch.pow(target_grad_abs - target_mean, 2)) / target_nonzero
             self.current_var_M = target_var.item()
             
         if encoder_nonzero > 0:
-            encoder_mean = torch.sum(masked_encoder_grad) / encoder_nonzero
-            encoder_var = torch.sum(torch.pow(masked_encoder_grad - encoder_mean, 2)) / encoder_nonzero
+            encoder_mean = torch.sum(encoder_grad_abs) / encoder_nonzero
+            encoder_var = torch.sum(torch.pow(encoder_grad_abs - encoder_mean, 2)) / encoder_nonzero
             self.current_var_H = encoder_var.item()
             
         # 更新方差比例

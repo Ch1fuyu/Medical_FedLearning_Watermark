@@ -40,9 +40,9 @@ class KeyMatrixGenerator:
         self.encoder = LightAutoencoder().encoder
         self.total_watermark_size = sum(param.numel() for param in self.encoder.parameters())
         
-        # 获取主任务模型参数信息
+        # 获取主任务模型参数信息（排除全连接层）
         self.model_param_info = self._get_model_param_info()
-        self.total_model_params = sum(param.numel() for param in self.model.parameters())
+        self.total_model_params = sum(param_info['numel'] for param_info in self.model_param_info)
         
         print(f"主任务模型总参数数量: {self.total_model_params:,}")
         print(f"编码器参数数量（总水印大小）: {self.total_watermark_size:,}")
@@ -52,10 +52,15 @@ class KeyMatrixGenerator:
             raise ValueError(f"编码器参数数量 ({self.total_watermark_size}) 超过主任务模型总参数数量 ({self.total_model_params})")
     
     def _get_model_param_info(self):
-        """获取模型参数信息"""
+        """获取模型参数信息（排除全连接层）"""
         param_info = []
         start_idx = 0
         for name, param in self.model.named_parameters():
+            # 排除全连接层参数（通常包含 'fc', 'classifier', 'linear' 等关键词）
+            if any(keyword in name.lower() for keyword in ['fc', 'classifier', 'linear', 'dense']):
+                print(f"跳过全连接层参数: {name} (shape: {param.shape})")
+                continue
+                
             param_info.append({
                 'name': name,
                 'shape': list(param.shape),

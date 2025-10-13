@@ -199,13 +199,9 @@ class TrainerPrivate(object):
                 if self._key_manager is None:
                     try:
                         # 初始化KeyMatrixManager，支持水印缩放
-                        enable_scaling = getattr(self.args, 'enable_watermark_scaling', True)
-                        scaling_factor = getattr(self.args, 'scaling_factor', 0.1)
-                        
                         self._key_manager = KeyMatrixManager(
                             self.args.key_matrix_dir,
-                            enable_scaling=enable_scaling,
-                            scaling_factor=scaling_factor
+                            args=self.args
                         )
                     except Exception as e:
                         print(f"[Watermark Warning] Failed to load KeyMatrixManager: {e}. Fallback to random positions.")

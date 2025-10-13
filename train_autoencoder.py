@@ -42,22 +42,20 @@ def count_parameters(model):
 def save_model(model, path):
     """保存模型参数"""
     torch.save(model.state_dict(), path)
-    print(f"模型已保存至：{path}")
     
     # 分别保存编码器和解码器参数
     encoder_path = os.path.join(weights_dir, 'encoder.pth')
     decoder_path = os.path.join(weights_dir, 'decoder.pth')
     torch.save(model.encoder.state_dict(), encoder_path)
     torch.save(model.decoder.state_dict(), decoder_path)
-    print(f"编码器已保存至：{encoder_path}")
-    print(f"解码器已保存至：{decoder_path}")
+    print(f"✓ 自编码器权重已保存")
 
 
 def load_model(model, path):
     """加载模型参数"""
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint)
-    print(f"已加载模型：{path}")
+    print(f"✓ 已加载预训练模型")
     return model
 
 
@@ -76,7 +74,7 @@ def train(model, loader, criterion, optimizer, epochs, device):
             optimizer.step()
             total_loss += loss.item() * data.size(0)
         avg_loss = total_loss / len(loader.dataset)
-        if (epoch + 1) % 10 == 0 or epoch == 0:  # 只显示每10个epoch和第一个epoch
+        if (epoch + 1) % 20 == 0 or epoch == 0:  # 只显示每20个epoch和第一个epoch
             print(f"Epoch {epoch+1:02d}/{epochs}, Loss: {avg_loss:.6f}")
     return model
 

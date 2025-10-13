@@ -54,7 +54,7 @@ def parser_args():
     # ========================= 水印缩放参数 ========================
     parser.add_argument('--enable_watermark_scaling', action='store_true', default=True,
                         help='enable watermark parameter scaling for better embedding')
-    parser.add_argument('--scaling_factor', type=float, default=0.1,
+    parser.add_argument('--scaling_factor', type=float, default=1,
                         help='fixed scaling factor for watermark parameters')
 
     # ========================= 水印和IPR参数 ========================

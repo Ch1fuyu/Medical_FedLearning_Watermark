@@ -48,12 +48,12 @@ class MaskManager:
             self.param_positions[name] = (current_idx, current_idx + param_size)
             current_idx += param_size
     
-    def update_encoder_mask(self, client_id: int):
+    def update_encoder_mask(self, client_id: int = None):
         """
-        根据客户端ID更新编码器掩码
+        更新编码器掩码，包含所有客户端的水印位置
         
         Args:
-            client_id: 客户端ID
+            client_id: 客户端ID（可选，如果为None则更新所有客户端）
         """
         if self.key_matrix_manager is None:
             print("警告: 没有密钥矩阵管理器，无法更新编码器掩码")
@@ -63,17 +63,40 @@ class MaskManager:
             # 重置编码器掩码
             self.encoder_mask.zero_()
             
-            # 加载该客户端的位置信息
-            positions = self.key_matrix_manager.load_positions(client_id)
+            # 获取所有客户端ID
+            if client_id is not None:
+                client_ids = [client_id]
+            else:
+                client_ids = self.key_matrix_manager.list_clients()
             
-            # 更新编码器掩码
-            for param_name, local_idx in positions:
+            # 加载所有客户端的位置信息并合并
+            all_positions = set()
+            for cid in client_ids:
+                try:
+                    positions = self.key_matrix_manager.load_positions(cid)
+                    all_positions.update(positions)
+                except Exception as e:
+                    print(f"加载客户端 {cid} 位置信息失败: {e}")
+                    continue
+            
+            # 更新编码器掩码（包含所有客户端的位置）
+            for param_name, local_idx in all_positions:
                 if param_name in self.param_positions:
                     start_idx, end_idx = self.param_positions[param_name]
-                    global_idx = start_idx + local_idx
+                    param_length = end_idx - start_idx
                     
-                    if global_idx < len(self.encoder_mask):
-                        self.encoder_mask[global_idx] = 1.0
+                    # 检查局部索引是否在参数范围内
+                    if local_idx < param_length:
+                        global_idx = start_idx + local_idx
+                        
+                        if global_idx < len(self.encoder_mask):
+                            self.encoder_mask[global_idx] = 1.0
+                        else:
+                            print(f"⚠️  全局索引超出掩码范围: {param_name}[{local_idx}] -> {global_idx} >= {len(self.encoder_mask)}")
+                    else:
+                        print(f"⚠️  局部索引超出参数范围: {param_name}[{local_idx}] >= {param_length}")
+            
+            print(f"✓ 编码器掩码已更新，包含 {len(all_positions)} 个水印位置")
                         
         except Exception as e:
             print(f"更新编码器掩码失败: {e}")
@@ -154,19 +177,20 @@ class MaskManager:
             'encoder_ratio': encoder_count / target_count if target_count > 0 else 0
         }
 
-def create_mask_manager(model, key_matrix_dir: str) -> MaskManager:
+def create_mask_manager(model, key_matrix_dir: str, args=None) -> MaskManager:
     """
     便捷函数：创建掩码管理器
     
     Args:
         model: 目标模型
         key_matrix_dir: 密钥矩阵目录
+        args: 参数对象，包含水印缩放相关配置
         
     Returns:
         MaskManager实例
     """
     try:
-        key_manager = KeyMatrixManager(key_matrix_dir)
+        key_manager = KeyMatrixManager(key_matrix_dir, args)
         return MaskManager(model, key_manager)
     except Exception as e:
         print(f"创建密钥矩阵管理器失败: {e}")

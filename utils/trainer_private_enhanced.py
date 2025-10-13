@@ -129,10 +129,22 @@ class TrainerPrivateEnhanced:
         if args and getattr(args, 'use_key_matrix', False):
             try:
                 from utils.mask_utils import create_mask_manager
-                self.mask_manager = create_mask_manager(model, args.key_matrix_dir)
+                self.mask_manager = create_mask_manager(model, args.key_matrix_dir, args)
+                # 初始化时更新所有客户端的编码器掩码
+                if self.mask_manager:
+                    self.mask_manager.update_encoder_mask()  # 不传client_id，更新所有客户端
             except Exception as e:
                 print(f"初始化掩码管理器失败: {e}")
                 self.mask_manager = None
+        
+        # 初始化自编码器（如果使用增强水印模式）
+        if args and getattr(args, 'watermark_mode', '') == 'enhanced':
+            try:
+                self._initialize_autoencoder()
+                print("✓ 自编码器已自动初始化")
+            except Exception as e:
+                print(f"初始化自编码器失败: {e}")
+                self.autoencoder = None
 
     def get_loss_function(self, pred, target):
         """计算损失函数，支持类别权重"""
@@ -153,16 +165,58 @@ class TrainerPrivateEnhanced:
         return F.binary_cross_entropy_with_logits(pred, target.float(), pos_weight=pos_weights)
 
     def _initialize_autoencoder(self):
-        """初始化自编码器"""
+        """初始化自编码器，分别加载编码器和解码器"""
         if self.autoencoder is None:
-            self.autoencoder = LightAutoencoder().to(self.device)
-            pretrained_path = './save/autoencoder/autoencoder.pth'
+            # 使用单通道输入的自编码器
+            self.autoencoder = LightAutoencoder(input_channels=1).to(self.device)
             
-            if os.path.exists(pretrained_path):
-                self.autoencoder.load_state_dict(torch.load(pretrained_path, map_location=self.device, weights_only=False))
-                print(f"✓ 已加载预训练自编码器: {pretrained_path}")
+            # 检查是否有自编码器权重
+            weights_dir = './save/autoencoder'
+            encoder_path = os.path.join(weights_dir, 'encoder.pth')
+            decoder_path = os.path.join(weights_dir, 'decoder.pth')
+            
+            if os.path.exists(encoder_path) and os.path.exists(decoder_path):
+                print("✓ 自编码器权重已加载")
+                load_weights = True
             else:
-                raise FileNotFoundError(f"预训练自编码器不存在: {pretrained_path}")
+                print("⚠️ 使用随机初始化权重")
+                load_weights = False
+            
+            # 只在有兼容权重时才加载
+            if load_weights:
+                # 加载编码器
+                if os.path.exists(encoder_path):
+                    self.autoencoder.encoder.load_state_dict(
+                        torch.load(encoder_path, map_location=self.device, weights_only=False)
+                    )
+                
+                # 加载解码器
+                if os.path.exists(decoder_path):
+                    self.autoencoder.decoder.load_state_dict(
+                        torch.load(decoder_path, map_location=self.device, weights_only=False)
+                    )
+            # 使用随机初始化的自编码器权重
+    
+    def _fine_tune_autoencoder(self, epochs=1, lr=0.005):
+        """在每轮联邦学习开始前微调自编码器，确保性能稳定
+        注意：只在内存中更新编码器参数，不修改原始.pth文件
+        解码器参数保持不变，由第三方保管
+        """
+        if self.autoencoder is None:
+            self._initialize_autoencoder()
+        
+        # 使用外部自编码器微调模块
+        from .autoencoder_finetuner import finetune_autoencoder_encoder
+        
+        success = finetune_autoencoder_encoder(
+            autoencoder=self.autoencoder,
+            device=self.device,
+            epochs=epochs,
+            lr=lr,
+            batch_size=128
+        )
+        
+        # 简化输出：移除冗余信息
 
 
     def _extract_encoder_parameters(self):
@@ -170,11 +224,9 @@ class TrainerPrivateEnhanced:
         if self.autoencoder is None:
             self._initialize_autoencoder()
         
-        encoder_params = []
-        for param in self.autoencoder.encoder.parameters():
-            encoder_params.append(param.data.view(-1))
-        
-        return torch.cat(encoder_params)
+        # 使用外部模块提取编码器参数
+        from .autoencoder_finetuner import extract_encoder_parameters
+        return extract_encoder_parameters(self.autoencoder)
 
     def _embed_watermark(self, client_id, current_epoch):
         """嵌入水印到目标模型"""
@@ -191,13 +243,9 @@ class TrainerPrivateEnhanced:
             
             if self._key_manager is None:
                 try:
-                    enable_scaling = getattr(self.args, 'enable_watermark_scaling', True)
-                    scaling_factor = getattr(self.args, 'scaling_factor', 0.1)
-                    
                     self._key_manager = KeyMatrixManager(
                         self.args.key_matrix_dir,
-                        enable_scaling=enable_scaling,
-                        scaling_factor=scaling_factor
+                        args=self.args
                     )
                 except Exception as e:
                     print(f"加载密钥矩阵管理器失败: {e}")
@@ -226,6 +274,11 @@ class TrainerPrivateEnhanced:
 
     def local_update(self, dataloader, local_ep, lr, client_id, current_epoch=0, total_epochs=100):
         """本地更新，支持MultiLoss和自编码器训练"""
+        # 在每轮联邦学习开始前微调自编码器（仅在第一个客户端执行，避免重复）
+        if client_id == 0 and current_epoch == 0:
+            # 微调自编码器（静默执行）
+            self._fine_tune_autoencoder(epochs=1, lr=0.005)
+        
         self.model.train()
         self.optimizer = torch.optim.SGD(self.model.parameters(), lr=lr, momentum=0.9)
 
@@ -254,8 +307,12 @@ class TrainerPrivateEnhanced:
                     try:
                         gradients = torch.cat([p.grad.view(-1) for p in self.model.parameters()])
                         target_mask, encoder_mask, effective_mask = self.mask_manager.get_masks(self.device)
+                        
+                        # 计算编码器区域的梯度（用于prevGH）
+                        encoder_gradients = torch.mul(gradients, effective_mask)
+                        
                         self.multi_loss.update_gradient_stats(
-                            gradients, gradients, target_mask, encoder_mask, effective_mask
+                            gradients, encoder_gradients, target_mask, encoder_mask, effective_mask
                         )
                     except Exception as e:
                         print(f"更新梯度统计失败: {e}")

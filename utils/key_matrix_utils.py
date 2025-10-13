@@ -7,26 +7,33 @@ from .watermark_scaling import WatermarkScaling
 class KeyMatrixManager:
     """密钥矩阵管理器，用于加载和管理密钥矩阵"""
     
-    def __init__(self, key_matrix_dir: str, enable_scaling: bool = True, 
-                 scaling_factor: float = 0.1):
+    def __init__(self, key_matrix_dir: str, args=None, enable_scaling: bool = None, 
+                 scaling_factor: float = None):
         """
         初始化密钥矩阵管理器
         
         Args:
             key_matrix_dir: 密钥矩阵保存目录
-            enable_scaling: 是否启用水印参数缩放
-            scaling_factor: 固定缩放因子（默认0.1）
+            args: 参数对象，包含水印缩放相关配置
+            enable_scaling: 是否启用水印参数缩放（如果args为None则使用此参数）
+            scaling_factor: 固定缩放因子（如果args为None则使用此参数）
         """
         self.key_matrix_dir = key_matrix_dir
         self.info = self._load_info()
         self.client_num = self.info['client_num']
         
+        # 从args中获取缩放参数，如果没有args则使用传入的参数
+        if args is not None:
+            self.enable_scaling = getattr(args, 'enable_watermark_scaling', True)
+            self.scaling_factor = getattr(args, 'scaling_factor', 1.0)
+        else:
+            self.enable_scaling = enable_scaling if enable_scaling is not None else True
+            self.scaling_factor = scaling_factor if scaling_factor is not None else 0.1
+        
         # 初始化水印缩放器
-        self.enable_scaling = enable_scaling
-        self.scaling_factor = scaling_factor
-        if enable_scaling:
-            self.watermark_scaler = WatermarkScaling(scaling_factor)
-            print(f"🔧 水印参数缩放已启用: 固定缩放因子={scaling_factor}")
+        if self.enable_scaling:
+            self.watermark_scaler = WatermarkScaling(self.scaling_factor)
+            print(f"🔧 水印参数缩放已启用: 缩放因子={self.scaling_factor}")
         else:
             self.watermark_scaler = None
             print("🔧 水印参数缩放已禁用")
@@ -82,7 +89,10 @@ class KeyMatrixManager:
             raise FileNotFoundError(f"客户端 {client_id} 的位置文件不存在: {position_path}")
         
         with open(position_path, 'r') as f:
-            return json.load(f)
+            positions = json.load(f)
+        
+        # 将列表格式转换为元组格式
+        return [(pos[0], pos[1]) for pos in positions]
     
     
     def embed_watermark(self, model_params: Dict[str, torch.Tensor], 
@@ -219,18 +229,19 @@ class KeyMatrixManager:
         
         return results
 
-def load_key_matrix_manager(key_matrix_dir: str, enable_scaling: bool = True, 
+def load_key_matrix_manager(key_matrix_dir: str, args=None, enable_scaling: bool = True, 
                            scaling_factor: float = 0.1) -> KeyMatrixManager:
     """
     便捷函数：加载密钥矩阵管理器
     
     Args:
         key_matrix_dir: 密钥矩阵保存目录
-        enable_scaling: 是否启用水印参数缩放
-        scaling_factor: 固定缩放因子（默认0.1）
+        args: 参数对象，包含水印缩放相关配置
+        enable_scaling: 是否启用水印参数缩放（如果args为None则使用此参数）
+        scaling_factor: 固定缩放因子（如果args为None则使用此参数）
         
     Returns:
         KeyMatrixManager实例
     """
-    return KeyMatrixManager(key_matrix_dir, enable_scaling, scaling_factor)
+    return KeyMatrixManager(key_matrix_dir, args, enable_scaling, scaling_factor)
 

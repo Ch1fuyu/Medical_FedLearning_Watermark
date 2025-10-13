@@ -18,6 +18,7 @@ from utils.base import Experiment
 from utils.dataset import get_data, DatasetSplit
 from utils.trainer_private import TrainerPrivate, TesterPrivate
 from utils.trainer_private_enhanced import TrainerPrivateEnhanced
+from utils.autoencoder_finetuner import AutoencoderFinetuner, finetune_autoencoder_encoder
 import pandas as pd
 
 set_seed()
@@ -85,9 +86,14 @@ class FederatedLearningOnChestMNIST(Experiment):
         if self.args.watermark_mode == 'enhanced':
             logging.info('==> 使用增强水印系统（密钥矩阵 + 自编码器）')
             self.trainer = TrainerPrivateEnhanced(self.model, self.device, self.dp, self.sigma, self.random_positions, self.args)
+            
+            # 初始化自编码器微调器
+            self.autoencoder_finetuner = AutoencoderFinetuner(self.device)
+            logging.info('==> 自编码器微调器已初始化')
         else:
             logging.info('==> 使用普通水印系统')
             self.trainer = TrainerPrivate(self.model, self.device, self.dp, self.sigma, self.random_positions, self.args)
+            self.autoencoder_finetuner = None
             
         self.tester = TesterPrivate(self.model, self.device)
 
@@ -131,6 +137,34 @@ class FederatedLearningOnChestMNIST(Experiment):
             local_ws, local_losses = [], []
 
             logging.info('Epoch: %d / %d, lr: %f' % (epoch + 1, self.epochs, self.lr))
+            
+            # 自编码器微调：在每轮联邦学习开始前进行微调
+            if self.autoencoder_finetuner is not None and hasattr(self.trainer, 'autoencoder'):
+                logging.info('==> 开始自编码器微调...')
+                try:
+                    # 微调自编码器的编码器部分
+                    success = self.autoencoder_finetuner.finetune_encoder(
+                        autoencoder=self.trainer.autoencoder,
+                        epochs=1,  # 每轮只微调1个epoch
+                        lr=0.005,
+                        batch_size=128
+                    )
+                    
+                    if success:
+                        logging.info('✓ 自编码器微调完成，性能基准已更新')
+                        
+                        # 评估微调后的性能
+                        performance = self.autoencoder_finetuner.evaluate_encoder_performance(
+                            self.trainer.autoencoder, 
+                            test_samples=1000
+                        )
+                        logging.info(f'📊 微调后编码器性能: {performance:.6f}')
+                    else:
+                        logging.warning('⚠️ 自编码器微调失败，继续使用原始参数')
+                        
+                except Exception as e:
+                    logging.error(f'❌ 自编码器微调过程中发生错误: {e}')
+                    logging.info('继续使用原始自编码器参数')
             for idx in tqdm(idxs_users, desc='Progress: %d / %d' % (epoch + 1, self.epochs)):
                 self.model.load_state_dict(self.w_t)
 
@@ -236,6 +270,24 @@ class FederatedLearningOnChestMNIST(Experiment):
                     'val_acc_sample': float(acc_val_sample_mean),
                 }
                 
+                # 添加自编码器微调统计信息
+                if self.autoencoder_finetuner is not None and hasattr(self.trainer, 'autoencoder'):
+                    try:
+                        # 获取当前自编码器性能
+                        current_performance = self.autoencoder_finetuner.evaluate_encoder_performance(
+                            self.trainer.autoencoder, 
+                            test_samples=500  # 使用较少样本进行快速评估
+                        )
+                        stats_row['autoencoder_performance'] = float(current_performance)
+                        # 简化输出：只在特定轮次显示性能
+                        if (epoch + 1) % 10 == 0 or epoch == 0:
+                            logging.info(f'📊 轮次 {epoch + 1} 自编码器性能: {current_performance:.6f}')
+                    except Exception as e:
+                        stats_row['autoencoder_performance'] = float('inf')
+                        logging.warning(f'⚠️ 无法评估自编码器性能: {e}')
+                else:
+                    stats_row['autoencoder_performance'] = None
+                
                 # 添加增强水印系统统计信息
                 if hasattr(self.trainer, 'multi_loss'):
                     multi_loss_stats = self.trainer.multi_loss.get_stats()
@@ -266,10 +318,11 @@ class FederatedLearningOnChestMNIST(Experiment):
         # 导出Excel
         try:
             os.makedirs(self.args.save_excel_dir, exist_ok=True)
-            # 基础列 + 增强水印系统统计列
+            # 基础列 + 增强水印系统统计列 + 自编码器性能列
             columns = ['round', 'lr', 'train_loss', 'val_loss', 'train_acc_label', 'train_auc', 
                      'val_acc_label', 'val_auc', 'best_val_acc_so_far', 'best_val_auc_so_far', 
-                     'train_acc_sample', 'val_acc_sample', 'prevGM', 'prevGH', 'prevRatio', 
+                     'train_acc_sample', 'val_acc_sample', 'autoencoder_performance',
+                     'prevGM', 'prevGH', 'prevRatio', 
                      'current_grad_M', 'current_grad_H', 'current_var_M', 'current_var_H']
             df = pd.DataFrame(stats_rows, columns=columns)
             now = datetime.now().strftime('%Y%m%d%H%M%S')
@@ -326,7 +379,7 @@ class FederatedLearningOnChestMNIST(Experiment):
             from utils.key_matrix_utils import KeyMatrixManager
             
             # 加载密钥矩阵管理器
-            key_manager = KeyMatrixManager(self.key_matrix_dir)
+            key_manager = KeyMatrixManager(self.key_matrix_dir, args=self.args)
             
             # 对每个客户端的水印位置进行独占式聚合
             for i, client_id in enumerate(idxs_users):
