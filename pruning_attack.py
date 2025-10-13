@@ -237,10 +237,6 @@ def save_pruning_results(results, save_dir='./save/pruning_results'):
     # 生成时间戳
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     
-    # 保存详细结果（pickle格式）
-    results_file = os.path.join(save_dir, f'pruning_attack_results_{timestamp}.pkl')
-    torch.save(results, results_file)
-    
     # 保存CSV格式的简化结果
     csv_file = os.path.join(save_dir, f'pruning_attack_summary_{timestamp}.csv')
     
@@ -262,7 +258,6 @@ def save_pruning_results(results, save_dir='./save/pruning_results'):
     df.to_csv(csv_file, index=False, encoding='utf-8-sig')
     
     print(f"✓ 结果已保存到: {save_dir}")
-    print(f"  - 详细结果: {results_file}")
     print(f"  - 汇总结果: {csv_file}")
 
 def main():
