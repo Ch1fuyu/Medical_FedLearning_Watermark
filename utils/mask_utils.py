@@ -28,25 +28,31 @@ class MaskManager:
     
     def _initialize_masks(self):
         """初始化各种掩码"""
-        # 获取模型参数总数
-        total_params = sum(p.numel() for p in self.model.parameters())
+        # 只获取卷积层参数总数
+        conv_params = []
+        for name, param in self.model.named_parameters():
+            if 'conv' in name and 'weight' in name:
+                conv_params.append(param)
         
-        # 初始化目标模型掩码（全1，表示所有参数位置）
-        self.target_mask = torch.ones(total_params, dtype=torch.float32)
+        total_conv_params = sum(p.numel() for p in conv_params)
+        
+        # 初始化目标模型掩码（全1，表示所有卷积层参数位置）
+        self.target_mask = torch.ones(total_conv_params, dtype=torch.float32)
         
         # 初始化编码器掩码（全0，后续根据密钥矩阵更新）
-        self.encoder_mask = torch.zeros(total_params, dtype=torch.float32)
+        self.encoder_mask = torch.zeros(total_conv_params, dtype=torch.float32)
         
-        # 构建参数位置映射
-        self._build_param_positions()
+        # 构建卷积层参数位置映射
+        self._build_conv_param_positions()
     
-    def _build_param_positions(self):
-        """构建参数名称到全局索引的映射"""
+    def _build_conv_param_positions(self):
+        """构建卷积层参数名称到全局索引的映射"""
         current_idx = 0
         for name, param in self.model.named_parameters():
-            param_size = param.numel()
-            self.param_positions[name] = (current_idx, current_idx + param_size)
-            current_idx += param_size
+            if 'conv' in name and 'weight' in name:
+                param_size = param.numel()
+                self.param_positions[name] = (current_idx, current_idx + param_size)
+                current_idx += param_size
     
     def update_encoder_mask(self, client_id: int = None):
         """

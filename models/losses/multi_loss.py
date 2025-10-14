@@ -50,49 +50,117 @@ class MultiLoss:
     def update_gradient_stats(self, target_gradients, encoder_gradients, 
                             target_mask, encoder_mask, effective_mask):
         """
-        更新梯度统计量
+        更新梯度统计量（只处理卷积层，添加非零梯度过滤）
         
         Args:
-            target_gradients: 目标模型梯度
+            target_gradients: 目标模型梯度（卷积层）
             encoder_gradients: 编码器梯度
             target_mask: 目标模型梯度掩码
             encoder_mask: 编码器区域掩码
             effective_mask: 编码器有效梯度掩码 (encoder_mask × target_mask)
         """
-        # 计算目标模型梯度量级（target_gradients是完整模型梯度）
-        target_grad_abs = torch.abs(target_gradients)
-        self.current_grad_M = torch.sum(target_grad_abs).item()
+        # 添加非零梯度过滤（阈值：0.00001）
+        target_nonzero_mask = torch.where(torch.abs(target_gradients) <= 0.00001, 
+                                        torch.zeros_like(target_gradients), 
+                                        torch.ones_like(target_gradients))
         
-        # 计算编码器梯度量级（encoder_gradients是掩码后的编码器区域梯度）
-        encoder_grad_abs = torch.abs(encoder_gradients)
-        self.current_grad_H = torch.sum(encoder_grad_abs).item()
+        # 计算目标模型非零梯度量级
+        target_grad_filtered = torch.mul(torch.abs(target_gradients), target_nonzero_mask)
+        self.current_grad_M = torch.sum(target_grad_filtered).item()
+        
+        # 计算编码器非零梯度量级
+        encoder_nonzero_mask = torch.where(torch.abs(encoder_gradients) <= 0.00001, 
+                                         torch.zeros_like(encoder_gradients), 
+                                         torch.ones_like(encoder_gradients))
+        encoder_grad_filtered = torch.mul(torch.abs(encoder_gradients), encoder_nonzero_mask)
+        self.current_grad_H = torch.sum(encoder_grad_filtered).item()
         
         # 计算非零梯度数量
-        target_nonzero = torch.sum(target_mask).item()
-        encoder_nonzero = torch.sum(effective_mask).item()
+        target_nonzero = torch.sum(target_nonzero_mask).item()
+        encoder_nonzero = torch.sum(encoder_nonzero_mask).item()
+        
+        # # 调试信息
+        # print(f"梯度统计调试:")
+        # print(f"  target_gradients shape: {target_gradients.shape}")
+        # print(f"  target_gradients min/max: {target_gradients.min().item():.8f}/{target_gradients.max().item():.8f}")
+        # print(f"  target_nonzero: {target_nonzero}")
+        # print(f"  current_grad_M: {self.current_grad_M:.8f}")
+        # print(f"  encoder_gradients shape: {encoder_gradients.shape}")
+        # print(f"  encoder_nonzero: {encoder_nonzero}")
+        # print(f"  current_grad_H: {self.current_grad_H:.8f}")
         
         # 计算平均梯度量级
-        # prevGM: 整个目标模型的平均梯度量级
+        # prevGM: 卷积层非零梯度的平均量级
         if target_nonzero > 0:
             self.prevGM = self.current_grad_M / target_nonzero
-        # prevGH: 编码器区域的平均梯度量级
+        else:
+            self.prevGM = 0.0  # 没有非零梯度时设为0
+            
+        # prevGH: 编码器区域非零梯度的平均量级
         if encoder_nonzero > 0:
             self.prevGH = self.current_grad_H / encoder_nonzero
+        else:
+            self.prevGH = 0.0  # 没有非零梯度时设为0
             
-        # 计算梯度方差
+        print(f"  计算后 prevGM: {self.prevGM:.8f}, prevGH: {self.prevGH:.8f}")
+            
+        # 计算梯度方差（使用过滤后的梯度）
         if target_nonzero > 0:
-            target_mean = torch.sum(target_grad_abs) / target_nonzero
-            target_var = torch.sum(torch.pow(target_grad_abs - target_mean, 2)) / target_nonzero
+            target_mean = torch.sum(target_grad_filtered) / target_nonzero
+            target_var = torch.sum(torch.pow(target_grad_filtered - target_mean, 2)) / target_nonzero
             self.current_var_M = target_var.item()
+        else:
+            self.current_var_M = 0.0
             
         if encoder_nonzero > 0:
-            encoder_mean = torch.sum(encoder_grad_abs) / encoder_nonzero
-            encoder_var = torch.sum(torch.pow(encoder_grad_abs - encoder_mean, 2)) / encoder_nonzero
+            encoder_mean = torch.sum(encoder_grad_filtered) / encoder_nonzero
+            encoder_var = torch.sum(torch.pow(encoder_grad_filtered - encoder_mean, 2)) / encoder_nonzero
             self.current_var_H = encoder_var.item()
+        else:
+            self.current_var_H = 0.0
             
         # 更新方差比例
         if self.current_var_H > 0:
             self.prevRatio = self.current_var_M / self.current_var_H
+        else:
+            self.prevRatio = 1.0  # 默认比例
+    
+    def update_gradient_stats_batch(self, gradient_batch_list):
+        """
+        批量更新梯度统计量（用于每轮联邦训练结束后）
+        
+        Args:
+            gradient_batch_list: 包含多个batch梯度数据的列表
+        """
+        if not gradient_batch_list:
+            return
+            
+        # 合并所有batch的梯度数据
+        all_gradients = []
+        all_encoder_gradients = []
+        all_target_masks = []
+        all_encoder_masks = []
+        all_effective_masks = []
+        
+        for batch_data in gradient_batch_list:
+            all_gradients.append(batch_data['gradients'])
+            all_encoder_gradients.append(batch_data['encoder_gradients'])
+            all_target_masks.append(batch_data['target_mask'])
+            all_encoder_masks.append(batch_data['encoder_mask'])
+            all_effective_masks.append(batch_data['effective_mask'])
+        
+        # 合并所有梯度
+        combined_gradients = torch.cat(all_gradients, dim=0)
+        combined_encoder_gradients = torch.cat(all_encoder_gradients, dim=0)
+        combined_target_mask = torch.cat(all_target_masks, dim=0)
+        combined_encoder_mask = torch.cat(all_encoder_masks, dim=0)
+        combined_effective_mask = torch.cat(all_effective_masks, dim=0)
+        
+        # 使用合并后的梯度更新统计量
+        self.update_gradient_stats(
+            combined_gradients, combined_encoder_gradients, 
+            combined_target_mask, combined_encoder_mask, combined_effective_mask
+        )
     
     def compute_loss(self, main_loss, current_epoch, total_epochs):
         """
@@ -125,7 +193,8 @@ class MultiLoss:
     
     def _compute_gradient_balance_term(self, alpha):
         """计算梯度平衡正则项"""
-        if self.prevGH == 0:
+        # 如果统计量未初始化，返回0
+        if self.prevGM == 0 or self.prevGH == 0:
             return torch.tensor(0.0, requires_grad=True)
             
         beta1 = torch.abs(torch.tensor(self.prevGM / self.prevGH))
@@ -134,6 +203,10 @@ class MultiLoss:
     
     def _compute_variance_ratio_term(self, alpha):
         """计算方差比例正则项"""
+        # 如果方差比例未初始化，返回0
+        if self.prevRatio == 1.0:  # 初始值
+            return torch.tensor(0.0, requires_grad=True)
+            
         reg_term2 = alpha * (1.5 - self.prevRatio) * (1.5 - self.prevRatio)
         return reg_term2
     

@@ -4,6 +4,7 @@ import sys
 import time
 from datetime import datetime
 import logging
+import gc
 
 import numpy as np
 import torch
@@ -40,6 +41,7 @@ logging.basicConfig(
 class FederatedLearningOnChestMNIST(Experiment):
     def __init__(self, args):
         super().__init__(args)
+        
         self.random_positions = None
         self.args = args
         self.dp = args.dp
@@ -104,18 +106,32 @@ class FederatedLearningOnChestMNIST(Experiment):
             model = AlexNet(self.in_channels, self.num_classes)
         self.model = model.to(self.device)
 
+    def _cleanup_memory(self):
+        """清理内存和GPU缓存"""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+
+    def _optimize_model_storage(self, model_state):
+        """优化模型状态存储，减少内存占用"""
+        # 将模型状态移到CPU，使用detach()避免梯度追踪
+        optimized_state = {}
+        for key, value in model_state.items():
+            optimized_state[key] = value.detach().cpu()
+        return optimized_state
+
     def training(self):
         start = time.time()
         # these dataloader would only be used in calculating accuracy and loss
-        train_ldr = DataLoader(self.train_set, batch_size=self.batch_size, shuffle=False, num_workers=2)
-        val_ldr = DataLoader(self.test_set, batch_size=self.batch_size * 2, shuffle=False, num_workers=2)
+        train_ldr = DataLoader(self.train_set, batch_size=self.batch_size, shuffle=False, num_workers=0, pin_memory=False)
+        val_ldr = DataLoader(self.test_set, batch_size=self.batch_size * 2, shuffle=False, num_workers=0, pin_memory=False)
 
         local_train_loader = []
 
         for i in range(self.client_num):
             local_train_ldr = DataLoader(DatasetSplit(self.train_set, self.dict_users[i]),
                                          batch_size=self.batch_size,
-                                         shuffle=True, num_workers=2)
+                                         shuffle=True, num_workers=0, pin_memory=False)
             local_train_loader.append(local_train_ldr)
 
         idxs_users = []
@@ -138,34 +154,34 @@ class FederatedLearningOnChestMNIST(Experiment):
 
             logging.info('Epoch: %d / %d, lr: %f' % (epoch + 1, self.epochs, self.lr))
             
-            # 自编码器微调：在每轮联邦学习开始前进行微调
+            # 自编码器微调：每一轮联邦训练开始时都执行
             if self.autoencoder_finetuner is not None and hasattr(self.trainer, 'autoencoder'):
-                logging.info('==> 开始自编码器微调...')
+                logging.info(f'==> 第{epoch+1}轮联邦训练开始，微调自编码器...')
                 try:
                     # 微调自编码器的编码器部分
                     success = self.autoencoder_finetuner.finetune_encoder(
                         autoencoder=self.trainer.autoencoder,
                         epochs=1,  # 每轮只微调1个epoch
                         lr=0.005,
-                        batch_size=128
+                        batch_size=128  # 减少批处理大小以降低内存使用
                     )
                     
                     if success:
-                        logging.info('✓ 自编码器微调完成，性能基准已更新')
+                        logging.info(f'✓ 第{epoch+1}轮自编码器微调完成，性能基准已更新')
                         
                         # 评估微调后的性能
                         performance = self.autoencoder_finetuner.evaluate_encoder_performance(
                             self.trainer.autoencoder, 
                             test_samples=1000
                         )
-                        logging.info(f'📊 微调后编码器性能: {performance:.6f}')
+                        logging.info(f'📊 第{epoch+1}轮微调后编码器性能: {performance:.6f}')
                     else:
-                        logging.warning('⚠️ 自编码器微调失败，继续使用原始参数')
+                        logging.warning(f'⚠️ 第{epoch+1}轮自编码器微调失败，继续使用原始参数')
                         
                 except Exception as e:
-                    logging.error(f'❌ 自编码器微调过程中发生错误: {e}')
+                    logging.error(f'❌ 第{epoch+1}轮自编码器微调过程中发生错误: {e}')
                     logging.info('继续使用原始自编码器参数')
-            for idx in tqdm(idxs_users, desc='Progress: %d / %d' % (epoch + 1, self.epochs)):
+            for i, idx in enumerate(tqdm(idxs_users, desc='Progress: %d / %d' % (epoch + 1, self.epochs))):
                 self.model.load_state_dict(self.w_t)
 
                 # 统一调用：始终传入 current_epoch/total_epochs；
@@ -181,6 +197,9 @@ class FederatedLearningOnChestMNIST(Experiment):
 
                 local_ws.append(copy.deepcopy(local_w))
                 local_losses.append(local_loss)
+                
+                # 清理临时变量，释放内存
+                del local_w, local_loss, local_acc
 
             # 学习率调度 - MultiStepLR
             milestones = [int(self.epochs * m) for m in self.args.lr_decay_milestones]
@@ -196,7 +215,28 @@ class FederatedLearningOnChestMNIST(Experiment):
 
             # 更新全局模型权重
             self._fed_avg(local_ws, client_weights, idxs_users)
+            
+            # 加载聚合后的权重并确保模型处于正确状态
             self.model.load_state_dict(self.w_t)
+            self.model.train()  # 确保模型处于训练状态
+            
+            # 清理优化器状态，避免梯度累积
+            if hasattr(self.trainer, 'optimizer') and self.trainer.optimizer is not None:
+                self.trainer.optimizer.zero_grad()
+            
+            # 梯度统计已在每个客户端的本地训练过程中更新，无需额外处理
+            if epoch >= 0 and hasattr(self.trainer, 'multi_loss'):
+                try:
+                    # 打印当前梯度统计信息（来自最后一个客户端的统计）
+                    stats = self.trainer.get_gradient_stats()
+                    if stats:
+                        logging.info(f'第{epoch+1}轮联邦训练后梯度统计:')
+                        logging.info(f'  prevGM: {stats.get("prevGM", 0):.6f}')
+                        logging.info(f'  prevGH: {stats.get("prevGH", 0):.6f}')
+                        logging.info(f'  prevRatio: {stats.get("prevRatio", 1):.6f}')
+                except Exception as e:
+                    logging.error(f'获取梯度统计失败: {e}')
+
 
             if (epoch + 1) == self.epochs or (epoch + 1) % 1 == 0:
                 train_metrics = self.trainer.test(train_ldr)
@@ -224,7 +264,9 @@ class FederatedLearningOnChestMNIST(Experiment):
                     self.logs['best_model_acc'] = acc_val_label_mean
                     self.logs['best_model_loss'] = loss_val_mean
                     self.logs['best_model_auc'] = auc_val
-                    self.logs['best_model'] = [copy.deepcopy(self.model.state_dict())]
+                    # 优化模型存储，减少内存占用
+                    optimized_state = self._optimize_model_storage(self.model.state_dict())
+                    self.logs['best_model'] = [optimized_state]
                     logging.info(f'New best model saved! AUC improved to {auc_val:.4f}')
 
                 if self.logs['best_train_acc'] < acc_train_label_mean:
@@ -242,18 +284,7 @@ class FederatedLearningOnChestMNIST(Experiment):
                 if hasattr(self.trainer, 'multi_loss'):
                     stats = self.trainer.multi_loss.get_stats()
                     logging.info(f"MultiLoss统计 - prevGM: {stats['prevGM']:.6f}, prevGH: {stats['prevGH']:.6f}, prevRatio: {stats['prevRatio']:.6f}")
-
-
-                # Early Stopping：基于验证AUC
-                if auc_val > best_val_auc:
-                    best_val_auc = auc_val
-                    early_stop_counter = 0
-                else:
-                    early_stop_counter += 1
-                    if early_stop_counter >= patience:
-                        logging.info(f'Early stopping triggered at epoch {epoch + 1}. Best Val AUC: {best_val_auc:.4f}')
-                        break
-
+                
                 # 记录本轮统计数据
                 stats_row = {
                     'round': epoch + 1,
@@ -269,6 +300,24 @@ class FederatedLearningOnChestMNIST(Experiment):
                     'train_acc_sample': float(acc_train_sample_mean),
                     'val_acc_sample': float(acc_val_sample_mean),
                 }
+                
+                # Early Stopping：基于验证AUC
+                if auc_val > best_val_auc:
+                    best_val_auc = auc_val
+                    early_stop_counter = 0
+                else:
+                    early_stop_counter += 1
+                    if early_stop_counter >= patience:
+                        logging.info(f'Early stopping triggered at epoch {epoch + 1}. Best Val AUC: {best_val_auc:.4f}')
+                        break
+                
+                # 每轮训练后清理内存
+                self._cleanup_memory()
+                
+                # 清理临时变量
+                del train_metrics, val_metrics
+                del loss_train_mean, acc_train_label_mean, auc_train, acc_train_sample_mean
+                del loss_val_mean, acc_val_label_mean, auc_val, acc_val_sample_mean
                 
                 # 添加自编码器微调统计信息
                 if self.autoencoder_finetuner is not None and hasattr(self.trainer, 'autoencoder'):
@@ -314,6 +363,10 @@ class FederatedLearningOnChestMNIST(Experiment):
         end = time.time()
         logging.info('Time: {:.1f} min'.format((end - start) / 60))
         logging.info('-------------------------------Finish--------------------------------------')
+        
+        # 最终内存清理
+        self._cleanup_memory()
+        logging.info('🧹 训练完成，已清理内存缓存')
 
         # 导出Excel
         try:
@@ -350,9 +403,9 @@ class FederatedLearningOnChestMNIST(Experiment):
             normalized_weights = [w / weight_sum for w in normalized_weights]
         
         # 初始化平均权重
-        w_avg = copy.deepcopy(local_ws[0])
-        for k in w_avg.keys():
-            w_avg[k] = w_avg[k] * normalized_weights[0]
+        w_avg = {}
+        for k in local_ws[0].keys():
+            w_avg[k] = local_ws[0][k].clone() * normalized_weights[0]
 
         # 累加其他客户端的权重
         for i in range(1, len(local_ws)):
@@ -450,6 +503,7 @@ def main(args):
         args.epochs, args.local_ep, args.client_num, args.frac, test_auc, enhanced
     )
     torch.save(logs, os.path.join(save_dir, file_name))
+    logging.info(f"训练日志已保存: {file_name}")
 
     return
 

@@ -176,19 +176,22 @@ def construct_random_wm_position(model, client_num):
 
     print(f"Encoder total parameter count (as watermark size): {encoder_total_params}")
 
-    # 获取主任务模型所有参数扁平索引
-    param_indices = []
+    # 只获取卷积层参数索引
+    conv_param_indices = []
     for name, param in model.named_parameters():
-        param_indices.extend([(name, i) for i in range(param.numel())])
+        if 'conv' in name and 'weight' in name:  # 只处理卷积层权重
+            conv_param_indices.extend([(name, i) for i in range(param.numel())])
 
-    if encoder_total_params > len(param_indices):
-        raise ValueError(f"编码器参数数量 ({encoder_total_params}) 超过主任务模型总参数数量 ({len(param_indices)})，无法分配位置。")
+    print(f"Convolutional layer parameter count: {len(conv_param_indices)}")
 
-    # 打乱所有参数索引
-    np.random.shuffle(param_indices)
+    if encoder_total_params > len(conv_param_indices):
+        raise ValueError(f"编码器参数数量 ({encoder_total_params}) 超过卷积层参数数量 ({len(conv_param_indices)})，无法分配位置。")
+
+    # 打乱卷积层参数索引
+    np.random.shuffle(conv_param_indices)
 
     # 只取编码器大小数量的索引
-    selected_param_indices = param_indices[:encoder_total_params]
+    selected_param_indices = conv_param_indices[:encoder_total_params]
 
     # 平均划分给所有客户端
     chunk_size = encoder_total_params // client_num

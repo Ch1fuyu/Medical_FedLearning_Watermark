@@ -141,10 +141,12 @@ class TrainerPrivateEnhanced:
         if args and getattr(args, 'watermark_mode', '') == 'enhanced':
             try:
                 self._initialize_autoencoder()
-                print("✓ 自编码器已自动初始化")
+                print("自编码器已自动初始化")
             except Exception as e:
-                print(f"初始化自编码器失败: {e}")
-                self.autoencoder = None
+                print(f"错误: 初始化自编码器失败!")
+                print(f"  错误详情: {e}")
+                print(f"  请确保自编码器权重文件存在且格式正确")
+                raise RuntimeError(f"自编码器初始化失败: {e}")
 
     def get_loss_function(self, pred, target):
         """计算损失函数，支持类别权重"""
@@ -167,7 +169,7 @@ class TrainerPrivateEnhanced:
     def _initialize_autoencoder(self):
         """初始化自编码器，分别加载编码器和解码器"""
         if self.autoencoder is None:
-            # 使用单通道输入的自编码器
+            # 使用单通道输入的自编码器（MNIST训练）
             self.autoencoder = LightAutoencoder(input_channels=1).to(self.device)
             
             # 检查是否有自编码器权重
@@ -176,25 +178,38 @@ class TrainerPrivateEnhanced:
             decoder_path = os.path.join(weights_dir, 'decoder.pth')
             
             if os.path.exists(encoder_path) and os.path.exists(decoder_path):
-                print("✓ 自编码器权重已加载")
+                print("自编码器权重已加载")
                 load_weights = True
             else:
-                print("⚠️ 使用随机初始化权重")
-                load_weights = False
+                print(f"错误: 自编码器权重文件不存在!")
+                print(f"  编码器权重路径: {encoder_path}")
+                print(f"  解码器权重路径: {decoder_path}")
+                print(f"  请先运行 train_autoencoder.py 训练自编码器")
+                raise FileNotFoundError(f"自编码器权重文件不存在: {encoder_path} 或 {decoder_path}")
             
-            # 只在有兼容权重时才加载
+            # 加载自编码器权重
             if load_weights:
-                # 加载编码器
-                if os.path.exists(encoder_path):
-                    self.autoencoder.encoder.load_state_dict(
-                        torch.load(encoder_path, map_location=self.device, weights_only=False)
-                    )
-                
-                # 加载解码器
-                if os.path.exists(decoder_path):
-                    self.autoencoder.decoder.load_state_dict(
-                        torch.load(decoder_path, map_location=self.device, weights_only=False)
-                    )
+                try:
+                    # 加载编码器
+                    if os.path.exists(encoder_path):
+                        self.autoencoder.encoder.load_state_dict(
+                            torch.load(encoder_path, map_location=self.device, weights_only=False)
+                        )
+                        print(f"✓ 编码器权重已加载: {encoder_path}")
+                    
+                    # 加载解码器
+                    if os.path.exists(decoder_path):
+                        self.autoencoder.decoder.load_state_dict(
+                            torch.load(decoder_path, map_location=self.device, weights_only=False)
+                        )
+                        print(f"✓ 解码器权重已加载: {decoder_path}")
+                        
+                except Exception as e:
+                    print(f"错误: 加载自编码器权重失败!")
+                    print(f"  编码器路径: {encoder_path}")
+                    print(f"  解码器路径: {decoder_path}")
+                    print(f"  错误详情: {e}")
+                    raise RuntimeError(f"自编码器权重加载失败: {e}")
             # 使用随机初始化的自编码器权重
     
     def _fine_tune_autoencoder(self, epochs=1, lr=0.005):
@@ -267,22 +282,33 @@ class TrainerPrivateEnhanced:
                     if name in watermarked_params:
                         param.data.copy_(watermarked_params[name])
                 
-                print(f"🔧 水印嵌入完成，使用KeyMatrixManager自动缩放")
+                print(f"水印嵌入完成，使用KeyMatrixManager自动缩放")
+                
+                # 水印嵌入完成后清理梯度数据
+                if hasattr(self, 'gradient_batch_data') and len(self.gradient_batch_data) > 0:
+                    print(f"清理客户端 {client_id} 的梯度数据 ({len(self.gradient_batch_data)} 个批次)")
+                    self.clear_gradient_batch_data()
+                    torch.cuda.empty_cache()
+                    import gc
+                    gc.collect()
                                 
         except Exception as e:
             print(f"嵌入水印失败: {e}")
 
     def local_update(self, dataloader, local_ep, lr, client_id, current_epoch=0, total_epochs=100):
         """本地更新，支持MultiLoss和自编码器训练"""
-        # 在每轮联邦学习开始前微调自编码器（仅在第一个客户端执行，避免重复）
-        if client_id == 0 and current_epoch == 0:
-            # 微调自编码器（静默执行）
-            self._fine_tune_autoencoder(epochs=1, lr=0.005)
-        
         self.model.train()
         self.optimizer = torch.optim.SGD(self.model.parameters(), lr=lr, momentum=0.9)
 
         epoch_loss, epoch_acc = [], []
+        
+        # 初始化梯度统计变量（实时计算，不累积存储）
+        total_gradients = None
+        total_encoder_gradients = None
+        total_target_mask = None
+        total_encoder_mask = None
+        total_effective_mask = None
+        batch_count = 0
 
         for epoch in range(local_ep):
             loss_meter = 0.0
@@ -296,6 +322,7 @@ class TrainerPrivateEnhanced:
                 pred = self.model(x)
                 main_loss = self.get_loss_function(pred, y)
 
+                # 计算最终损失
                 if current_epoch == 0:
                     total_loss = main_loss
                 else:
@@ -303,17 +330,41 @@ class TrainerPrivateEnhanced:
 
                 total_loss.backward()
 
-                if current_epoch > 0 and self.mask_manager:
+                # 梯度统计收集：在训练过程中收集梯度信息（用于统计，不影响训练）
+                if (self.mask_manager and current_epoch >= 0 and batch_idx % 5 == 0):  # 每5个batch收集一次
                     try:
-                        gradients = torch.cat([p.grad.view(-1) for p in self.model.parameters()])
-                        target_mask, encoder_mask, effective_mask = self.mask_manager.get_masks(self.device)
+                        # 只收集卷积层参数的梯度
+                        conv_gradients = []
+                        for name, param in self.model.named_parameters():
+                            if 'conv' in name and 'weight' in name and param.grad is not None:
+                                conv_gradients.append(param.grad.view(-1))
                         
-                        # 计算编码器区域的梯度（用于prevGH）
-                        encoder_gradients = torch.mul(gradients, effective_mask)
+                        if conv_gradients:
+                            gradients = torch.cat(conv_gradients)
+                            target_mask, encoder_mask, effective_mask = self.mask_manager.get_masks(self.device)
+                            
+                            # 计算编码器区域的梯度（用于prevGH）
+                            encoder_gradients = torch.mul(gradients, effective_mask)
+                            
+                            # 累积梯度数据用于统计
+                            if total_gradients is None:
+                                total_gradients = gradients.detach()
+                                total_encoder_gradients = encoder_gradients.detach()
+                                total_target_mask = target_mask.detach()
+                                total_encoder_mask = encoder_mask.detach()
+                                total_effective_mask = effective_mask.detach()
+                            else:
+                                total_gradients += gradients.detach()
+                                total_encoder_gradients += encoder_gradients.detach()
+                                total_target_mask += target_mask.detach()
+                                total_encoder_mask += encoder_mask.detach()
+                                total_effective_mask += effective_mask.detach()
+                            
+                            batch_count += 1
+                            
+                            # 清理临时变量
+                            del gradients, encoder_gradients, target_mask, encoder_mask, effective_mask
                         
-                        self.multi_loss.update_gradient_stats(
-                            gradients, encoder_gradients, target_mask, encoder_mask, effective_mask
-                        )
                     except Exception as e:
                         print(f"更新梯度统计失败: {e}")
 
@@ -324,11 +375,22 @@ class TrainerPrivateEnhanced:
                 acc_meter += acc_results[0].item() * x.size(0) / 100.0
                 loss_meter += main_loss.item() * x.size(0)
                 run_count += x.size(0)
+                
+                # 定期清理内存，防止内存泄漏
+                if batch_idx % 3 == 0:  # 更频繁的内存清理
+                    torch.cuda.empty_cache()
+                
+                # 每20个批次进行激进内存清理
+                if batch_idx % 20 == 0 and batch_idx > 0:
+                    self._aggressive_memory_cleanup()
 
             loss_meter /= run_count
             acc_meter /= run_count
 
             epoch_loss.append(loss_meter)
+            
+            # 每个epoch结束后清理内存
+            torch.cuda.empty_cache()
             epoch_acc.append(acc_meter)
 
             if epoch + 1 == local_ep:
@@ -340,12 +402,130 @@ class TrainerPrivateEnhanced:
             self._embed_watermark(client_id, current_epoch)
             print(f"Client {client_id} - Watermark embedded at epoch {current_epoch + 1}")
 
+        # 本地训练结束后，使用累积的梯度数据更新统计量
+        if (self.mask_manager and current_epoch >= 0 and batch_count > 0):
+            try:
+                # 计算平均梯度数据
+                avg_gradients = total_gradients / batch_count
+                avg_encoder_gradients = total_encoder_gradients / batch_count
+                avg_target_mask = total_target_mask / batch_count
+                avg_encoder_mask = total_encoder_mask / batch_count
+                avg_effective_mask = total_effective_mask / batch_count
+                
+                # 更新梯度统计量
+                self.multi_loss.update_gradient_stats(
+                    avg_gradients,
+                    avg_encoder_gradients,
+                    avg_target_mask,
+                    avg_encoder_mask,
+                    avg_effective_mask
+                )
+                
+                # 简化的统计信息输出
+                stats = self.multi_loss.get_stats()
+                print(f"Client {client_id} 梯度统计: GM={stats.get('prevGM', 0):.4f}, "
+                      f"GH={stats.get('prevGH', 0):.4f}, Ratio={stats.get('prevRatio', 1):.4f}")
+                
+            except Exception as e:
+                print(f"Client {client_id} 梯度统计更新失败: {e}")
+            finally:
+                # 确保清理梯度数据，防止内存泄漏
+                if 'total_gradients' in locals():
+                    del total_gradients
+                if 'total_encoder_gradients' in locals():
+                    del total_encoder_gradients
+                if 'total_target_mask' in locals():
+                    del total_target_mask
+                if 'total_encoder_mask' in locals():
+                    del total_encoder_mask
+                if 'total_effective_mask' in locals():
+                    del total_effective_mask
+                if 'avg_gradients' in locals():
+                    del avg_gradients
+                if 'avg_encoder_gradients' in locals():
+                    del avg_encoder_gradients
+                if 'avg_target_mask' in locals():
+                    del avg_target_mask
+                if 'avg_encoder_mask' in locals():
+                    del avg_encoder_mask
+                if 'avg_effective_mask' in locals():
+                    del avg_effective_mask
+                
+                # 强制垃圾回收
+                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+        # 定期清理内存
+        if current_epoch > 0 and current_epoch % 10 == 0:
+            self._cleanup_memory()
+
         # 差分隐私噪声
         if self.dp:
             for param in self.model.parameters():
                 param.data = param.data + torch.normal(torch.zeros(param.size()), self.sigma).to(self.device)
 
         return self.model.state_dict(), np.mean(epoch_loss), np.mean(epoch_acc)
+    
+    def get_gradient_stats(self):
+        """获取梯度统计量"""
+        if hasattr(self, 'multi_loss'):
+            return self.multi_loss.get_stats()
+        return {}
+    
+    def _cleanup_memory(self):
+        """清理内存和GPU缓存（保留梯度数据）"""
+        try:
+            # 不清理梯度数据，保留用于水印嵌入
+            # 梯度数据将在水印嵌入完成后统一清理
+            
+            # 清理GPU缓存
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                # 重置内存统计
+                torch.cuda.reset_peak_memory_stats()
+            
+            # 强制垃圾回收
+            import gc
+            gc.collect()
+            
+            # 内存清理完成
+        except Exception as e:
+            print(f"⚠️ 内存清理失败: {e}")
+    
+    def _aggressive_memory_cleanup(self):
+        """激进的内存清理策略（保留梯度数据）"""
+        try:
+            # 不清理梯度数据，保留用于水印嵌入
+            # 梯度数据将在水印嵌入完成后统一清理
+            
+            # 清理模型梯度
+            if hasattr(self, 'model'):
+                for param in self.model.parameters():
+                    if param.grad is not None:
+                        param.grad = None
+            
+            # 清理优化器状态
+            if hasattr(self, 'optimizer'):
+                self.optimizer.zero_grad()
+            
+            # 清理GPU缓存
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                torch.cuda.reset_peak_memory_stats()
+            
+            # 强制垃圾回收
+            import gc
+            gc.collect()
+            
+            # 激进内存清理完成
+        except Exception as e:
+            print(f"⚠️ 激进内存清理失败: {e}")
+    
+    def reset_gradient_stats(self):
+        """重置梯度统计量"""
+        if hasattr(self, 'multi_loss'):
+            self.multi_loss.reset_batch_stats()
 
     def test(self, dataloader):
         """测试模型"""

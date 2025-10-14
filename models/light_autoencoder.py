@@ -1,7 +1,7 @@
 from torch import nn
 
 class LightAutoencoder(nn.Module):
-    def __init__(self, input_channels=3):
+    def __init__(self, input_channels=1):
         super(LightAutoencoder, self).__init__()
         self.input_channels = input_channels
         
