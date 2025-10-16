@@ -5,7 +5,35 @@ from typing import Dict, List, Tuple, Optional
 from .watermark_scaling import WatermarkScaling
 
 class KeyMatrixManager:
-    """密钥矩阵管理器，用于加载和管理密钥矩阵"""
+    """密钥矩阵管理器，用于加载和管理密钥矩阵（支持实例缓存）"""
+    
+    _instances = {}  # 类变量，存储不同配置的实例
+    
+    def __new__(cls, key_matrix_dir: str, args=None, enable_scaling: bool = None, 
+                scaling_factor: float = None):
+        """
+        单例模式：相同配置只创建一个实例
+        
+        Args:
+            key_matrix_dir: 密钥矩阵保存目录
+            args: 参数对象，包含水印缩放相关配置
+            enable_scaling: 是否启用水印参数缩放
+            scaling_factor: 固定缩放因子
+        """
+        # 创建实例标识符
+        if args is not None:
+            enable_scaling = getattr(args, 'enable_watermark_scaling', True)
+            scaling_factor = getattr(args, 'scaling_factor', 1.0)
+        else:
+            enable_scaling = enable_scaling if enable_scaling is not None else True
+            scaling_factor = scaling_factor if scaling_factor is not None else 0.1
+        
+        instance_key = (key_matrix_dir, enable_scaling, scaling_factor)
+        
+        if instance_key not in cls._instances:
+            instance = super(KeyMatrixManager, cls).__new__(cls)
+            cls._instances[instance_key] = instance
+        return cls._instances[instance_key]
     
     def __init__(self, key_matrix_dir: str, args=None, enable_scaling: bool = None, 
                  scaling_factor: float = None):
@@ -18,6 +46,10 @@ class KeyMatrixManager:
             enable_scaling: 是否启用水印参数缩放（如果args为None则使用此参数）
             scaling_factor: 固定缩放因子（如果args为None则使用此参数）
         """
+        # 避免重复初始化
+        if hasattr(self, 'key_matrix_dir'):
+            return
+            
         self.key_matrix_dir = key_matrix_dir
         self.info = self._load_info()
         self.client_num = self.info['client_num']
@@ -30,7 +62,7 @@ class KeyMatrixManager:
             self.enable_scaling = enable_scaling if enable_scaling is not None else True
             self.scaling_factor = scaling_factor if scaling_factor is not None else 0.1
         
-        # 初始化水印缩放器
+        # 初始化水印缩放器（使用单例模式）
         if self.enable_scaling:
             self.watermark_scaler = WatermarkScaling(self.scaling_factor)
             print(f"🔧 水印参数缩放已启用: 缩放因子={self.scaling_factor}")
@@ -228,6 +260,22 @@ class KeyMatrixManager:
                 results[client_id] = False
         
         return results
+    
+    @classmethod
+    def clear_instances(cls):
+        """清理所有实例缓存"""
+        cls._instances.clear()
+    
+    @classmethod
+    def get_instance_count(cls):
+        """获取当前实例数量"""
+        return len(cls._instances)
+    
+    @classmethod
+    def get_instance_info(cls):
+        """获取实例信息"""
+        return {key: f"KeyMatrixManager(dir={key[0]}, scaling={key[1]}, factor={key[2]})" 
+                for key in cls._instances.keys()}
 
 def load_key_matrix_manager(key_matrix_dir: str, args=None, enable_scaling: bool = True, 
                            scaling_factor: float = 0.1) -> KeyMatrixManager:

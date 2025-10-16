@@ -3,7 +3,21 @@ import numpy as np
 from typing import Dict, Tuple, Optional
 
 class WatermarkScaling:
-    """水印参数固定缩放管理器"""
+    """水印参数固定缩放管理器（单例模式）"""
+    
+    _instances = {}  # 类变量，存储不同缩放因子的实例
+    
+    def __new__(cls, scaling_factor=0.1):
+        """
+        单例模式：相同缩放因子只创建一个实例
+        
+        Args:
+            scaling_factor: 固定缩放因子（默认0.1）
+        """
+        if scaling_factor not in cls._instances:
+            instance = super(WatermarkScaling, cls).__new__(cls)
+            cls._instances[scaling_factor] = instance
+        return cls._instances[scaling_factor]
     
     def __init__(self, scaling_factor=0.1):
         """
@@ -12,6 +26,10 @@ class WatermarkScaling:
         Args:
             scaling_factor: 固定缩放因子（默认0.1）
         """
+        # 避免重复初始化
+        if hasattr(self, 'scaling_factor'):
+            return
+            
         self.scaling_factor = scaling_factor
         self.scaling_stats = {}  # 存储缩放统计信息
         
@@ -81,12 +99,23 @@ class WatermarkScaling:
         scaled_double = scaled_watermark_values.double()
         restored_values = (scaled_double / scale_factor_tensor).float()
         
-        # print(f"🔧 水印参数恢复: {scale_factor:.6f}x")
-        # print(f"   缩放后范围: [{scaled_watermark_values.min().item():.6f}, {scaled_watermark_values.max().item():.6f}]")
-        # print(f"   恢复后范围: [{restored_values.min().item():.6f}, {restored_values.max().item():.6f}]")
-        
         return restored_values
     
+    @classmethod
+    def clear_instances(cls):
+        """清理所有实例缓存"""
+        cls._instances.clear()
+    
+    @classmethod
+    def get_instance_count(cls):
+        """获取当前实例数量"""
+        return len(cls._instances)
+    
+    @classmethod
+    def get_instance_info(cls):
+        """获取实例信息"""
+        return {factor: f"WatermarkScaling(factor={factor})" for factor in cls._instances.keys()}
+
 
 def create_watermark_scaler(scaling_factor=0.1) -> WatermarkScaling:
     """
