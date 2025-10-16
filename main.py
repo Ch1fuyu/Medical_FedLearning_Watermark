@@ -358,7 +358,6 @@ class FederatedLearningOnChestMNIST(Experiment):
             f'  历史最高AUC: {self.logs["highest_auc_ever"]:.4f} (对应准确率: {self.logs["acc_when_highest_auc"]:.4f})')
         end = time.time()
         logging.info('Time: {:.1f} min'.format((end - start) / 60))
-        logging.info('-------------------------------Finish--------------------------------------')
         
         # 最终内存清理
         self._cleanup_memory()
@@ -500,6 +499,7 @@ def main(args):
     )
     torch.save(logs, os.path.join(save_dir, file_name))
     logging.info(f"训练日志已保存: {file_name}")
+    logging.info('-------------------------------Finish--------------------------------------')
 
     return
 

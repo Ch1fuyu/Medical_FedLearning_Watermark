@@ -44,18 +44,32 @@ def create_safe_dataloader(dataset, batch_size, shuffle=False, num_workers=None)
     """
     import sys
     
-    # Windows系统自动设置num_workers=0避免多进程问题
+    # 优化多进程设置，提高数据加载效率
     if num_workers is None:
         if sys.platform.startswith('win'):
-            num_workers = 0
+            num_workers = 2  # Windows上使用2个进程
         else:
-            num_workers = 2
+            num_workers = 4  # Linux/Mac上使用4个进程
     
     try:
-        return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
+        return DataLoader(
+            dataset, 
+            batch_size=batch_size, 
+            shuffle=shuffle, 
+            num_workers=num_workers,
+            pin_memory=True,  # 启用内存固定，提高GPU传输效率
+            persistent_workers=True if num_workers > 0 else False,  # 保持工作进程，减少重启开销
+            drop_last=False  # 保留最后一个不完整的batch
+        )
     except Exception as e:
         print(f"⚠️  多进程数据加载失败，回退到单进程模式: {e}")
-        return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=0)
+        return DataLoader(
+            dataset, 
+            batch_size=batch_size, 
+            shuffle=shuffle, 
+            num_workers=0,
+            pin_memory=False
+        )
 
 
 def load_mnist_test_data(batch_size: int = 128, data_dir: str = './data'):
@@ -149,10 +163,24 @@ def load_main_task_model(model_path: str, device: str = 'cuda'):
 
 
 def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.001,
-                   device: str = 'cuda', eval_interval: int = 10, reconstructor=None,
-                   original_model_state=None, mnist_test_loader=None, fixed_tau=None):
+                   device: str = 'cuda', eval_interval: int = 10, pcc_interval: int = 10,
+                   reconstructor=None, original_model_state=None, mnist_test_loader=None, fixed_tau=None):
     """
     对模型进行微调训练（精简输出）
+    
+    Args:
+        model: 要微调的模型
+        train_loader: 训练数据加载器
+        test_loader: 测试数据加载器
+        epochs: 训练轮数
+        lr: 学习率
+        device: 设备
+        eval_interval: 基本评估间隔（每轮显示训练/测试指标）
+        pcc_interval: PCC计算间隔（每几轮计算一次ΔPCC和侵权检测）
+        reconstructor: 水印重建器
+        original_model_state: 原始模型状态
+        mnist_test_loader: MNIST测试数据加载器
+        fixed_tau: 固定阈值τ
     """
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
     criterion = nn.BCEWithLogitsLoss()
@@ -161,7 +189,7 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=0.1)
 
     model_states, performance_metrics = [], []
-    print(f"开始微调训练，共 {epochs} 轮，每 {eval_interval} 轮评估一次")
+    print(f"开始微调训练，共 {epochs} 轮，每 {eval_interval} 轮评估一次，每 {pcc_interval} 轮计算PCC")
     
     # 初始化delta_pcc_result变量
     delta_pcc_result = None
@@ -188,91 +216,110 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
         avg_loss = total_loss / len(train_loader)
         scheduler.step()
 
-        if (epoch + 1) % eval_interval == 0 or epoch == epochs - 1:
+        # 每轮都进行基本评估（损失、AUC、准确率）
+        model.eval()
+        test_loss, all_predictions, all_targets = 0.0, [], []
+        with torch.no_grad():
+            for data, target in test_loader:
+                data, target = data.to(device), target.to(device)
+                output = model(data)
+                test_loss += criterion(output, target.float()).item()
+                all_predictions.append(torch.sigmoid(output).cpu().numpy())
+                all_targets.append(target.cpu().numpy())
+
+        avg_test_loss = test_loss / len(test_loader)
+        all_predictions = np.concatenate(all_predictions, axis=0)
+        all_targets = np.concatenate(all_targets, axis=0)
+
+        try:
+            from sklearn.metrics import roc_auc_score
+            auc_scores = [
+                roc_auc_score(all_targets[:, i], all_predictions[:, i])
+                for i in range(all_targets.shape[1])
+                if len(np.unique(all_targets[:, i])) > 1
+            ]
+            mean_auc = np.mean(auc_scores) if auc_scores else 0.0
+        except ImportError:
+            mean_auc = 0.0
+
+        pred_binary = (all_predictions > 0.5).astype(int)
+        accuracy = np.mean((pred_binary == all_targets).astype(float))
+
+        # 打印基本指标（每轮都显示）
+        print(f"\n=== 第 {epoch+1} 轮评估 ===")
+        print(f"训练损失: {avg_loss:.4f} | 测试损失: {avg_test_loss:.4f} | "
+              f"AUC: {mean_auc:.4f} | 准确率: {accuracy:.2%}")
+
+        # 根据pcc_interval参数计算ΔPCC和侵权检测（计算量大的操作）
+        delta_pcc_result = None
+        if (epoch + 1) % pcc_interval == 0:
+            print("🔍 进行ΔPCC和侵权检测评估...")
             # 保存状态
             model_states.append(copy.deepcopy(model.state_dict()))
-
-            # 评估
-            model.eval()
-            test_loss, all_predictions, all_targets = 0.0, [], []
-            with torch.no_grad():
-                for data, target in test_loader:
-                    data, target = data.to(device), target.to(device)
-                    output = model(data)
-                    test_loss += criterion(output, target.float()).item()
-                    all_predictions.append(torch.sigmoid(output).cpu().numpy())
-                    all_targets.append(target.cpu().numpy())
-
-            avg_test_loss = test_loss / len(test_loader)
-            all_predictions = np.concatenate(all_predictions, axis=0)
-            all_targets = np.concatenate(all_targets, axis=0)
-
-            try:
-                from sklearn.metrics import roc_auc_score
-                auc_scores = [
-                    roc_auc_score(all_targets[:, i], all_predictions[:, i])
-                    for i in range(all_targets.shape[1])
-                    if len(np.unique(all_targets[:, i])) > 1
-                ]
-                mean_auc = np.mean(auc_scores) if auc_scores else 0.0
-            except ImportError:
-                mean_auc = 0.0
-
-            pred_binary = (all_predictions > 0.5).astype(int)
-            accuracy = np.mean((pred_binary == all_targets).astype(float))
-
-            metrics = {
-                'epoch': epoch + 1,
-                'train_loss': avg_loss,
-                'test_loss': avg_test_loss,
-                'test_auc': mean_auc,
-                'test_accuracy': accuracy,
-                'learning_rate': optimizer.param_groups[0]['lr']
-            }
             
-            # 添加ΔPCC和侵权判断信息
-            if delta_pcc_result:
-                metrics.update({
-                    'perf_before': delta_pcc_result['perf_before'],
-                    'perf_fail': delta_pcc_result['perf_fail'],
-                    'tau': delta_pcc_result['tau'],
-                    'delta_perf': delta_pcc_result['delta_perf'],
-                    'delta_pcc': delta_pcc_result['delta_pcc'],
-                    'is_infringement': delta_pcc_result['is_infringement'],
-                    'result_text': delta_pcc_result['result_text']
-                })
-            else:
-                # 如果没有ΔPCC结果，填充默认值
-                metrics.update({
-                    'perf_before': None,
-                    'perf_fail': None,
-                    'tau': None,
-                    'delta_perf': None,
-                    'delta_pcc': None,
-                    'is_infringement': None,
-                    'result_text': 'N/A'
-                })
-            
-            performance_metrics.append(metrics)
-
-            # ΔPCC
-            delta_pcc_result = None
             if reconstructor and original_model_state and mnist_test_loader:
-                delta_pcc_result = evaluate_delta_pcc(
-                    original_model_state, model_states[-1], reconstructor,
-                    mnist_test_loader, device, perf_fail_ratio=0.1, fixed_tau=fixed_tau
-                )
-
-            # 保存第1轮和第2轮的ΔPCC结果到performance_metrics中
-            current_metrics = performance_metrics[-1]  # 获取刚添加的metrics
-            current_metrics.update(format_delta_pcc_result(delta_pcc_result))
-
-            # 打印核心指标
-            print(f"\n=== 第 {epoch+1} 轮评估 ===")
-            print(f"训练损失: {avg_loss:.4f} | 测试损失: {avg_test_loss:.4f} | "
-                  f"AUC: {mean_auc:.4f} | 准确率: {accuracy:.2%}")
+                # 使用torch.no_grad()减少内存使用
+                with torch.no_grad():
+                    delta_pcc_result = evaluate_delta_pcc(
+                        original_model_state, model_states[-1], reconstructor,
+                        mnist_test_loader, device, perf_fail_ratio=0.1, fixed_tau=fixed_tau
+                    )
+            
+            # 打印ΔPCC结果
             print_delta_pcc_summary(delta_pcc_result)
-            print("-" * 50)
+            
+            # 清理内存
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        # 保存性能指标（每轮都保存）
+        metrics = {
+            'epoch': epoch + 1,
+            'train_loss': avg_loss,
+            'test_loss': avg_test_loss,
+            'test_auc': mean_auc,
+            'test_accuracy': accuracy,
+            'learning_rate': optimizer.param_groups[0]['lr']
+        }
+        
+        # 添加ΔPCC和侵权判断信息（每10轮更新）
+        if delta_pcc_result:
+            metrics.update({
+                'perf_before': delta_pcc_result['perf_before'],
+                'perf_fail': delta_pcc_result['perf_fail'],
+                'tau': delta_pcc_result['tau'],
+                'delta_perf': delta_pcc_result['delta_perf'],
+                'delta_pcc': delta_pcc_result['delta_pcc'],
+                'is_infringement': delta_pcc_result['is_infringement'],
+                'result_text': delta_pcc_result['result_text']
+            })
+        else:
+            # 如果没有ΔPCC结果，填充默认值
+            metrics.update({
+                'perf_before': None,
+                'perf_fail': None,
+                'tau': None,
+                'delta_perf': None,
+                'delta_pcc': None,
+                'is_infringement': None,
+                'result_text': 'N/A'
+            })
+        
+        performance_metrics.append(metrics)
+        
+        # 更新metrics中的ΔPCC信息
+        current_metrics = performance_metrics[-1]
+        current_metrics.update(format_delta_pcc_result(delta_pcc_result))
+        
+        # 清理delta_pcc_result内存
+        if delta_pcc_result:
+            del delta_pcc_result
+            delta_pcc_result = None
+
+        print("-" * 50)
+        
+        # 清理基本评估的临时变量
+        del all_predictions, all_targets
 
     return model_states, performance_metrics
 
@@ -396,19 +443,20 @@ def main():
     print(f"使用设备: {device}")
 
     # 配置参数
-    model_path = './save/resnet/chestmnist/202510111552_Dp_0.1_iid_True_ns_1_wt_gamma_lt_sign_ep_50_le_2_cn_10_fra_1.0000_auc_0.6728_enhanced.pkl'
+    model_path = './save/resnet/chestmnist/202510161541_Dp_0.1_iid_True_ns_1_wt_gamma_lt_sign_ep_100_le_2_cn_10_fra_1.0000_auc_0.7033_enhanced.pkl'
     key_matrix_dir = './save/key_matrix'
     autoencoder_dir = './save/autoencoder'
 
     # 微调参数
-    finetune_epochs = 30
-    eval_interval = 1  # 每轮都评估
+    finetune_epochs = 100
+    eval_interval = 1  # 每轮都进行基本评估
+    pcc_interval = 10  # PCC计算间隔，可以调整（建议5-20之间，值越大计算越少但监控越粗糙）
     learning_rate = 0.001
     batch_size = 128
 
     print(f"微调攻击实验参数:")
     print(f"  - 微调轮数: {finetune_epochs}")
-    print(f"  - 评估间隔: {eval_interval}")
+    print(f"  - 基本评估: 每轮 | ΔPCC评估: 每{pcc_interval}轮")
     print(f"  - 学习率: {learning_rate}")
     print(f"  - 批次大小: {batch_size}")
     print("-" * 60)
@@ -441,6 +489,16 @@ def main():
         enable_scaling=args.enable_watermark_scaling, 
         scaling_factor=args.scaling_factor
     )
+    
+    # 预计算固定阈值τ，避免重复计算
+    print("预计算固定阈值τ...")
+    fixed_tau = None
+    if reconstructor and original_model_state and mnist_test_loader:
+        fixed_tau = calculate_fixed_tau(original_model_state, reconstructor, mnist_test_loader, device, perf_fail_ratio=0.05)
+        if fixed_tau is None:
+            print("❌ 无法计算固定阈值，将使用动态阈值")
+        else:
+            print(f"✓ 固定阈值τ={fixed_tau:.6f}")
 
     print("开始微调攻击实验...")
     print("=" * 80)
@@ -488,13 +546,7 @@ def main():
     PERF_FAIL_RATIO = 0.1
     # =========================================================
     
-    # 计算固定阈值τ（基于原始模型）
-    fixed_tau = None
-    if reconstructor and original_model_state and mnist_test_loader:
-        print("计算固定阈值τ...")
-        fixed_tau = calculate_fixed_tau(original_model_state, reconstructor, mnist_test_loader, device, perf_fail_ratio=PERF_FAIL_RATIO)
-        if fixed_tau is None:
-            print("❌ 无法计算固定阈值，将使用动态阈值")
+    # 固定阈值τ已在上面预计算，这里直接使用
     
     # 进行ΔPCC评估
     delta_pcc_result_0 = evaluate_delta_pcc(
@@ -519,7 +571,7 @@ def main():
     model_states, performance_metrics = finetune_model(
         model, train_loader, test_loader,
         epochs=finetune_epochs, lr=learning_rate,
-        device=device, eval_interval=eval_interval,
+        device=device, eval_interval=eval_interval, pcc_interval=pcc_interval,
         reconstructor=reconstructor, original_model_state=original_model_state,
         mnist_test_loader=mnist_test_loader, fixed_tau=fixed_tau
     )
