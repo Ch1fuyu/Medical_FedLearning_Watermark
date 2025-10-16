@@ -421,13 +421,10 @@ class TrainerPrivateEnhanced:
                     avg_effective_mask
                 )
                 
-                # 简化的统计信息输出
-                stats = self.multi_loss.get_stats()
-                print(f"Client {client_id} 梯度统计: GM={stats.get('prevGM', 0):.4f}, "
-                      f"GH={stats.get('prevGH', 0):.4f}, Ratio={stats.get('prevRatio', 1):.4f}")
-                
             except Exception as e:
                 print(f"Client {client_id} 梯度统计更新失败: {e}")
+                print("梯度统计更新失败，终止训练")
+                raise RuntimeError(f"梯度统计更新失败，训练终止: {e}")
             finally:
                 # 确保清理梯度数据，防止内存泄漏
                 if 'total_gradients' in locals():

@@ -166,21 +166,17 @@ class FederatedLearningOnChestMNIST(Experiment):
                         batch_size=128  # 减少批处理大小以降低内存使用
                     )
                     
-                    if success:
-                        logging.info(f'✓ 第{epoch+1}轮自编码器微调完成，性能基准已更新')
-                        
-                        # 评估微调后的性能
-                        performance = self.autoencoder_finetuner.evaluate_encoder_performance(
-                            self.trainer.autoencoder, 
-                            test_samples=1000
-                        )
-                        logging.info(f'📊 第{epoch+1}轮微调后编码器性能: {performance:.6f}')
-                    else:
-                        logging.warning(f'⚠️ 第{epoch+1}轮自编码器微调失败，继续使用原始参数')
+                    if not success:
+                        logging.error(f'❌ 第{epoch+1}轮自编码器微调失败')
+                        logging.error('自编码器微调失败，程序终止')
+                        import sys
+                        sys.exit(1)
                         
                 except Exception as e:
                     logging.error(f'❌ 第{epoch+1}轮自编码器微调过程中发生错误: {e}')
-                    logging.info('继续使用原始自编码器参数')
+                    logging.error('自编码器微调失败，程序终止')
+                    import sys
+                    sys.exit(1)
             for i, idx in enumerate(tqdm(idxs_users, desc='Progress: %d / %d' % (epoch + 1, self.epochs))):
                 self.model.load_state_dict(self.w_t)
 

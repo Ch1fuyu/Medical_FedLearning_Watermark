@@ -154,7 +154,7 @@ class AutoencoderFinetuner:
                 avg_loss = total_loss / (batch_count * batch_size) if batch_count > 0 else 0.0
                 # 简化输出：只在最后一个epoch显示
                 if epoch + 1 == epochs:
-                    print(f"编码器微调完成, Loss: {avg_loss:.6f}")
+                    print(f"自编码器微调完成, Loss: {avg_loss:.8f}")
             
             # 恢复解码器参数的原始梯度状态
             for param, original_grad_state in zip(autoencoder.decoder.parameters(), decoder_grad_state):

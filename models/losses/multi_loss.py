@@ -102,8 +102,6 @@ class MultiLoss:
         else:
             self.prevGH = 0.0  # 没有非零梯度时设为0
             
-        print(f"  计算后 prevGM: {self.prevGM:.8f}, prevGH: {self.prevGH:.8f}")
-            
         # 计算梯度方差（使用过滤后的梯度）
         if target_nonzero > 0:
             target_mean = torch.sum(target_grad_filtered) / target_nonzero
