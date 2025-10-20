@@ -443,7 +443,7 @@ def main():
     print(f"使用设备: {device}")
 
     # 配置参数
-    model_path = './save/resnet/chestmnist/202510161541_Dp_0.1_iid_True_ns_1_wt_gamma_lt_sign_ep_100_le_2_cn_10_fra_1.0000_auc_0.7033_enhanced.pkl'
+    model_path = './save/resnet/chestmnist/xxx.pkl'
     key_matrix_dir = './save/key_matrix'
     autoencoder_dir = './save/autoencoder'
 
@@ -543,7 +543,7 @@ def main():
     print(f"测试损失: {avg_test_loss:.4f} | AUC: {mean_auc:.4f} | 准确率: {accuracy:.2%}")
     
     # ==================== 水印检测容忍度设置 ====================
-    PERF_FAIL_RATIO = 0.1
+    PERF_FAIL_RATIO = 0.05
     # =========================================================
     
     # 固定阈值τ已在上面预计算，这里直接使用

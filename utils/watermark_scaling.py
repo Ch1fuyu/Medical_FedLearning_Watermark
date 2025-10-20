@@ -1,6 +1,7 @@
+from typing import Dict
+
 import torch
-import numpy as np
-from typing import Dict, Tuple, Optional
+
 
 class WatermarkScaling:
     """水印参数固定缩放管理器（单例模式）"""

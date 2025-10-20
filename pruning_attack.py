@@ -265,7 +265,7 @@ def main():
     # 设置设备
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # 模型路径
-    model_path = './save/resnet/chestmnist/202510111552_Dp_0.1_iid_True_ns_1_wt_gamma_lt_sign_ep_50_le_2_cn_10_fra_1.0000_auc_0.6728_enhanced.pkl'
+    model_path = './save/resnet/chestmnist/xxx.pkl'
     
     # 密钥矩阵目录
     key_matrix_dir = './save/key_matrix'
@@ -291,7 +291,7 @@ def main():
         )
         
         # ==================== 水印检测容忍度设置 ====================
-        PERF_FAIL_RATIO = 0.1
+        PERF_FAIL_RATIO = 0.05
         # =========================================================
         
         # 计算固定阈值τ（基于原始未剪枝模型）

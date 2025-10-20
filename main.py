@@ -136,8 +136,8 @@ class FederatedLearningOnChestMNIST(Experiment):
 
         idxs_users = []
 
-        # Early Stopping 配置 - 基于准确率
-        patience = self.args.patience  # 从参数中获取耐心值
+        # Early Stopping 配置
+        patience = 10
         early_stop_counter = 0
         best_val_acc = -np.inf
         best_val_auc = -np.inf
@@ -146,9 +146,9 @@ class FederatedLearningOnChestMNIST(Experiment):
         stats_rows = []
 
         for epoch in range(self.epochs): # 均匀采样，frac 默认为 1，即每轮中全体客户端参与训练
-            if self.sampling_type == 'uniform':
-                self.m = max(int(self.frac * self.client_num), 1)
-                idxs_users = np.random.choice(range(self.client_num), self.m, replace=False)
+            # 均匀采样
+            self.m = max(int(self.frac * self.client_num), 1)
+            idxs_users = np.random.choice(range(self.client_num), self.m, replace=False)
 
             local_ws, local_losses = [], []
 
@@ -197,11 +197,7 @@ class FederatedLearningOnChestMNIST(Experiment):
                 # 清理临时变量，释放内存
                 del local_w, local_loss, local_acc
 
-            # 学习率调度 - MultiStepLR
-            milestones = [int(self.epochs * m) for m in self.args.lr_decay_milestones]
-            if (epoch + 1) in milestones:
-                self.lr *= self.args.lr_decay_gamma
-                logging.info(f'LR decayed at epoch {epoch + 1} (milestone: {milestones}). New lr: {self.lr}')
+            # 可选：如需调度可在此处加入自定义逻辑
 
             # 计算参与训练的客户端的权重（相对于总数据集）
             client_weights = []
@@ -393,7 +389,7 @@ class FederatedLearningOnChestMNIST(Experiment):
         
         # 验证权重和是否为1
         weight_sum = sum(normalized_weights)
-        if abs(weight_sum - 1.0) > self.args.weight_tolerance:
+        if abs(weight_sum - 1.0) > 1e-6:
             logging.warning(f"Weight sum is {weight_sum:.6f}, not 1.0. Normalizing...")
             normalized_weights = [w / weight_sum for w in normalized_weights]
         
@@ -465,7 +461,6 @@ def main(args):
                 'frac': args.frac,
                 'local_ep': args.local_ep,
                 'local_bs': args.batch_size,
-                'lr_outer': args.lr_outer,
                 'lr_inner': args.lr,
                 'iid': args.iid,
                 'wd': args.wd,
@@ -483,7 +478,7 @@ def main(args):
     logg, test_auc = fl.training()
     logs['net_info'] = logg
     logs['test_auc'] = {'value': test_auc}
-    logs['bp_local'] = {'value': True if args.bp_interval == 0 else False}
+    logs['bp_local'] = {'value': False}
 
     save_dir = os.path.join(args.save_model_dir, args.model_name, args.dataset)
     os.makedirs(save_dir, exist_ok=True)
@@ -493,8 +488,8 @@ def main(args):
     # 构建文件名
     enhanced = "_enhanced" if args.watermark_mode == 'enhanced' else ""
 
-    file_name = '{}_Dp_{}_iid_{}_ns_{}_wt_{}_lt_{}_ep_{}_le_{}_cn_{}_fra_{:.4f}_auc_{:.4f}{}.pkl'.format(
-        formatted_now, args.sigma, args.iid, args.num_sign, args.weight_type, args.loss_type,
+    file_name = '{}_Dp_{}_iid_{}_lt_{}_ep_{}_le_{}_cn_{}_fra_{:.4f}_auc_{:.4f}{}.pkl'.format(
+        formatted_now, args.sigma, args.iid, args.loss_type,
         args.epochs, args.local_ep, args.client_num, args.frac, test_auc, enhanced
     )
     torch.save(logs, os.path.join(save_dir, file_name))
