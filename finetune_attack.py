@@ -29,6 +29,51 @@ from utils.watermark_reconstruction import WatermarkReconstructor
 from utils.delta_pcc_utils import evaluate_delta_pcc, calculate_fixed_tau, format_delta_pcc_result, print_delta_pcc_summary
 
 
+def extract_model_info_from_path(model_path):
+    """
+    从模型路径中提取数据集和模型名信息
+    
+    Args:
+        model_path: 模型文件路径
+        
+    Returns:
+        dict: 包含dataset和model_name的字典
+    """
+    try:
+        # 标准化路径分隔符
+        normalized_path = model_path.replace('\\', '/')
+        
+        # 分割路径
+        path_parts = normalized_path.split('/')
+        
+        # 查找数据集和模型名
+        dataset = 'unknown'
+        model_name = 'unknown'
+        
+        # 从路径中提取信息
+        for i, part in enumerate(path_parts):
+            if part in ['cifar10', 'mnist', 'chestmnist']:
+                dataset = part
+            elif part in ['resnet', 'cnn', 'vgg', 'densenet']:
+                model_name = part
+            elif part == 'resnet18':
+                model_name = 'resnet'
+            elif part == 'cnn_simple':
+                model_name = 'cnn'
+        
+        return {
+            'dataset': dataset,
+            'model_name': model_name
+        }
+        
+    except Exception as e:
+        print(f"警告: 无法从路径中提取模型信息: {e}")
+        return {
+            'dataset': 'unknown',
+            'model_name': 'unknown'
+        }
+
+
 def create_safe_dataloader(dataset, batch_size, shuffle=False, num_workers=None):
     """
     创建安全的数据加载器，自动处理Windows多进程问题
@@ -135,7 +180,7 @@ def load_chestmnist_data(data_root: str = './data'):
 
 def load_main_task_model(model_path: str, device: str = 'cuda'):
     """
-    加载主任务模型（ResNet18 for ChestMNIST）
+    加载主任务模型，自动从checkpoint推断数据集参数
 
     Args:
         model_path: 模型文件路径
@@ -144,17 +189,38 @@ def load_main_task_model(model_path: str, device: str = 'cuda'):
     Returns:
         加载的模型
     """
-    # 创建模型实例
-    model = resnet18(num_classes=14, in_channels=3, input_size=28)
-
-    # 加载模型权重
-    if os.path.exists(model_path):
-        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-        model.load_state_dict(checkpoint['net_info']['best_model'][0])
-        print(f"✓ 已加载主任务模型: {model_path}")
-    else:
+    if not os.path.exists(model_path):
         print(f"❌ 模型文件不存在: {model_path}")
         return None
+    
+    # 加载checkpoint获取参数信息
+    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+    
+    # 从checkpoint中获取数据集参数
+    net_info = checkpoint.get('net_info', {})
+    arguments = checkpoint.get('arguments', {})
+    
+    # 优先从arguments获取，否则使用默认值
+    num_classes = arguments.get('num_classes', 14)
+    in_channels = arguments.get('in_channels', 3)
+    dataset = arguments.get('dataset', 'chestmnist')
+    
+    # 根据数据集设置input_size
+    if dataset.lower() == 'cifar10' or dataset.lower() == 'cifar100':
+        input_size = 32
+    elif dataset.lower() == 'imagenet':
+        input_size = 224
+    else:  # chestmnist等
+        input_size = 28
+    
+    print(f"✓ 检测到数据集: {dataset}, 类别数: {num_classes}, 输入通道: {in_channels}, 输入尺寸: {input_size}")
+
+    # 创建模型实例
+    model = resnet18(num_classes=num_classes, in_channels=in_channels, input_size=input_size)
+
+    # 加载模型权重
+    model.load_state_dict(checkpoint['net_info']['best_model'][0])
+    print(f"✓ 已加载主任务模型: {model_path}")
 
     model = model.to(device)
     model.train()  # 设置为训练模式，因为要进行微调
@@ -164,7 +230,8 @@ def load_main_task_model(model_path: str, device: str = 'cuda'):
 
 def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.001,
                    device: str = 'cuda', eval_interval: int = 10, pcc_interval: int = 10,
-                   reconstructor=None, original_model_state=None, mnist_test_loader=None, fixed_tau=None):
+                   reconstructor=None, original_model_state=None, mnist_test_loader=None, fixed_tau=None,
+                   optimizer_type: str = 'adam'):
     """
     对模型进行微调训练（精简输出）
     
@@ -182,7 +249,12 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
         mnist_test_loader: MNIST测试数据加载器
         fixed_tau: 固定阈值τ
     """
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+    # 根据optimizer_type参数选择优化器
+    if optimizer_type.lower() == 'sgd':
+        optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=1e-4)
+    else:  # 默认使用Adam
+        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+    
     criterion = nn.BCEWithLogitsLoss()
     # 确保step_size至少为1，避免除零错误
     step_size = max(1, epochs//3) if epochs > 0 else 1
@@ -391,23 +463,34 @@ def evaluate_watermark_integrity(model_state_dict, reconstructor):
 
 
 
-def save_results(results, save_dir: str = './save/finetune_attack'):
+def save_results(results, model_info=None, save_dir: str = './save/finetune_attack'):
     """
     保存实验结果
 
     Args:
         results: 实验结果
+        model_info: 模型信息字典，包含dataset和model_name
         save_dir: 保存目录
     """
     os.makedirs(save_dir, exist_ok=True)
 
-    # 保存详细结果
+    # 生成时间戳
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    results_file = os.path.join(save_dir, f'finetune_attack_results_{timestamp}.pkl')
+    
+    # 从模型信息中提取数据集和模型名称
+    if model_info:
+        dataset = model_info.get('dataset', 'unknown')
+        model_name = model_info.get('model_name', 'unknown')
+        filename_prefix = f'finetune_attack_{dataset}_{model_name}_{timestamp}'
+    else:
+        filename_prefix = f'finetune_attack_{timestamp}'
+    
+    # 保存详细结果
+    results_file = os.path.join(save_dir, f'{filename_prefix}.pkl')
     torch.save(results, results_file)
 
     # 保存CSV格式的简化结果
-    csv_file = os.path.join(save_dir, f'finetune_attack_summary_{timestamp}.csv')
+    csv_file = os.path.join(save_dir, f'{filename_prefix}.csv')
 
     import pandas as pd
     df_data = []
@@ -438,21 +521,45 @@ def save_results(results, save_dir: str = './save/finetune_attack'):
 
 def main():
     """主函数"""
+    import argparse
+    
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='微调攻击实验')
+    parser.add_argument('--model_path', type=str, 
+                       default='./save/resnet/cifar10/202510202106_Dp_0.1_iid_True_lt_sign_ep_100_le_2_cn_10_fra_1.0000_acc_0.6695_enhanced.pkl',
+                       help='模型文件路径')
+    parser.add_argument('--key_matrix_dir', type=str, default='./save/key_matrix',
+                       help='密钥矩阵目录')
+    parser.add_argument('--autoencoder_dir', type=str, default='./save/autoencoder',
+                       help='自编码器目录')
+    parser.add_argument('--finetune_epochs', type=int, default=100,
+                       help='微调轮数')
+    parser.add_argument('--learning_rate', type=float, default=0.001,
+                       help='学习率')
+    parser.add_argument('--batch_size', type=int, default=128,
+                       help='批次大小')
+    parser.add_argument('--optimizer', type=str, default='adam', choices=['sgd', 'adam'],
+                       help='优化器类型')
+    args = parser.parse_args()
+    
     # 设置设备
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"使用设备: {device}")
 
     # 配置参数
-    model_path = './save/resnet/chestmnist/xxx.pkl'
-    key_matrix_dir = './save/key_matrix'
-    autoencoder_dir = './save/autoencoder'
+    model_path = args.model_path
+    key_matrix_dir = args.key_matrix_dir
+    autoencoder_dir = args.autoencoder_dir
+    
+    # 从模型路径中提取数据集和模型名
+    model_info = extract_model_info_from_path(model_path)
 
     # 微调参数
-    finetune_epochs = 100
+    finetune_epochs = args.finetune_epochs
     eval_interval = 1  # 每轮都进行基本评估
     pcc_interval = 10  # PCC计算间隔，可以调整（建议5-20之间，值越大计算越少但监控越粗糙）
-    learning_rate = 0.001
-    batch_size = 128
+    learning_rate = args.learning_rate
+    batch_size = args.batch_size
 
     print(f"微调攻击实验参数:")
     print(f"  - 微调轮数: {finetune_epochs}")
@@ -573,7 +680,8 @@ def main():
         epochs=finetune_epochs, lr=learning_rate,
         device=device, eval_interval=eval_interval, pcc_interval=pcc_interval,
         reconstructor=reconstructor, original_model_state=original_model_state,
-        mnist_test_loader=mnist_test_loader, fixed_tau=fixed_tau
+        mnist_test_loader=mnist_test_loader, fixed_tau=fixed_tau,
+        optimizer_type=args.optimizer
     )
 
     # 微调训练已完成，ΔPCC和侵权判断已在训练过程中评估
@@ -587,7 +695,7 @@ def main():
     # 保存结果
     print("\n" + "=" * 80)
     print("保存实验结果...")
-    save_results(results)
+    save_results(results, model_info)
 
     # 输出总结
     print("\n" + "=" * 80)

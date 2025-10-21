@@ -31,7 +31,8 @@ class Experiment(object):
             self.num_classes = 100
         ## federated learning args
         self.frac = args.frac
-        self.data_root = config.globals.data_root
+        # 优先使用命令行传入的数据根目录，其次回退到全局配置
+        self.data_root = getattr(args, 'data_root', None) or config.globals.data_root
         self.local_ep = args.local_ep
 
         self.sl_ratio = args.loss_alpha

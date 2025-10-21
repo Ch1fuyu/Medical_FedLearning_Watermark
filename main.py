@@ -56,6 +56,9 @@ class FederatedLearningOnChestMNIST(Experiment):
         self.num_classes = args.num_classes
         self.in_channels = args.in_channels
             
+        # 确保数据根目录存在以避免Windows权限/路径问题
+        os.makedirs(self.data_root, exist_ok=True)
+
         self.train_set, self.test_set, self.dict_users = get_data(dataset_name=self.dataset,
                                                                   data_root=self.data_root,
                                                                   iid=self.iid,
@@ -101,7 +104,7 @@ class FederatedLearningOnChestMNIST(Experiment):
 
     def construct_model(self):
         if self.model_name == 'resnet':
-            model = resnet18(num_classes=self.num_classes, in_channels=self.in_channels, input_size=28)
+            model = resnet18(num_classes=self.num_classes, in_channels=self.in_channels, input_size=self.args.input_size)
         else:
             model = AlexNet(self.in_channels, self.num_classes)
         self.model = model.to(self.device)
@@ -141,6 +144,10 @@ class FederatedLearningOnChestMNIST(Experiment):
         early_stop_counter = 0
         best_val_acc = -np.inf
         best_val_auc = -np.inf
+
+        # 决定模型选择依据：ChestMNIST 按 AUC，其他（如 CIFAR-10/100）按准确率
+        dataset_key = (self.dataset or '').lower()
+        select_by_auc = (dataset_key == 'chestmnist')
 
         # 统计记录
         stats_rows = []
@@ -251,15 +258,24 @@ class FederatedLearningOnChestMNIST(Experiment):
                     self.logs['highest_auc_ever'] = auc_val
                     self.logs['acc_when_highest_auc'] = acc_val_label_mean
 
-                # 模型选择标准：以验证集AUC为准，只有AUC提升才保存模型
-                if self.logs['best_model_auc'] < auc_val:
-                    self.logs['best_model_acc'] = acc_val_label_mean
-                    self.logs['best_model_loss'] = loss_val_mean
-                    self.logs['best_model_auc'] = auc_val
-                    # 优化模型存储，减少内存占用
-                    optimized_state = self._optimize_model_storage(self.model.state_dict())
-                    self.logs['best_model'] = [optimized_state]
-                    logging.info(f'New best model saved! AUC improved to {auc_val:.4f}')
+                # 模型选择标准：ChestMNIST 按 AUC；否则按准确率
+                if select_by_auc:
+                    if self.logs['best_model_auc'] < auc_val:
+                        self.logs['best_model_acc'] = acc_val_label_mean
+                        self.logs['best_model_loss'] = loss_val_mean
+                        self.logs['best_model_auc'] = auc_val
+                        # 优化模型存储，减少内存占用
+                        optimized_state = self._optimize_model_storage(self.model.state_dict())
+                        self.logs['best_model'] = [optimized_state]
+                        logging.info(f'New best model saved! AUC improved to {auc_val:.4f}')
+                else:
+                    if self.logs['best_model_acc'] < acc_val_label_mean:
+                        self.logs['best_model_acc'] = acc_val_label_mean
+                        self.logs['best_model_loss'] = loss_val_mean
+                        self.logs['best_model_auc'] = auc_val
+                        optimized_state = self._optimize_model_storage(self.model.state_dict())
+                        self.logs['best_model'] = [optimized_state]
+                        logging.info(f'New best model saved! ACC improved to {acc_val_label_mean:.4f}')
 
                 if self.logs['best_train_acc'] < acc_train_label_mean:
                     self.logs['best_train_acc'] = acc_train_label_mean
@@ -293,15 +309,25 @@ class FederatedLearningOnChestMNIST(Experiment):
                     'val_acc_sample': float(acc_val_sample_mean),
                 }
                 
-                # Early Stopping：基于验证AUC
-                if auc_val > best_val_auc:
-                    best_val_auc = auc_val
-                    early_stop_counter = 0
+                # Early Stopping：ChestMNIST 基于 AUC，其它数据集基于准确率
+                if select_by_auc:
+                    if auc_val > best_val_auc:
+                        best_val_auc = auc_val
+                        early_stop_counter = 0
+                    else:
+                        early_stop_counter += 1
+                        if early_stop_counter >= patience:
+                            logging.info(f'Early stopping triggered at epoch {epoch + 1}. Best Val AUC: {best_val_auc:.4f}')
+                            break
                 else:
-                    early_stop_counter += 1
-                    if early_stop_counter >= patience:
-                        logging.info(f'Early stopping triggered at epoch {epoch + 1}. Best Val AUC: {best_val_auc:.4f}')
-                        break
+                    if acc_val_label_mean > best_val_acc:
+                        best_val_acc = acc_val_label_mean
+                        early_stop_counter = 0
+                    else:
+                        early_stop_counter += 1
+                        if early_stop_counter >= patience:
+                            logging.info(f'Early stopping triggered at epoch {epoch + 1}. Best Val ACC: {best_val_acc:.4f}')
+                            break
                 
                 # 每轮训练后清理内存
                 self._cleanup_memory()
@@ -376,7 +402,10 @@ class FederatedLearningOnChestMNIST(Experiment):
         except Exception as e:
             logging.warning(f'Failed to export Excel metrics: {e}')
 
-        return self.logs, self.logs['best_model_auc']
+        # 返回用于模型选择的指标与其名称，便于上层命名保存
+        best_metric_value = self.logs['best_model_auc'] if select_by_auc else self.logs['best_model_acc']
+        best_metric_name = 'auc' if select_by_auc else 'acc'
+        return self.logs, best_metric_value, best_metric_name
 
 
     def _fed_avg(self, local_ws, client_weights, idxs_users):
@@ -475,9 +504,12 @@ def main(args):
             }
             }
     fl = FederatedLearningOnChestMNIST(args)
-    logg, test_auc = fl.training()
+    logg, best_metric_value, best_metric_name = fl.training()
     logs['net_info'] = logg
-    logs['test_auc'] = {'value': test_auc}
+    # 兼容：总是记录 test_auc；当指标为 acc 时也额外记录
+    logs['test_auc'] = {'value': logg.get('best_model_auc', best_metric_value if best_metric_name == 'auc' else 0.0)}
+    if best_metric_name == 'acc':
+        logs['test_acc'] = {'value': best_metric_value}
     logs['bp_local'] = {'value': False}
 
     save_dir = os.path.join(args.save_model_dir, args.model_name, args.dataset)
@@ -488,10 +520,12 @@ def main(args):
     # 构建文件名
     enhanced = "_enhanced" if args.watermark_mode == 'enhanced' else ""
 
-    file_name = '{}_Dp_{}_iid_{}_lt_{}_ep_{}_le_{}_cn_{}_fra_{:.4f}_auc_{:.4f}{}.pkl'.format(
+    # 根据选择指标命名文件
+    file_name = '{}_Dp_{}_iid_{}_lt_{}_ep_{}_le_{}_cn_{}_fra_{:.4f}_{}_{{:.4f}}{}.pkl'.format(
         formatted_now, args.sigma, args.iid, args.loss_type,
-        args.epochs, args.local_ep, args.client_num, args.frac, test_auc, enhanced
+        args.epochs, args.local_ep, args.client_num, args.frac, best_metric_name, enhanced
     )
+    file_name = file_name.format(best_metric_value)
     torch.save(logs, os.path.join(save_dir, file_name))
     logging.info(f"训练日志已保存: {file_name}")
     logging.info('-------------------------------Finish--------------------------------------')

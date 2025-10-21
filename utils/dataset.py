@@ -77,6 +77,38 @@ class LocalChestMNISTDataset(Dataset):
         
         return image, label
 
+
+class LocalCIFAR10Dataset(Dataset):
+    """本地CIFAR-10数据集类，用于联邦学习"""
+    def __init__(self, data_root, split='train', transform=None):
+        self.transform = transform
+        self.split = split
+        
+        # 使用torchvision加载CIFAR-10数据集
+        if split == 'train':
+            self.dataset = torchvision.datasets.CIFAR10(
+                root=data_root, train=True, download=True, transform=None
+            )
+        elif split == 'test':
+            self.dataset = torchvision.datasets.CIFAR10(
+                root=data_root, train=False, download=True, transform=None
+            )
+        else:
+            raise ValueError(f"Unsupported split: {split}")
+    
+    def __len__(self):
+        return len(self.dataset)
+    
+    def __getitem__(self, idx):
+        image, label = self.dataset[idx]
+        
+        # 应用变换
+        if self.transform:
+            image = self.transform(image)
+        
+        return image, label
+
+
 from config.globals import set_seed
 from models.light_autoencoder import LightAutoencoder
 from utils.sampling import *
@@ -99,8 +131,8 @@ def get_data(dataset_name, data_root, iid, client_num):
     train_set = []
     test_set = []
 
-    dataset_path = os.path.join(data_root, dataset_name + '.npz')
     if dataset_name == 'chestmnist':
+        dataset_path = os.path.join(data_root, dataset_name + '.npz')
         if not os.path.exists(dataset_path):
             raise FileNotFoundError(f"ChestMNIST dataset file not found: {dataset_path}")
         
@@ -122,13 +154,39 @@ def get_data(dataset_name, data_root, iid, client_num):
         test_set = LocalChestMNISTDataset(dataset_path, split='test', transform=transform_test)
         
         print(f"ChestMNIST dataset - Training set size: {len(train_set)}, Test set size: {len(test_set)}")
+        
+        if iid:
+            dict_users = chestmnist_iid(train_set, client_num)
+        else:
+            dict_users = chestmnist_beta(train_set, 0.1, client_num)
+            
+    elif dataset_name == 'cifar10':
+        # CIFAR-10参数
+        normalize = transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616])
+        num_classes = 10
+        
+        transform_train = transforms.Compose([
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomCrop(32, padding=4),
+            transforms.ToTensor(),
+            normalize,
+        ])
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            normalize,
+        ])
+
+        train_set = LocalCIFAR10Dataset(data_root, split='train', transform=transform_train)
+        test_set = LocalCIFAR10Dataset(data_root, split='test', transform=transform_test)
+        
+        print(f"CIFAR-10 dataset - Training set size: {len(train_set)}, Test set size: {len(test_set)}")
+        
+        if iid:
+            dict_users = cifar10_iid(train_set, client_num)
+        else:
+            dict_users = cifar10_beta(train_set, 0.1, client_num)
     else:
         raise ValueError(f"Unsupported dataset: {dataset_name}")
-
-    if iid:
-        dict_users = chestmnist_iid(train_set, client_num)
-    else:
-        dict_users = chestmnist_beta(train_set, 0.1, client_num)
 
     return train_set, test_set, dict_users
 
@@ -136,8 +194,8 @@ def get_data_no_fl(dataset_name, data_root, dataset_file=None):
     train_set = []
     test_set = []
 
-    dataset_path = os.path.join(data_root, dataset_name + '.npz')
     if dataset_name == 'chestmnist':
+        dataset_path = os.path.join(data_root, dataset_name + '.npz')
         if not os.path.exists(dataset_path):
             raise FileNotFoundError(f"ChestMNIST dataset file not found: {dataset_path}")
         
@@ -162,6 +220,30 @@ def get_data_no_fl(dataset_name, data_root, dataset_file=None):
         test_set = LocalChestMNISTDataset(dataset_path, split='test', transform=transform_test)
         
         print(f"ChestMNIST dataset - Training set size: {len(train_set)}, Test set size: {len(test_set)}")
+        
+    elif dataset_name == 'cifar10':
+        print(f"Using CIFAR-10 dataset")
+        
+        # CIFAR-10参数
+        normalize = transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616])
+        num_classes = 10
+        print("Using CIFAR-10 multi-class classification setup (10 classes)")
+        
+        transform_train = transforms.Compose([
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomCrop(32, padding=4),
+            transforms.ToTensor(),
+            normalize,
+        ])
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            normalize,
+        ])
+
+        train_set = LocalCIFAR10Dataset(data_root, split='train', transform=transform_train)
+        test_set = LocalCIFAR10Dataset(data_root, split='test', transform=transform_test)
+        
+        print(f"CIFAR-10 dataset - Training set size: {len(train_set)}, Test set size: {len(test_set)}")
     else:
         raise ValueError(f"Unsupported dataset: {dataset_name}")
 

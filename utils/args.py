@@ -8,7 +8,7 @@ def parser_args():
     parser.add_argument('--gpu', default='0', type=str, help='GPU device ID')
     
     # ========================= 数据集和模型参数 ========================
-    parser.add_argument('--dataset', type=str, default='chestmnist', help="name of dataset")
+    parser.add_argument('--dataset', type=str, default='cifar10', help="name of dataset")
     parser.add_argument('--model_name', type=str, default='resnet', choices=['alexnet', 'resnet'],
                         help='model architecture name')
     # 便捷别名：--model 等价于 --model_name
@@ -28,8 +28,8 @@ def parser_args():
     parser.add_argument('--iid', action='store_true', default=True, help='IID data distribution')
     
     # ========================= 优化器参数 ========================
-    parser.add_argument('--optim', type=str, default='adam', choices=['sgd', 'adam'], help='optimizer type')
-    parser.add_argument('--lr', type=float, default=0.001, help='learning rate for local updates')
+    parser.add_argument('--optim', type=str, default='sgd', choices=['sgd', 'adam'], help='optimizer type')
+    parser.add_argument('--lr', type=float, default=0.01, help='learning rate for local updates')
     parser.add_argument('--wd', type=float, default=0.0, help='weight decay')
     
     # ========================= 训练控制参数 ========================
@@ -70,6 +70,9 @@ def parser_args():
                         help='directory to save model files')
     parser.add_argument('--log_file', type=str, default='./logs/console.logs', 
                         help='log file path')
+    # 数据根目录（用于数据下载/缓存目录）
+    parser.add_argument('--data_root', type=str, default='./data',
+                        help='dataset root directory for downloads and cache')
     
     args = parser.parse_args()
 
@@ -128,7 +131,7 @@ def parser_args():
     }
 
     EXPERIMENT_PRESETS: Dict[str, Dict[str, Any]] = {
-        # 示例预设：一键配置
+        # 一键配置
         'cifar10_resnet18_baseline': {
             'dataset': 'cifar10',
             'model_name': 'resnet',
@@ -185,10 +188,11 @@ def parser_args():
             setattr(namespace, key, casted)
 
     # 1) 应用 experiment 级预设（若提供）
+    # 保持 “上方默认” 更高优先级
     if args.preset and args.preset in EXPERIMENT_PRESETS:
-        for k, v in EXPERIMENT_PRESETS[args.preset].items():
-            if hasattr(args, k):
-                setattr(args, k, v)
+        _skip_when_preset = {'lr', 'epochs', 'batch_size'}
+        preset_items = EXPERIMENT_PRESETS[args.preset].items()
+        vars(args).update({k: v for k, v in preset_items if k not in _skip_when_preset and k in vars(args)})
 
     # 2) 根据 dataset 推导通用参数（除非用户显式提供）
     ds_key = (args.dataset or '').lower()

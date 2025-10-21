@@ -87,31 +87,68 @@ def build_autoencoder_from_watermark(watermark_params, decoder_path: str, device
 
 def load_main_task_model(model_path: str, device: str = 'cuda'):
     """
-    加载主任务模型（ResNet18 for ChestMNIST）
+    加载主任务模型，自动从checkpoint推断数据集参数
     
     Args:
         model_path: 模型文件路径
         device: 设备类型
         
     Returns:
-        加载的模型
+        tuple: (加载的模型, 模型信息字典)
     """
+    if not os.path.exists(model_path):
+        print(f"❌ 模型文件不存在: {model_path}")
+        return None, None
+    
+    # 加载checkpoint获取参数信息
+    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+    
+    # 从checkpoint中获取数据集参数
+    net_info = checkpoint.get('net_info', {})
+    arguments = checkpoint.get('arguments', {})
+    
+    # 优先从arguments获取，否则使用默认值
+    num_classes = arguments.get('num_classes', 14)
+    in_channels = arguments.get('in_channels', 3)
+    dataset = arguments.get('dataset', 'chestmnist')
+    
+    # 根据数据集设置input_size
+    if dataset.lower() == 'cifar10' or dataset.lower() == 'cifar100':
+        input_size = 32
+    elif dataset.lower() == 'imagenet':
+        input_size = 224
+    else:  # chestmnist等
+        input_size = 28
+    
+    # 从模型路径提取模型名称
+    model_name = os.path.basename(model_path)
+    if '.' in model_name:
+        model_name = model_name.split('.')[0]  # 去掉扩展名
+    
+    # 构建模型信息字典
+    model_info = {
+        'dataset': dataset,
+        'num_classes': num_classes,
+        'in_channels': in_channels,
+        'input_size': input_size,
+        'model_name': model_name,
+        'model_path': model_path
+    }
+    
+    print(f"✓ 检测到数据集: {dataset}, 类别数: {num_classes}, 输入通道: {in_channels}, 输入尺寸: {input_size}")
+    print(f"✓ 模型名称: {model_name}")
+    
     # 创建模型实例
-    model = resnet18(num_classes=14, in_channels=3, input_size=28)
+    model = resnet18(num_classes=num_classes, in_channels=in_channels, input_size=input_size)
     
     # 加载模型权重
-    if os.path.exists(model_path):
-        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-        model.load_state_dict(checkpoint['net_info']['best_model'][0])
-        print(f"✓ 已加载主任务模型: {model_path}")
-    else:
-        print(f"❌ 模型文件不存在: {model_path}")
-        return None
+    model.load_state_dict(checkpoint['net_info']['best_model'][0])
+    print(f"✓ 已加载主任务模型: {model_path}")
     
     model = model.to(device)
     model.eval()
     
-    return model
+    return model, model_info
 
 def threshold_pruning(model, pruning_ratio: float):
     """
@@ -224,12 +261,13 @@ def evaluate_watermark_after_pruning(model, reconstructor):
         print(f"❌ 水印评估失败: {e}")
         return None
 
-def save_pruning_results(results, save_dir='./save/pruning_results'):
+def save_pruning_results(results, model_info, save_dir='./save/pruning_results'):
     """
     保存剪枝攻击实验结果
     
     Args:
         results: 实验结果列表
+        model_info: 模型信息字典
         save_dir: 保存目录
     """
     os.makedirs(save_dir, exist_ok=True)
@@ -237,8 +275,13 @@ def save_pruning_results(results, save_dir='./save/pruning_results'):
     # 生成时间戳
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     
-    # 保存CSV格式的简化结果
-    csv_file = os.path.join(save_dir, f'pruning_attack_summary_{timestamp}.csv')
+    # 从模型信息中提取数据集和模型名称
+    dataset = model_info.get('dataset', 'unknown')
+    model_name = model_info.get('model_name', 'unknown')
+    
+    # 生成包含模型名和数据集名的文件名
+    filename = f'pruning_attack_{dataset}_{model_name}_{timestamp}.csv'
+    csv_file = os.path.join(save_dir, filename)
     
     df_data = []
     for result in results:
@@ -257,27 +300,39 @@ def save_pruning_results(results, save_dir='./save/pruning_results'):
     df = pd.DataFrame(df_data)
     df.to_csv(csv_file, index=False, encoding='utf-8-sig')
     
-    print(f"✓ 结果已保存到: {save_dir}")
-    print(f"  - 汇总结果: {csv_file}")
+    print(f"✓ 结果已保存到: {csv_file}")
 
 def main():
     """主函数"""
+    import argparse
+    
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='剪枝攻击实验')
+    parser.add_argument('--model_path', type=str, 
+                       default='./save/resnet/cifar10/202510211442_Dp_0.1_iid_True_lt_sign_ep_100_le_2_cn_10_fra_1.0000_acc_0.8853_enhanced.pkl',
+                       help='模型文件路径')
+    parser.add_argument('--key_matrix_dir', type=str, default='./save/key_matrix',
+                       help='密钥矩阵目录')
+    parser.add_argument('--autoencoder_dir', type=str, default='./save/autoencoder',
+                       help='自编码器目录')
+    args = parser.parse_args()
+    
     # 设置设备
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # 模型路径
-    model_path = './save/resnet/chestmnist/xxx.pkl'
+    model_path = args.model_path
     
     # 密钥矩阵目录
-    key_matrix_dir = './save/key_matrix'
-    autoencoder_dir = './save/autoencoder'
+    key_matrix_dir = args.key_matrix_dir
+    autoencoder_dir = args.autoencoder_dir
     
     # 加载MNIST测试数据
     test_loader = load_mnist_test_data(batch_size=128)
     
     # 加载主任务模型
-    model = load_main_task_model(model_path, device)
+    model, model_info = load_main_task_model(model_path, device)
     
-    if model is not None:
+    if model is not None and model_info is not None:
         print(f"开始剪枝攻击实验 (设备: {device})")
         
         # 初始化水印重建器（使用args中的统一设置）
@@ -372,7 +427,7 @@ def main():
         
         # 保存实验结果
         print("\n保存实验结果...")
-        save_pruning_results(results)
+        save_pruning_results(results, model_info)
             
     else:
         print("主任务模型加载失败")

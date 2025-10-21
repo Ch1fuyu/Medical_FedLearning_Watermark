@@ -14,6 +14,25 @@ from config.globals import set_seed
 # 设置随机种子
 set_seed()
 
+# 数据集预设配置
+DATASET_PRESETS = {
+    'cifar10': {
+        'num_classes': 10,
+        'in_channels': 3,
+        'input_size': 32,
+    },
+    'cifar100': {
+        'num_classes': 100,
+        'in_channels': 3,
+        'input_size': 32,
+    },
+    'imagenet': {
+        'num_classes': 1000,
+        'in_channels': 3,
+        'input_size': 224,
+    },
+}
+
 class KeyMatrixGenerator:
     """密钥矩阵生成器"""
     
@@ -38,27 +57,27 @@ class KeyMatrixGenerator:
         
         # 获取编码器参数数量作为总水印大小
         self.encoder = LightAutoencoder().encoder
-        self.total_watermark_size = sum(param.numel() for param in self.encoder.parameters())
+        self.encoder_params = sum(param.numel() for param in self.encoder.parameters())
         
-        # 获取主任务模型参数信息（排除全连接层）
+        # 获取主任务模型参数信息
         self.model_param_info = self._get_model_param_info()
         self.total_model_params = sum(param_info['numel'] for param_info in self.model_param_info)
         
-        print(f"主任务模型总参数数量: {self.total_model_params:,}")
-        print(f"编码器参数数量（总水印大小）: {self.total_watermark_size:,}")
+        # 根据水印比例计算实际水印大小（使用编码器参数作为水印总量）
+        self.total_watermark_size = self.encoder_params
         
-        # 检查水印大小是否合理
-        if self.total_watermark_size > self.total_model_params:
-            raise ValueError(f"编码器参数数量 ({self.total_watermark_size}) 超过主任务模型总参数数量 ({self.total_model_params})")
+        print(f"主任务模型总参数数量: {self.total_model_params:,}")
+        print(f"编码器参数数量: {self.encoder_params:,}")
+        print(f"水印大小: {self.total_watermark_size:,}")
     
     def _get_model_param_info(self):
-        """获取模型参数信息（排除全连接层）"""
+        """获取模型参数信息（仅包含卷积层参数）"""
         param_info = []
         start_idx = 0
         for name, param in self.model.named_parameters():
-            # 排除全连接层参数（通常包含 'fc', 'classifier', 'linear' 等关键词）
-            if any(keyword in name.lower() for keyword in ['fc', 'classifier', 'linear', 'dense']):
-                print(f"跳过全连接层参数: {name} (shape: {param.shape})")
+            # 只包含卷积层参数
+            if not ('conv' in name.lower() and 'weight' in name.lower()):
+                print(f"跳过非卷积层参数: {name} (shape: {param.shape})")
                 continue
                 
             param_info.append({
@@ -170,6 +189,7 @@ class KeyMatrixGenerator:
             'watermark_strategy': self.watermark_strategy,
             'total_watermark_size': self.total_watermark_size,
             'total_model_params': self.total_model_params,
+            'encoder_params': self.encoder_params,
             'model_type': self.model.__class__.__name__,
             'created_time': datetime.now().isoformat(),
             'seed': self.seed
@@ -212,34 +232,48 @@ def main():
     parser.add_argument('--save_dir', type=str, default='./save/key_matrix', 
                        help='保存目录')
     parser.add_argument('--seed', type=int, default=42, help='随机种子')
-    parser.add_argument('--dataset', type=str, default='chestmnist',
-                       choices=['chestmnist', 'dermamnist', 'octmnist', 'pneumoniamnist', 'retinamnist'],
+    parser.add_argument('--dataset', type=str, default='cifar10',
+                       choices=['chestmnist', 'dermamnist', 'octmnist', 'pneumoniamnist', 'retinamnist', 
+                               'cifar10', 'cifar100', 'imagenet'],
                        help='数据集类型')
     
     args = parser.parse_args()
     
-    # 根据数据集设置模型参数
-    if args.dataset == 'chestmnist':
-        num_classes = 14
-        in_channels = 1
-    elif args.dataset == 'dermamnist':
-        num_classes = 7
-        in_channels = 3
-    elif args.dataset == 'octmnist':
-        num_classes = 4
-        in_channels = 1
-    elif args.dataset == 'pneumoniamnist':
-        num_classes = 2
-        in_channels = 1
-    elif args.dataset == 'retinamnist':
-        num_classes = 5
-        in_channels = 3
+    # 使用预设配置获取数据集参数
+    dataset_key = args.dataset.lower()
+    if dataset_key in DATASET_PRESETS:
+        dataset_config = DATASET_PRESETS[dataset_key]
+        num_classes = dataset_config['num_classes']
+        in_channels = dataset_config['in_channels']
+        input_size = dataset_config['input_size']
     else:
-        raise ValueError(f"不支持的数据集: {args.dataset}")
+        # 回退到手动配置（用于MedMNIST数据集）
+        if args.dataset == 'chestmnist':
+            num_classes = 14
+            in_channels = 1
+            input_size = 28
+        elif args.dataset == 'dermamnist':
+            num_classes = 7
+            in_channels = 3
+            input_size = 28
+        elif args.dataset == 'octmnist':
+            num_classes = 4
+            in_channels = 1
+            input_size = 28
+        elif args.dataset == 'pneumoniamnist':
+            num_classes = 2
+            in_channels = 1
+            input_size = 28
+        elif args.dataset == 'retinamnist':
+            num_classes = 5
+            in_channels = 3
+            input_size = 28
+        else:
+            raise ValueError(f"不支持的数据集: {args.dataset}")
     
     # 创建模型
     if args.model_type == 'resnet':
-        model = resnet18(num_classes=num_classes, in_channels=in_channels, input_size=28)
+        model = resnet18(num_classes=num_classes, in_channels=in_channels, input_size=input_size)
     elif args.model_type == 'alexnet':
         model = AlexNet(in_channels, num_classes)
     else:
@@ -247,7 +281,7 @@ def main():
     
     print(f"使用模型: {args.model_type}")
     print(f"数据集: {args.dataset}")
-    print(f"类别数: {num_classes}, 输入通道数: {in_channels}")
+    print(f"类别数: {num_classes}, 输入通道数: {in_channels}, 输入尺寸: {input_size}")
     print(f"客户端数量: {args.client_num}")
     print(f"水印分配策略: {args.watermark_strategy}")
     

@@ -26,10 +26,11 @@ def accuracy(output, target, top_k=(1,)):
         return [label_correct * 100.0, sample_correct * 100.0]
 
 class TesterPrivate(object):
-    def __init__(self, model, device, verbose=False):
+    def __init__(self, model, device, verbose=False, args=None):
         self.model = model
         self.device = device
         self.verbose = verbose
+        self.args = args
 
     def test(self, dataloader):
         self.model.to(self.device)
@@ -51,28 +52,36 @@ class TesterPrivate(object):
                 target = target.to(self.device)
 
                 pred = self.model(data)
-                
-                # 使用普通BCEWithLogitsLoss进行评估
-                loss_meter += F.binary_cross_entropy_with_logits(pred, target.float(), reduction='sum').item()
-                # 使用新的准确率计算函数
-                acc_results = accuracy(pred, target)
-                label_acc = acc_results[0]  # 标签级准确率（主要指标）
-                sample_acc = acc_results[1]  # 样本级准确率
-                acc_meter += label_acc.item() * data.size(0) / 100.0  # 标签级准确率
-                sample_acc_meter += sample_acc.item() * data.size(0) / 100.0  # 样本级准确率
-                
-                # 计算sigmoid概率用于AUC计算
-                pred_prob = torch.sigmoid(pred)
-                
-                # 调试信息（仅在verbose模式下且是第一个batch时显示）
-                if self.verbose and run_count == 0:
-                    pred_normal = torch.all(pred_prob < 0.5, dim=1).sum().item()
-                    print(f"First batch - Label-level accuracy: {label_acc:.4f}%, Sample-level accuracy: {sample_acc:.4f}%, Predicted normal samples: {pred_normal}/{data.size(0)}")
-                
-                # 累积AUC计算数据
-                all_y_true.append(target.detach().cpu().numpy())
-                all_y_score.append(pred_prob.detach().cpu().numpy())
-                
+
+                if self.args is not None and getattr(self.args, 'task_type', 'multiclass') == 'multiclass':
+                    # 多分类
+                    loss_meter += F.cross_entropy(pred, target, reduction='sum').item()
+                    preds_top1 = pred.argmax(dim=1)
+                    label_acc = (preds_top1 == target).float().mean() * 100.0
+                    sample_acc = label_acc
+                    acc_meter += label_acc.item() * data.size(0) / 100.0
+                    sample_acc_meter += sample_acc.item() * data.size(0) / 100.0
+                    probs = torch.softmax(pred, dim=1)
+                    if self.verbose and run_count == 0:
+                        correct_first = (preds_top1 == target).sum().item()
+                        print(f"First batch - Top1 Acc: {label_acc:.4f}% ({correct_first}/{data.size(0)})")
+                    all_y_true.append(target.detach().cpu().numpy())
+                    all_y_score.append(probs.detach().cpu().numpy())
+                else:
+                    # 多标签/二分类
+                    loss_meter += F.binary_cross_entropy_with_logits(pred, target.float(), reduction='sum').item()
+                    acc_results = accuracy(pred, target)
+                    label_acc = acc_results[0]
+                    sample_acc = acc_results[1]
+                    acc_meter += label_acc.item() * data.size(0) / 100.0
+                    sample_acc_meter += sample_acc.item() * data.size(0) / 100.0
+                    pred_prob = torch.sigmoid(pred)
+                    if self.verbose and run_count == 0:
+                        pred_normal = torch.all(pred_prob < 0.5, dim=1).sum().item()
+                        print(f"First batch - Label-level accuracy: {label_acc:.4f}%, Sample-level accuracy: {sample_acc:.4f}%, Predicted normal samples: {pred_normal}/{data.size(0)}")
+                    all_y_true.append(target.detach().cpu().numpy())
+                    all_y_score.append(pred_prob.detach().cpu().numpy())
+
                 run_count += data.size(0)
 
         loss_meter /= run_count
@@ -90,24 +99,27 @@ class TesterPrivate(object):
                 # 合并所有batch的数据
                 y_true_all = np.concatenate(all_y_true, axis=0)
                 y_score_all = np.concatenate(all_y_score, axis=0)
-                
-                # 宏平均AUC
-                valid_classes = []
-                for i in range(y_true_all.shape[1]):
-                    if len(np.unique(y_true_all[:, i])) > 1:  # 确保有0和1两种标签
-                        valid_classes.append(i)
-                
-                if len(valid_classes) > 0:
-                    auc_scores = []
-                    for i in valid_classes:
-                        try:
-                            auc_i = roc_auc_score(y_true_all[:, i], y_score_all[:, i])
-                            auc_scores.append(auc_i)
-                        except Exception:
-                            continue
-                    
-                    if len(auc_scores) > 0:
-                        auc_val = np.mean(auc_scores)  # 宏平均
+                if self.args is not None and getattr(self.args, 'task_type', 'multiclass') == 'multiclass':
+                    try:
+                        auc_val = roc_auc_score(y_true_all, y_score_all, multi_class='ovr', average='macro')
+                    except Exception:
+                        auc_val = 0.0
+                else:
+                    # 多标签宏平均
+                    valid_classes = []
+                    for i in range(y_true_all.shape[1]):
+                        if len(np.unique(y_true_all[:, i])) > 1:  # 确保有0和1两种标签
+                            valid_classes.append(i)
+                    if len(valid_classes) > 0:
+                        auc_scores = []
+                        for i in valid_classes:
+                            try:
+                                auc_i = roc_auc_score(y_true_all[:, i], y_score_all[:, i])
+                                auc_scores.append(auc_i)
+                            except Exception:
+                                continue
+                        if len(auc_scores) > 0:
+                            auc_val = np.mean(auc_scores)  # 宏平均
             except Exception as e:
                 print(f"AUC计算错误: {e}")
                 auc_val = 0.0
@@ -120,7 +132,7 @@ class TrainerPrivate(object):
         self.optimizer = None
         self.model = model
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.tester = TesterPrivate(model, device)
+        self.tester = TesterPrivate(model, device, args=args)
         self.dp = dp
         self.sigma = sigma
         self.random_positions = random_positions  # 加入随机位置列表
@@ -129,9 +141,10 @@ class TrainerPrivate(object):
         self.position_dict = random_positions  # 为了兼容性，添加这个属性
 
     def get_loss_function(self, pred, target):
-        """使用BCEWithLogitsLoss，支持类别权重"""
+        """根据任务类型计算损失：multiclass 用 CrossEntropy；其他用 BCEWithLogits。"""
+        if self.args is not None and getattr(self.args, 'task_type', 'multiclass') == 'multiclass':
+            return F.cross_entropy(pred, target)
         if self.args is None or not self.args.class_weights:
-            # 使用标准BCEWithLogitsLoss
             return F.binary_cross_entropy_with_logits(pred, target.float())
         
         # 计算类别权重
@@ -147,9 +160,25 @@ class TrainerPrivate(object):
         
         return F.binary_cross_entropy_with_logits(pred, target.float(), pos_weight=pos_weights)
 
+    def _compute_accuracy(self, pred, target):
+        """根据任务类型计算准确率（百分比）。"""
+        if self.args is not None and getattr(self.args, 'task_type', 'multiclass') == 'multiclass':
+            preds_top1 = pred.argmax(dim=1)
+            return (preds_top1 == target).float().mean() * 100.0
+        return accuracy(pred, target)[0]
+
     def local_update(self, dataloader, local_ep, lr, client_id, **kwargs):
         self.model.train()
-        self.optimizer = torch.optim.SGD(self.model.parameters(), lr=lr, momentum=0.9)
+        
+        # 根据args.optim参数选择优化器
+        if self.args and hasattr(self.args, 'optim'):
+            if self.args.optim.lower() == 'adam':
+                self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=getattr(self.args, 'wd', 0.0))
+            else:  # 默认使用SGD
+                self.optimizer = torch.optim.SGD(self.model.parameters(), lr=lr, momentum=0.9, weight_decay=getattr(self.args, 'wd', 0.0))
+        else:
+            # 向后兼容：如果没有args或optim参数，使用SGD
+            self.optimizer = torch.optim.SGD(self.model.parameters(), lr=lr, momentum=0.9)
 
         epoch_loss, epoch_acc = [], []
 
@@ -169,8 +198,8 @@ class TrainerPrivate(object):
                 loss = self.get_loss_function(pred, y)
 
                 # 计算准确率（按样本加权）
-                acc_results = accuracy(pred, y)
-                acc_meter += acc_results[0].item() * x.size(0) / 100.0
+                batch_acc = self._compute_accuracy(pred, y)
+                acc_meter += batch_acc.item() * x.size(0) / 100.0
 
                 # 反向传播
                 loss.backward()
@@ -263,7 +292,16 @@ class TrainerPrivate(object):
 
     def local_update_with_no_fl(self, dataloader, local_ep, lr):
         self.model.train()
-        self.optimizer = torch.optim.SGD(self.model.parameters(), lr=lr, momentum=0.9)
+        
+        # 根据args.optim参数选择优化器
+        if self.args and hasattr(self.args, 'optim'):
+            if self.args.optim.lower() == 'adam':
+                self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=getattr(self.args, 'wd', 0.0))
+            else:  # 默认使用SGD
+                self.optimizer = torch.optim.SGD(self.model.parameters(), lr=lr, momentum=0.9, weight_decay=getattr(self.args, 'wd', 0.0))
+        else:
+            # 向后兼容：如果没有args或optim参数，使用SGD
+            self.optimizer = torch.optim.SGD(self.model.parameters(), lr=lr, momentum=0.9)
 
         epoch_loss, epoch_acc = [], []
 
@@ -283,8 +321,8 @@ class TrainerPrivate(object):
                 loss = self.get_loss_function(pred, y)
 
                 # 计算准确率（按样本加权）
-                acc_results = accuracy(pred, y)
-                acc_meter += acc_results[0].item() * x.size(0) / 100.0
+                batch_acc = self._compute_accuracy(pred, y)
+                acc_meter += batch_acc.item() * x.size(0) / 100.0
 
                 # 反向传播
                 loss.backward()
