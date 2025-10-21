@@ -178,6 +178,53 @@ def load_chestmnist_data(data_root: str = './data'):
     return train_set, test_set
 
 
+def load_cifar10_data(batch_size: int = 128, data_root: str = './data'):
+    """
+    加载CIFAR-10数据集用于微调训练
+
+    Args:
+        batch_size: 批次大小
+        data_root: 数据根目录
+
+    Returns:
+        训练和测试数据加载器
+    """
+    # CIFAR-10数据预处理
+    transform_train = transforms.Compose([
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616])
+    ])
+    
+    transform_test = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616])
+    ])
+
+    # 加载CIFAR-10数据集
+    train_dataset = datasets.CIFAR10(
+        root=data_root,
+        train=True,
+        download=True,
+        transform=transform_train
+    )
+    
+    test_dataset = datasets.CIFAR10(
+        root=data_root,
+        train=False,
+        download=True,
+        transform=transform_test
+    )
+
+    # 创建数据加载器
+    train_loader = create_safe_dataloader(train_dataset, batch_size=batch_size, shuffle=True)
+    test_loader = create_safe_dataloader(test_dataset, batch_size=batch_size*2, shuffle=False)
+
+    print(f"✓ 已加载CIFAR-10数据集: 训练集 {len(train_dataset)} 个样本, 测试集 {len(test_dataset)} 个样本")
+    return train_loader, test_loader
+
+
 def load_main_task_model(model_path: str, device: str = 'cuda'):
     """
     加载主任务模型，自动从checkpoint推断数据集参数
@@ -231,7 +278,7 @@ def load_main_task_model(model_path: str, device: str = 'cuda'):
 def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.001,
                    device: str = 'cuda', eval_interval: int = 10, pcc_interval: int = 10,
                    reconstructor=None, original_model_state=None, mnist_test_loader=None, fixed_tau=None,
-                   optimizer_type: str = 'adam'):
+                   optimizer_type: str = 'adam', dataset_type: str = 'chestmnist'):
     """
     对模型进行微调训练（精简输出）
     
@@ -255,7 +302,12 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
     else:  # 默认使用Adam
         optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
     
-    criterion = nn.BCEWithLogitsLoss()
+    # 根据数据集类型选择合适的损失函数
+    if dataset_type == 'chestmnist':
+        criterion = nn.BCEWithLogitsLoss()
+    else:  # cifar10, mnist等多分类任务
+        criterion = nn.CrossEntropyLoss()
+    
     # 确保step_size至少为1，避免除零错误
     step_size = max(1, epochs//3) if epochs > 0 else 1
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=0.1)
@@ -274,7 +326,12 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
             for data, target in train_loader:
                 data, target = data.to(device), target.to(device)
                 optimizer.zero_grad()
-                loss = criterion(model(data), target.float())
+                
+                if dataset_type == 'chestmnist':
+                    loss = criterion(model(data), target.float())
+                else:  # 多分类任务
+                    loss = criterion(model(data), target.long())
+                
                 loss.backward()
                 optimizer.step()
                 total_loss += loss.item()
@@ -295,27 +352,49 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
             for data, target in test_loader:
                 data, target = data.to(device), target.to(device)
                 output = model(data)
-                test_loss += criterion(output, target.float()).item()
-                all_predictions.append(torch.sigmoid(output).cpu().numpy())
+                
+                if dataset_type == 'chestmnist':
+                    test_loss += criterion(output, target.float()).item()
+                    all_predictions.append(torch.sigmoid(output).cpu().numpy())
+                else:  # 多分类任务
+                    test_loss += criterion(output, target.long()).item()
+                    all_predictions.append(torch.softmax(output, dim=1).cpu().numpy())
+                
                 all_targets.append(target.cpu().numpy())
 
         avg_test_loss = test_loss / len(test_loader)
         all_predictions = np.concatenate(all_predictions, axis=0)
         all_targets = np.concatenate(all_targets, axis=0)
 
-        try:
-            from sklearn.metrics import roc_auc_score
-            auc_scores = [
-                roc_auc_score(all_targets[:, i], all_predictions[:, i])
-                for i in range(all_targets.shape[1])
-                if len(np.unique(all_targets[:, i])) > 1
-            ]
-            mean_auc = np.mean(auc_scores) if auc_scores else 0.0
-        except ImportError:
-            mean_auc = 0.0
-
-        pred_binary = (all_predictions > 0.5).astype(int)
-        accuracy = np.mean((pred_binary == all_targets).astype(float))
+        # 计算AUC和准确率（根据数据集类型）
+        if dataset_type == 'chestmnist':
+            # 多标签二分类任务
+            try:
+                from sklearn.metrics import roc_auc_score
+                auc_scores = [
+                    roc_auc_score(all_targets[:, i], all_predictions[:, i])
+                    for i in range(all_targets.shape[1])
+                    if len(np.unique(all_targets[:, i])) > 1
+                ]
+                mean_auc = np.mean(auc_scores) if auc_scores else 0.0
+            except ImportError:
+                mean_auc = 0.0
+            
+            # 计算准确率（多标签）
+            pred_binary = (all_predictions > 0.5).astype(int)
+            accuracy = np.mean((pred_binary == all_targets).astype(float))
+        else:
+            # 多分类任务
+            try:
+                from sklearn.metrics import roc_auc_score
+                # 使用one-vs-rest策略计算多分类AUC
+                mean_auc = roc_auc_score(all_targets, all_predictions, multi_class='ovr', average='macro')
+            except ImportError:
+                mean_auc = 0.0
+            
+            # 计算准确率（多分类）
+            pred_classes = np.argmax(all_predictions, axis=1)
+            accuracy = np.mean((pred_classes == all_targets).astype(float))
 
         # 打印基本指标（每轮都显示）
         print(f"\n=== 第 {epoch+1} 轮评估 ===")
@@ -523,24 +602,39 @@ def main():
     """主函数"""
     import argparse
     
-    # 解析命令行参数
+    # 首先加载args.py中的参数配置
+    from utils.args import parser_args
+    base_args = parser_args()
+    
+    # 解析微调攻击特定的命令行参数
     parser = argparse.ArgumentParser(description='微调攻击实验')
     parser.add_argument('--model_path', type=str, 
-                       default='./save/resnet/cifar10/202510202106_Dp_0.1_iid_True_lt_sign_ep_100_le_2_cn_10_fra_1.0000_acc_0.6695_enhanced.pkl',
+                       default='./save/resnet/cifar10/202510211442_Dp_0.1_iid_True_lt_sign_ep_100_le_2_cn_10_fra_1.0000_acc_0.8853_enhanced.pkl',
                        help='模型文件路径')
-    parser.add_argument('--key_matrix_dir', type=str, default='./save/key_matrix',
-                       help='密钥矩阵目录')
-    parser.add_argument('--autoencoder_dir', type=str, default='./save/autoencoder',
-                       help='自编码器目录')
-    parser.add_argument('--finetune_epochs', type=int, default=100,
+    parser.add_argument('--finetune_epochs', type=int, default=50,
                        help='微调轮数')
-    parser.add_argument('--learning_rate', type=float, default=0.001,
-                       help='学习率')
-    parser.add_argument('--batch_size', type=int, default=128,
-                       help='批次大小')
-    parser.add_argument('--optimizer', type=str, default='adam', choices=['sgd', 'adam'],
-                       help='优化器类型')
-    args = parser.parse_args()
+    parser.add_argument('--learning_rate', type=float, default=0.01,
+                       help='学习率（默认使用args.py中的lr）')
+    parser.add_argument('--batch_size', type=int, default=None,
+                       help='批次大小（默认使用args.py中的batch_size）')
+    parser.add_argument('--optimizer', type=str, default=None, choices=['sgd', 'adam'],
+                       help='优化器类型（默认使用args.py中的optim）')
+    
+    # 解析命令行参数
+    cmd_args = parser.parse_args()
+    
+    # 合并参数：命令行参数优先，否则使用args.py中的参数
+    args = argparse.Namespace()
+    args.model_path = cmd_args.model_path
+    args.finetune_epochs = cmd_args.finetune_epochs
+    args.learning_rate = cmd_args.learning_rate if cmd_args.learning_rate is not None else base_args.lr
+    args.batch_size = cmd_args.batch_size if cmd_args.batch_size is not None else base_args.batch_size
+    args.optimizer = cmd_args.optimizer if cmd_args.optimizer is not None else base_args.optim
+    args.key_matrix_dir = base_args.key_matrix_dir
+    args.autoencoder_dir = os.path.dirname(base_args.encoder_path)  # 从encoder_path推导autoencoder目录
+    args.data_root = base_args.data_root
+    args.enable_watermark_scaling = base_args.enable_watermark_scaling
+    args.scaling_factor = base_args.scaling_factor
     
     # 设置设备
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -557,25 +651,39 @@ def main():
     # 微调参数
     finetune_epochs = args.finetune_epochs
     eval_interval = 1  # 每轮都进行基本评估
-    pcc_interval = 10  # PCC计算间隔，可以调整（建议5-20之间，值越大计算越少但监控越粗糙）
+    pcc_interval = 5  # PCC计算间隔，可以调整（建议5-20之间，值越大计算越少但监控越粗糙）
     learning_rate = args.learning_rate
     batch_size = args.batch_size
+    optimizer_type = args.optimizer
 
     print(f"微调攻击实验参数:")
     print(f"  - 微调轮数: {finetune_epochs}")
     print(f"  - 基本评估: 每轮 | ΔPCC评估: 每{pcc_interval}轮")
     print(f"  - 学习率: {learning_rate}")
     print(f"  - 批次大小: {batch_size}")
+    print(f"  - 优化器: {optimizer_type}")
+    print(f"  - 数据集: {model_info['dataset']}")
+    print(f"  - 模型: {model_info['model_name']}")
     print("-" * 60)
 
     # 加载数据
     print("加载数据...")
-    mnist_test_loader = load_mnist_test_data(batch_size=128)
-    chestmnist_train_set, chestmnist_test_set = load_chestmnist_data()
-
-    # 创建数据加载器 (使用安全的数据加载器创建函数)
-    train_loader = create_safe_dataloader(chestmnist_train_set, batch_size=batch_size, shuffle=True)
-    test_loader = create_safe_dataloader(chestmnist_test_set, batch_size=batch_size*2, shuffle=False)
+    # 从模型路径中提取数据集信息
+    dataset = model_info['dataset']
+    dataset_type = dataset  # 用于损失函数选择
+    
+    # 根据数据集类型加载相应的数据
+    if dataset == 'cifar10':
+        train_loader, test_loader = load_cifar10_data(batch_size=batch_size, data_root=args.data_root)
+        mnist_test_loader = load_mnist_test_data(batch_size=128, data_dir=args.data_root)
+    elif dataset == 'chestmnist':
+        train_set, test_set = load_chestmnist_data(data_root=args.data_root)
+        train_loader = create_safe_dataloader(train_set, batch_size=batch_size, shuffle=True)
+        test_loader = create_safe_dataloader(test_set, batch_size=batch_size*2, shuffle=False)
+        mnist_test_loader = load_mnist_test_data(batch_size=128, data_dir=args.data_root)
+    else:
+        print(f"❌ 不支持的数据集: {dataset}")
+        return
 
     # 加载主任务模型
     print("加载主任务模型...")
@@ -588,8 +696,6 @@ def main():
     original_model_state = copy.deepcopy(model.state_dict())
 
     # 初始化水印重建器（使用args中的统一设置）
-    from utils.args import parser_args
-    args = parser_args()
     reconstructor = WatermarkReconstructor(
         key_matrix_dir, 
         autoencoder_dir, 
@@ -617,35 +723,62 @@ def main():
     # 先进行AUC评估
     model.eval()
     test_loss, all_predictions, all_targets = 0.0, [], []
-    criterion = nn.BCEWithLogitsLoss()
+    
+    # 根据数据集类型选择合适的损失函数
+    if dataset_type == 'chestmnist':
+        criterion = nn.BCEWithLogitsLoss()
+        activation_fn = torch.sigmoid
+    else:  # cifar10, mnist等多分类任务
+        criterion = nn.CrossEntropyLoss()
+        activation_fn = torch.softmax
     
     with torch.no_grad():
         for data, target in test_loader:
             data, target = data.to(device), target.to(device)
             output = model(data)
-            test_loss += criterion(output, target.float()).item()
-            all_predictions.append(torch.sigmoid(output).cpu().numpy())
+            
+            if dataset_type == 'chestmnist':
+                test_loss += criterion(output, target.float()).item()
+                all_predictions.append(activation_fn(output).cpu().numpy())
+            else:  # 多分类任务
+                test_loss += criterion(output, target.long()).item()
+                all_predictions.append(activation_fn(output, dim=1).cpu().numpy())
+            
             all_targets.append(target.cpu().numpy())
 
     avg_test_loss = test_loss / len(test_loader)
     all_predictions = np.concatenate(all_predictions, axis=0)
     all_targets = np.concatenate(all_targets, axis=0)
 
-    # 计算AUC（使用与训练时相同的逻辑）
-    try:
-        from sklearn.metrics import roc_auc_score
-        auc_scores = [
-            roc_auc_score(all_targets[:, i], all_predictions[:, i])
-            for i in range(all_targets.shape[1])
-            if len(np.unique(all_targets[:, i])) > 1
-        ]
-        mean_auc = np.mean(auc_scores) if auc_scores else 0.0
-    except ImportError:
-        mean_auc = 0.0
-
-    # 计算准确率
-    pred_binary = (all_predictions > 0.5).astype(int)
-    accuracy = np.mean((pred_binary == all_targets).astype(float))
+    # 计算AUC和准确率（根据数据集类型）
+    if dataset_type == 'chestmnist':
+        # 多标签二分类任务
+        try:
+            from sklearn.metrics import roc_auc_score
+            auc_scores = [
+                roc_auc_score(all_targets[:, i], all_predictions[:, i])
+                for i in range(all_targets.shape[1])
+                if len(np.unique(all_targets[:, i])) > 1
+            ]
+            mean_auc = np.mean(auc_scores) if auc_scores else 0.0
+        except ImportError:
+            mean_auc = 0.0
+        
+        # 计算准确率（多标签）
+        pred_binary = (all_predictions > 0.5).astype(int)
+        accuracy = np.mean((pred_binary == all_targets).astype(float))
+    else:
+        # 多分类任务
+        try:
+            from sklearn.metrics import roc_auc_score
+            # 使用one-vs-rest策略计算多分类AUC
+            mean_auc = roc_auc_score(all_targets, all_predictions, multi_class='ovr', average='macro')
+        except ImportError:
+            mean_auc = 0.0
+        
+        # 计算准确率（多分类）
+        pred_classes = np.argmax(all_predictions, axis=1)
+        accuracy = np.mean((pred_classes == all_targets).astype(float))
     
     print(f"测试损失: {avg_test_loss:.4f} | AUC: {mean_auc:.4f} | 准确率: {accuracy:.2%}")
     
@@ -681,7 +814,7 @@ def main():
         device=device, eval_interval=eval_interval, pcc_interval=pcc_interval,
         reconstructor=reconstructor, original_model_state=original_model_state,
         mnist_test_loader=mnist_test_loader, fixed_tau=fixed_tau,
-        optimizer_type=args.optimizer
+        optimizer_type=optimizer_type, dataset_type=dataset_type
     )
 
     # 微调训练已完成，ΔPCC和侵权判断已在训练过程中评估
