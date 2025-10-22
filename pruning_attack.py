@@ -13,6 +13,60 @@ from utils.watermark_reconstruction import WatermarkReconstructor
 from utils.delta_pcc_utils import evaluate_delta_pcc, calculate_fixed_tau, format_delta_pcc_result, print_delta_pcc_summary
 
 
+def load_test_data(dataset_name: str, batch_size: int = 128, data_dir: str = './data'):
+    """
+    根据数据集名称加载相应的测试数据
+    
+    Args:
+        dataset_name: 数据集名称 ('cifar10', 'cifar100', 'chestmnist', 'mnist')
+        batch_size: 批次大小
+        data_dir: 数据目录
+        
+    Returns:
+        测试数据加载器
+    """
+    if dataset_name.lower() == 'cifar10':
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616))
+        ])
+        test_dataset = datasets.CIFAR10(data_dir, train=False, download=True, transform=transform)
+        
+    elif dataset_name.lower() == 'cifar100':
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))
+        ])
+        test_dataset = datasets.CIFAR100(data_dir, train=False, download=True, transform=transform)
+        
+    elif dataset_name.lower() == 'chestmnist':
+        normalize = transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            normalize,
+        ])
+
+        from utils.dataset import LocalChestMNISTDataset
+        dataset_path = os.path.join(data_dir, 'chestmnist.npz')
+        if not os.path.exists(dataset_path):
+            raise FileNotFoundError(f"ChestMNIST数据集文件不存在: {dataset_path}")
+        
+        test_dataset = LocalChestMNISTDataset(dataset_path, split='test', transform=transform)
+        
+    elif dataset_name.lower() == 'mnist':
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.1307,), (0.3081,))
+        ])
+        test_dataset = datasets.MNIST(data_dir, train=False, download=True, transform=transform)
+        
+    else:
+        raise ValueError(f"不支持的数据集: {dataset_name}")
+    
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    print(f"✓ 已加载{dataset_name.upper()}测试集: {len(test_dataset)} 个样本")
+    return test_loader
+
 def load_mnist_test_data(batch_size: int = 128, data_dir: str = './data'):
     """
     加载MNIST测试数据，使用与训练时相同的数据预处理策略
@@ -24,18 +78,7 @@ def load_mnist_test_data(batch_size: int = 128, data_dir: str = './data'):
     Returns:
         MNIST测试数据加载器
     """
-    # 使用与train_autoencoder.py相同的数据预处理
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,))
-    ])
-    
-    # 加载MNIST测试集
-    test_dataset = datasets.MNIST(data_dir, train=False, download=True, transform=transform)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-    
-    print(f"✓ 已加载MNIST测试集: {len(test_dataset)} 个样本")
-    return test_loader
+    return load_test_data('mnist', batch_size, data_dir)
 
 def build_autoencoder_from_watermark(watermark_params, decoder_path: str, device: str = 'cuda'):
     """
@@ -132,7 +175,8 @@ def load_main_task_model(model_path: str, device: str = 'cuda'):
         'in_channels': in_channels,
         'input_size': input_size,
         'model_name': model_name,
-        'model_path': model_path
+        'model_path': model_path,
+        'model_filename': os.path.basename(model_path)
     }
     
     print(f"✓ 检测到数据集: {dataset}, 类别数: {num_classes}, 输入通道: {in_channels}, 输入尺寸: {input_size}")
@@ -149,6 +193,108 @@ def load_main_task_model(model_path: str, device: str = 'cuda'):
     model.eval()
     
     return model, model_info
+
+def evaluate_model_accuracy(model, test_loader, device='cuda', dataset_type='chestmnist'):
+    """
+    评估模型在测试集上的准确率
+    
+    Args:
+        model: 待评估的模型
+        test_loader: 测试数据加载器
+        device: 设备类型
+        dataset_type: 数据集类型，用于确定评估方式
+        
+    Returns:
+        float: 模型准确率
+    """
+    model.eval()
+    correct = 0
+    total = 0
+    
+    with torch.no_grad():
+        for data, target in test_loader:
+            data, target = data.to(device), target.to(device)
+            outputs = model(data)
+            
+            if dataset_type.lower() == 'chestmnist':
+                # 多标签分类：使用sigmoid + 阈值0.5
+                predicted = (torch.sigmoid(outputs) > 0.5).float()
+                # 计算样本级准确率（所有标签都正确才算正确）
+                correct += (predicted == target).all(dim=1).sum().item()
+            else:
+                # 单标签分类：使用argmax
+                _, predicted = torch.max(outputs.data, 1)
+                correct += (predicted == target).sum().item()
+            
+            total += target.size(0)
+    
+    accuracy = correct / total
+    return accuracy
+
+def evaluate_model_auc(model, test_loader, device='cuda', dataset_type='chestmnist'):
+    """
+    评估模型在测试集上的AUC
+    
+    Args:
+        model: 待评估的模型
+        test_loader: 测试数据加载器
+        device: 设备类型
+        dataset_type: 数据集类型，用于确定评估方式
+        
+    Returns:
+        float: 模型AUC（多标签任务取平均AUC）
+    """
+    import numpy as np
+    from sklearn.metrics import roc_auc_score
+    
+    model.eval()
+    all_predictions = []
+    all_targets = []
+    
+    with torch.no_grad():
+        for data, target in test_loader:
+            data, target = data.to(device), target.to(device)
+            outputs = model(data)
+            
+            if dataset_type.lower() == 'chestmnist':
+                # 多标签分类：使用sigmoid输出概率
+                predictions = torch.sigmoid(outputs).cpu().numpy()
+                targets = target.cpu().numpy()
+            else:
+                # 单标签分类：使用softmax输出概率
+                predictions = torch.softmax(outputs, dim=1).cpu().numpy()
+                targets = target.cpu().numpy()
+            
+            all_predictions.append(predictions)
+            all_targets.append(targets)
+    
+    # 合并所有批次的结果
+    all_predictions = np.vstack(all_predictions)
+    all_targets = np.vstack(all_targets) if dataset_type.lower() == 'chestmnist' else np.hstack(all_targets)
+    
+    if dataset_type.lower() == 'chestmnist':
+        # 多标签分类：计算每个标签的AUC然后取平均
+        auc_scores = []
+        for i in range(all_targets.shape[1]):
+            try:
+                auc = roc_auc_score(all_targets[:, i], all_predictions[:, i])
+                auc_scores.append(auc)
+            except ValueError:
+                # 如果某个标签只有一种类别，跳过
+                continue
+        
+        if auc_scores:
+            avg_auc = np.mean(auc_scores)
+        else:
+            avg_auc = 0.0
+    else:
+        # 单标签分类：计算多类AUC
+        try:
+            avg_auc = roc_auc_score(all_targets, all_predictions, multi_class='ovr', average='macro')
+        except ValueError:
+            avg_auc = 0.0
+    
+    return avg_auc
 
 def threshold_pruning(model, pruning_ratio: float):
     """
@@ -279,28 +425,48 @@ def save_pruning_results(results, model_info, save_dir='./save/pruning_results')
     dataset = model_info.get('dataset', 'unknown')
     model_name = model_info.get('model_name', 'unknown')
     
-    # 生成包含模型名和数据集名的文件名
-    filename = f'pruning_attack_{dataset}_{model_name}_{timestamp}.csv'
-    csv_file = os.path.join(save_dir, filename)
+    # 生成文件名
+    filename_prefix = f'pruning_attack_{dataset}_{timestamp}'
+    csv_file = os.path.join(save_dir, f'{filename_prefix}.csv')
     
     df_data = []
     for result in results:
         df_data.append({
             'pruning_ratio': result['pruning_ratio'],
+            'auc': result.get('auc_after', 0.0),
+            'accuracy': result.get('accuracy_after', 0.0),
             'watermark_integrity': result['watermark_integrity'],
             'total_watermark_params': result['total_watermark_params'],
             'damaged_watermark_params': result['damaged_watermark_params'],
-            'perf_before': result.get('perf_before', float('inf')),
-            'perf_after': result.get('perf_after', float('inf')),
             'delta_pcc': result.get('delta_pcc', float('inf')),
             'is_infringement': result.get('is_infringement', False),
             'result_text': result.get('result_text', '评估失败')
         })
     
     df = pd.DataFrame(df_data)
-    df.to_csv(csv_file, index=False, encoding='utf-8-sig')
     
-    print(f"✓ 结果已保存到: {csv_file}")
+    # 格式化数值列，保留6位小数
+    numeric_columns = ['pruning_ratio', 'auc', 'accuracy', 'watermark_integrity', 
+                      'total_watermark_params', 'damaged_watermark_params', 'delta_pcc']
+    for col in numeric_columns:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda x: f"{x:.6f}" if pd.notna(x) and isinstance(x, (int, float)) else x)
+    
+    # 在CSV文件开头添加模型文件名信息
+    model_filename = model_info.get('model_filename', 'unknown')
+    
+    # 先写入注释行，然后写入数据
+    with open(csv_file, 'w', encoding='utf-8-sig') as f:
+        f.write(f"# 模型文件: {model_filename}\n")
+        f.write(f"# 数据集: {model_info.get('dataset', 'unknown')}\n")
+        f.write(f"# 生成时间: {timestamp}\n")
+        f.write("#\n")
+    
+    # 追加数据到文件
+    df.to_csv(csv_file, mode='a', index=False, encoding='utf-8-sig')
+    
+    print(f"✓ 结果已保存到: {save_dir}")
+    print(f"  - CSV文件: {csv_file}")
 
 def main():
     """主函数"""
@@ -309,7 +475,7 @@ def main():
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='剪枝攻击实验')
     parser.add_argument('--model_path', type=str, 
-                       default='./save/resnet/cifar10/202510211442_Dp_0.1_iid_True_lt_sign_ep_100_le_2_cn_10_fra_1.0000_acc_0.8853_enhanced.pkl',
+                       default='./save/resnet/cifar10/202510221620_Dp_0.1_iid_True_lt_sign_ep_150_le_2_cn_10_fra_1.0000_acc_0.9298_enhanced.pkl',
                        help='模型文件路径')
     parser.add_argument('--key_matrix_dir', type=str, default='./save/key_matrix',
                        help='密钥矩阵目录')
@@ -326,11 +492,12 @@ def main():
     key_matrix_dir = args.key_matrix_dir
     autoencoder_dir = args.autoencoder_dir
     
-    # 加载MNIST测试数据
-    test_loader = load_mnist_test_data(batch_size=128)
-    
     # 加载主任务模型
     model, model_info = load_main_task_model(model_path, device)
+    
+    # 根据模型信息加载相应的测试数据
+    dataset_name = model_info.get('dataset', 'chestmnist')
+    test_loader = load_test_data(dataset_name, batch_size=128)
     
     if model is not None and model_info is not None:
         print(f"开始剪枝攻击实验 (设备: {device})")
@@ -346,9 +513,9 @@ def main():
         )
         
         # ==================== 水印检测容忍度设置 ====================
-        PERF_FAIL_RATIO = 0.05
+        PERF_FAIL_RATIO = 0.3
         # =========================================================
-        
+        print(f"水印检测容忍度设置: {PERF_FAIL_RATIO}")
         # 计算固定阈值τ（基于原始未剪枝模型）
         print("计算固定阈值τ...")
         fixed_tau = calculate_fixed_tau(model.state_dict(), reconstructor, test_loader, device, perf_fail_ratio=PERF_FAIL_RATIO)
@@ -361,11 +528,22 @@ def main():
         # 存储实验结果
         results = []
         
+        # 首先评估原始模型的性能
+        original_auc = evaluate_model_auc(model, test_loader, device, dataset_type=dataset_name)
+        original_accuracy = evaluate_model_accuracy(model, test_loader, device, dataset_type=dataset_name)
+        print(f"原始模型AUC: {original_auc:.4f}, 准确率: {original_accuracy:.4f}")
+        
         for ratio in pruning_ratios:
+            print(f"\n--- 剪枝比例: {ratio:.0%} ---")
             
             # 对模型进行剪枝
             pruned_model = threshold_pruning(model, ratio)
             
+            # 评估剪枝后模型的AUC和准确率
+            pruned_auc = evaluate_model_auc(pruned_model, test_loader, device, dataset_type=dataset_name)
+            pruned_accuracy = evaluate_model_accuracy(pruned_model, test_loader, device, dataset_type=dataset_name)
+            
+            print(f"剪枝后模型AUC: {pruned_auc:.4f}, 准确率: {pruned_accuracy:.4f}")
             
             # 评估水印完整性
             watermark_result = evaluate_watermark_after_pruning(pruned_model, reconstructor)
@@ -379,7 +557,12 @@ def main():
             
             # 记录结果
             result = {
-                'pruning_ratio': ratio
+                'pruning_ratio': ratio,
+                'auc_before': original_auc,
+                'auc_after': pruned_auc,
+                'accuracy_before': original_accuracy,
+                'accuracy_after': pruned_accuracy,
+                'accuracy_drop': original_accuracy - pruned_accuracy
             }
             
             if watermark_result is not None:
@@ -410,20 +593,37 @@ def main():
             
             results.append(result)
             
-            # 简化的实验结果输出
-            print(f"剪枝{ratio:.0%}: 水印完整性{result['watermark_integrity']:.2%} | ΔPCC{result['delta_pcc']:.6f} | {result['result_text']}")
+            # 根据数据集类型调整输出格式
+            if dataset_name == 'chestmnist':
+                print(f"剪枝{ratio:.0%}: AUC{pruned_auc:.4f} [主要] | 准确率{pruned_accuracy:.4f} [参考] | 水印完整性{result['watermark_integrity']:.2%} | ΔPCC{result['delta_pcc']:.6f} | {result['result_text']}")
+            else:
+                print(f"剪枝{ratio:.0%}: AUC{pruned_auc:.4f} [参考] | 准确率{pruned_accuracy:.4f} [主要] | 水印完整性{result['watermark_integrity']:.2%} | ΔPCC{result['delta_pcc']:.6f} | {result['result_text']}")
         
-        # 简化的总结表格
+        # 根据数据集类型调整总结表格格式
         print(f"\n{'='*80}")
         print("实验结果总结")
         print(f"{'='*80}")
-        print(f"{'剪枝%':<6} {'水印完整性%':<13} {'ΔPCC':<9} {'侵权判断':<8}")
-        print("-" * 60)
         
-        for result in results:
-            print(f"{result['pruning_ratio']:>4.0%} "
-                  f"{result['watermark_integrity']:>11.2%} {result['delta_pcc']:>9.6f} "
-                  f"{result['result_text']:>6}")
+        if dataset_name == 'chestmnist':
+            print(f"{'剪枝%':<6} {'AUC[主要]':<10} {'准确率[参考]':<10} {'水印完整性%':<13} {'ΔPCC':<9} {'侵权判断':<8}")
+            print("-" * 70)
+            
+            for result in results:
+                print(f"{result['pruning_ratio']:>4.0%} "
+                      f"{result['auc_after']:>8.4f} "
+                      f"{result['accuracy_after']:>8.4f} "
+                      f"{result['watermark_integrity']:>11.2%} {result['delta_pcc']:>9.6f} "
+                      f"{result['result_text']:>6}")
+        else:
+            print(f"{'剪枝%':<6} {'AUC[参考]':<10} {'准确率[主要]':<10} {'水印完整性%':<13} {'ΔPCC':<9} {'侵权判断':<8}")
+            print("-" * 70)
+            
+            for result in results:
+                print(f"{result['pruning_ratio']:>4.0%} "
+                      f"{result['auc_after']:>8.4f} "
+                      f"{result['accuracy_after']:>8.4f} "
+                      f"{result['watermark_integrity']:>11.2%} {result['delta_pcc']:>9.6f} "
+                      f"{result['result_text']:>6}")
         
         # 保存实验结果
         print("\n保存实验结果...")

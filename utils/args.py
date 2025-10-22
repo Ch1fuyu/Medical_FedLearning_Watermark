@@ -8,7 +8,7 @@ def parser_args():
     parser.add_argument('--gpu', default='0', type=str, help='GPU device ID')
     
     # ========================= 数据集和模型参数 ========================
-    parser.add_argument('--dataset', type=str, default='cifar10', help="name of dataset")
+    parser.add_argument('--dataset', type=str, default='cifar10', choices=['chestmnist', 'cifar10'], help="name of dataset")
     parser.add_argument('--model_name', type=str, default='resnet', choices=['alexnet', 'resnet'],
                         help='model architecture name')
     # 便捷别名：--model 等价于 --model_name
@@ -20,7 +20,7 @@ def parser_args():
     parser.add_argument('--override', type=str, default=None, help='comma-separated key=value overrides')
     
     # ========================= 联邦学习核心参数 ========================
-    parser.add_argument('--epochs', type=int, default=100, help='total communication rounds')
+    parser.add_argument('--epochs', type=int, default=150, help='total communication rounds')
     parser.add_argument('--local_ep', type=int, default=2, help="local epochs per client: E")
     parser.add_argument('--batch_size', type=int, default=128, help="local batch size: B")
     parser.add_argument('--client_num', type=int, default=10, help="number of clients: K")
@@ -29,7 +29,7 @@ def parser_args():
     
     # ========================= 优化器参数 ========================
     parser.add_argument('--optim', type=str, default='sgd', choices=['sgd', 'adam'], help='optimizer type')
-    parser.add_argument('--lr', type=float, default=0.01, help='learning rate for local updates')
+    parser.add_argument('--lr', type=float, default=0.1, help='learning rate for local updates')
     parser.add_argument('--wd', type=float, default=0.0, help='weight decay')
     
     # ========================= 训练控制参数 ========================

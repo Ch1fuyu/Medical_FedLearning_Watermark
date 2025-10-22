@@ -398,12 +398,16 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
 
         # 打印基本指标（每轮都显示）
         print(f"\n=== 第 {epoch+1} 轮评估 ===")
-        print(f"训练损失: {avg_loss:.4f} | 测试损失: {avg_test_loss:.4f} | "
-              f"AUC: {mean_auc:.4f} | 准确率: {accuracy:.2%}")
+        if dataset_type == 'chestmnist':
+            print(f"训练损失: {avg_loss:.4f} | 测试损失: {avg_test_loss:.4f} | "
+                  f"AUC: {mean_auc:.4f} [主要] | 准确率: {accuracy:.2%} [参考]")
+        else:
+            print(f"训练损失: {avg_loss:.4f} | 测试损失: {avg_test_loss:.4f} | "
+                  f"AUC: {mean_auc:.4f} [参考] | 准确率: {accuracy:.2%} [主要]")
 
         # 根据pcc_interval参数计算ΔPCC和侵权检测（计算量大的操作）
         delta_pcc_result = None
-        if (epoch + 1) % pcc_interval == 0:
+        if ((epoch + 1) == 1) or ((epoch + 1) % pcc_interval == 0):
             print("🔍 进行ΔPCC和侵权检测评估...")
             # 保存状态
             model_states.append(copy.deepcopy(model.state_dict()))
@@ -560,7 +564,7 @@ def save_results(results, model_info=None, save_dir: str = './save/finetune_atta
     if model_info:
         dataset = model_info.get('dataset', 'unknown')
         model_name = model_info.get('model_name', 'unknown')
-        filename_prefix = f'finetune_attack_{dataset}_{model_name}_{timestamp}'
+        filename_prefix = f'finetune_attack_{dataset}_{timestamp}'
     else:
         filename_prefix = f'finetune_attack_{timestamp}'
     
@@ -581,7 +585,6 @@ def save_results(results, model_info=None, save_dir: str = './save/finetune_atta
             'test_auc': result['test_auc'],
             'test_accuracy': result['test_accuracy'],
             'learning_rate': result['learning_rate'],
-            'perf_before': result.get('perf_before', None),
             'perf_fail': result.get('perf_fail', None),
             'tau': result.get('tau', None),
             'delta_perf': result.get('delta_perf', None),
@@ -591,6 +594,18 @@ def save_results(results, model_info=None, save_dir: str = './save/finetune_atta
         })
 
     df = pd.DataFrame(df_data)
+    
+    # 格式化数值列，保留6位小数
+    numeric_columns = ['train_loss', 'test_loss', 'test_auc', 'test_accuracy', 'learning_rate', 
+                      'perf_fail', 'tau', 'delta_perf', 'delta_pcc']
+    for col in numeric_columns:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda x: f"{x:.6f}" if pd.notna(x) and isinstance(x, (int, float)) else x)
+    
+    # 在CSV文件最后一行添加PKL文件名信息
+    pkl_filename = os.path.basename(results_file)
+    df.loc[len(df)] = ['PKL_FILE'] + [''] * (len(df.columns) - 2) + [pkl_filename]
+    
     df.to_csv(csv_file, index=False, encoding='utf-8-sig')
 
     print(f"✓ 结果已保存到: {save_dir}")
@@ -609,15 +624,15 @@ def main():
     # 解析微调攻击特定的命令行参数
     parser = argparse.ArgumentParser(description='微调攻击实验')
     parser.add_argument('--model_path', type=str, 
-                       default='./save/resnet/cifar10/202510211442_Dp_0.1_iid_True_lt_sign_ep_100_le_2_cn_10_fra_1.0000_acc_0.8853_enhanced.pkl',
+                       default='./save/resnet/cifar10/202510221620_Dp_0.1_iid_True_lt_sign_ep_150_le_2_cn_10_fra_1.0000_acc_0.9298_enhanced.pkl',
                        help='模型文件路径')
     parser.add_argument('--finetune_epochs', type=int, default=50,
                        help='微调轮数')
-    parser.add_argument('--learning_rate', type=float, default=0.01,
+    parser.add_argument('--learning_rate', type=float, default=0.001,
                        help='学习率（默认使用args.py中的lr）')
     parser.add_argument('--batch_size', type=int, default=None,
                        help='批次大小（默认使用args.py中的batch_size）')
-    parser.add_argument('--optimizer', type=str, default=None, choices=['sgd', 'adam'],
+    parser.add_argument('--optimizer', type=str, default='sgd', choices=['sgd', 'adam'],
                        help='优化器类型（默认使用args.py中的optim）')
     
     # 解析命令行参数
@@ -782,11 +797,16 @@ def main():
     
     print(f"测试损失: {avg_test_loss:.4f} | AUC: {mean_auc:.4f} | 准确率: {accuracy:.2%}")
     
-    # ==================== 水印检测容忍度设置 ====================
-    PERF_FAIL_RATIO = 0.05
-    # =========================================================
+    # 根据数据集类型显示指标重要性
+    if dataset_type == 'chestmnist':
+        print(f"📊 ChestMNIST多标签任务 - AUC为主要指标，准确率为参考指标")
+    else:
+        print(f"📊 {dataset_type.upper()}多分类任务 - 准确率为主要指标，AUC为参考指标")
     
-    # 固定阈值τ已在上面预计算，这里直接使用
+    # ==================== 水印检测容忍度设置 ====================
+    PERF_FAIL_RATIO = 0.3
+    # =========================================================
+    print(f"水印检测容忍度设置: {PERF_FAIL_RATIO}")
     
     # 进行ΔPCC评估
     delta_pcc_result_0 = evaluate_delta_pcc(
@@ -834,20 +854,39 @@ def main():
     print("\n" + "=" * 80)
     print("微调攻击实验总结")
     print("=" * 80)
-    print(f"{'轮次':<4} {'训练损失':<10} {'测试损失':<10} {'测试AUC':<8} {'测试准确率%':<10} {'ΔPCC':<8} {'侵权判断':<8}")
-    print("-" * 80)
-
-    for result in results:
-        delta_pcc_str = f"{result['delta_pcc']:.4f}" if result['delta_pcc'] is not None else "N/A"
-        infringement_str = "是" if result['is_infringement'] else "否" if result['is_infringement'] is not None else "N/A"
+    
+    # 根据数据集类型调整显示格式
+    if dataset_type == 'chestmnist':
+        print(f"{'轮次':<4} {'训练损失':<10} {'测试损失':<10} {'测试AUC':<10} {'测试准确率%':<8} {'ΔPCC':<8} {'侵权判断':<8}")
+        print("-" * 80)
         
-        print(f"{result['epoch']:>3}  "
-              f"{result['train_loss']:>8.4f}  "
-              f"{result['test_loss']:>8.4f}  "
-              f"{result['test_auc']:>6.4f}  "
-              f"{result['test_accuracy']:>8.2%}  "
-              f"{delta_pcc_str:>6}  "
-              f"{infringement_str:>6}")
+        for result in results:
+            delta_pcc_str = f"{result['delta_pcc']:.4f}" if result['delta_pcc'] is not None else "N/A"
+            infringement_str = "是" if result['is_infringement'] else "否" if result['is_infringement'] is not None else "N/A"
+            
+            print(f"{result['epoch']:>3}  "
+                  f"{result['train_loss']:>8.4f}  "
+                  f"{result['test_loss']:>8.4f}  "
+                  f"{result['test_auc']:>8.4f}  "  # AUC更宽显示
+                  f"{result['test_accuracy']:>6.2%}  "  # 准确率稍窄
+                  f"{delta_pcc_str:>6}  "
+                  f"{infringement_str:>6}")
+    else:
+        # CIFAR10等多分类任务
+        print(f"{'轮次':<4} {'训练损失':<10} {'测试损失':<10} {'测试AUC':<8} {'测试准确率%':<10} {'ΔPCC':<8} {'侵权判断':<8}")
+        print("-" * 80)
+        
+        for result in results:
+            delta_pcc_str = f"{result['delta_pcc']:.4f}" if result['delta_pcc'] is not None else "N/A"
+            infringement_str = "是" if result['is_infringement'] else "否" if result['is_infringement'] is not None else "N/A"
+            
+            print(f"{result['epoch']:>3}  "
+                  f"{result['train_loss']:>8.4f}  "
+                  f"{result['test_loss']:>8.4f}  "
+                  f"{result['test_auc']:>6.4f}  "
+                  f"{result['test_accuracy']:>8.2%}  "  # 准确率更宽显示
+                  f"{delta_pcc_str:>6}  "
+                  f"{infringement_str:>6}")
 
     # 分析趋势
     print("\n趋势分析:")
@@ -860,8 +899,12 @@ def main():
         final_acc = results[-1]['test_accuracy']
         acc_change = final_acc - initial_acc
 
-        print(f"测试AUC变化: {initial_auc:.4f} → {final_auc:.4f} (变化: {auc_change:+.4f})")
-        print(f"测试准确率变化: {initial_acc:.2%} → {final_acc:.2%} (变化: {acc_change:+.2%})")
+        if dataset_type == 'chestmnist':
+            print(f"测试AUC变化: {initial_auc:.4f} → {final_auc:.4f} (变化: {auc_change:+.4f}) [主要指标]")
+            print(f"测试准确率变化: {initial_acc:.2%} → {final_acc:.2%} (变化: {acc_change:+.2%}) [参考指标]")
+        else:
+            print(f"测试AUC变化: {initial_auc:.4f} → {final_auc:.4f} (变化: {auc_change:+.4f}) [参考指标]")
+            print(f"测试准确率变化: {initial_acc:.2%} → {final_acc:.2%} (变化: {acc_change:+.2%}) [主要指标]")
         
         # 分析ΔPCC趋势
         delta_pcc_values = [r['delta_pcc'] for r in results if r['delta_pcc'] is not None]

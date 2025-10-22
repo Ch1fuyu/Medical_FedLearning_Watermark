@@ -31,6 +31,15 @@ def test_autoencoder_mse(autoencoder, test_loader, device: str = 'cuda'):
     with torch.no_grad():
         for data, _ in test_loader:
             data = data.to(device)
+            
+            # 检查自编码器期望的输入通道数
+            if autoencoder.input_channels == 1 and data.size(1) == 3:
+                # 自编码器期望单通道，但数据是3通道，转换为灰度图
+                data = torch.mean(data, dim=1, keepdim=True)
+            elif autoencoder.input_channels == 3 and data.size(1) == 1:
+                # 自编码器期望3通道，但数据是单通道，复制为3通道
+                data = data.repeat(1, 3, 1, 1)
+            
             reconstructed = autoencoder(data)
             mse = nn.functional.mse_loss(reconstructed, data)
             total_mse += mse.item() * data.size(0)
