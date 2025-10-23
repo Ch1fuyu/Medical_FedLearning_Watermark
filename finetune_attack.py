@@ -617,7 +617,7 @@ def evaluate_watermark_integrity(model_state_dict, reconstructor):
 
 
 
-def save_results(results, model_info=None, save_dir: str = './save/finetune_attack'):
+def save_results(results, model_info=None, save_dir: str = './save/finetune_attack', args=None):
     """
     保存实验结果
 
@@ -625,6 +625,7 @@ def save_results(results, model_info=None, save_dir: str = './save/finetune_atta
         results: 实验结果
         model_info: 模型信息字典，包含dataset和model_name
         save_dir: 保存目录
+        args: 命令行参数，包含model_path等信息
     """
     os.makedirs(save_dir, exist_ok=True)
 
@@ -676,6 +677,11 @@ def save_results(results, model_info=None, save_dir: str = './save/finetune_atta
     # 在CSV文件最后一行添加PKL文件名信息
     pkl_filename = os.path.basename(results_file)
     df.loc[len(df)] = ['PKL_FILE'] + [''] * (len(df.columns) - 2) + [pkl_filename]
+    
+    # 在CSV文件最后一行添加被测模型文件名信息
+    if args and hasattr(args, 'model_path'):
+        model_filename = os.path.basename(args.model_path)
+        df.loc[len(df)] = ['MODEL_FILE'] + [''] * (len(df.columns) - 2) + [model_filename]
     
     df.to_csv(csv_file, index=False, encoding='utf-8-sig')
 
@@ -894,7 +900,7 @@ def main():
     # 保存结果
     print("\n" + "=" * 80)
     print("保存实验结果...")
-    save_results(results, model_info)
+    save_results(results, model_info, args=args)
 
     # 输出总结
     print("\n" + "=" * 80)
