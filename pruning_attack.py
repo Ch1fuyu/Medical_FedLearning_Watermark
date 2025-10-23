@@ -13,6 +13,66 @@ from utils.watermark_reconstruction import WatermarkReconstructor
 from utils.delta_pcc_utils import evaluate_delta_pcc, calculate_fixed_tau, format_delta_pcc_result, print_delta_pcc_summary
 
 
+def extract_model_info_from_path(model_path):
+    """
+    从模型路径中提取数据集、模型名、模型类型和客户端数量信息
+    
+    Args:
+        model_path: 模型文件路径
+        
+    Returns:
+        dict: 包含dataset、model_name、model_type和client_num的字典
+    """
+    try:
+        # 标准化路径分隔符
+        normalized_path = model_path.replace('\\', '/')
+        
+        # 分割路径
+        path_parts = normalized_path.split('/')
+        
+        # 查找数据集、模型名、模型类型和客户端数量
+        dataset = 'unknown'
+        model_name = 'unknown'
+        model_type = 'resnet'  # 默认值
+        client_num = 10  # 默认值
+        
+        # 从路径中提取信息
+        for i, part in enumerate(path_parts):
+            if part in ['cifar10', 'cifar100', 'chestmnist']:
+                dataset = part
+            elif part in ['resnet', 'cnn', 'vgg', 'densenet']:
+                model_name = part
+                model_type = part
+            elif part == 'resnet18':
+                model_name = 'resnet'
+                model_type = 'resnet'
+            elif part == 'cnn_simple':
+                model_name = 'cnn'
+                model_type = 'cnn'
+            elif part.startswith('client') and part[6:].isdigit():
+                # 提取客户端数量，如 client10 -> 10
+                client_num = int(part[6:])
+        
+        # 如果从路径中无法确定模型类型，使用模型名
+        if model_type == 'resnet' and model_name != 'unknown':
+            model_type = model_name
+        
+        return {
+            'dataset': dataset,
+            'model_name': model_name,
+            'model_type': model_type,
+            'client_num': client_num
+        }
+    except Exception as e:
+        print(f"警告：无法从路径 {model_path} 中提取模型信息: {e}")
+        return {
+            'dataset': 'unknown',
+            'model_name': 'unknown',
+            'model_type': 'resnet',
+            'client_num': 10
+        }
+
+
 def load_test_data(dataset_name: str, batch_size: int = 128, data_dir: str = './data'):
     """
     根据数据集名称加载相应的测试数据
@@ -475,13 +535,22 @@ def main():
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='剪枝攻击实验')
     parser.add_argument('--model_path', type=str, 
-                       default='./save/resnet/cifar10/202510221620_Dp_0.1_iid_True_lt_sign_ep_150_le_2_cn_10_fra_1.0000_acc_0.9298_enhanced.pkl',
+                       default='./save/resnet/cifar10/202510231542_Dp_0.1_iid_True_lt_sign_ep_150_le_2_cn_5_fra_1.0000_acc_0.9319_enhanced.pkl',
                        help='模型文件路径')
     parser.add_argument('--key_matrix_dir', type=str, default='./save/key_matrix',
-                       help='密钥矩阵目录')
+                       help='密钥矩阵基础目录')
     parser.add_argument('--autoencoder_dir', type=str, default='./save/autoencoder',
                        help='自编码器目录')
     args = parser.parse_args()
+    
+    # 从模型路径中提取模型类型和客户端数量
+    model_info = extract_model_info_from_path(args.model_path)
+    model_type = model_info.get('model_type', 'resnet')
+    client_num = model_info.get('client_num', 10)
+    
+    # 生成密钥矩阵路径
+    from utils.key_matrix_utils import get_key_matrix_path
+    args.key_matrix_path = get_key_matrix_path(args.key_matrix_dir, model_type, client_num)
     
     # 设置设备
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -489,7 +558,7 @@ def main():
     model_path = args.model_path
     
     # 密钥矩阵目录
-    key_matrix_dir = args.key_matrix_dir
+    key_matrix_dir = args.key_matrix_path
     autoencoder_dir = args.autoencoder_dir
     
     # 加载主任务模型

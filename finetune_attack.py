@@ -74,13 +74,13 @@ def calculate_metrics(all_predictions, all_targets, dataset_type):
 
 def extract_model_info_from_path(model_path):
     """
-    从模型路径中提取数据集和模型名信息
+    从模型路径中提取数据集、模型名、模型类型和客户端数量信息
     
     Args:
         model_path: 模型文件路径
         
     Returns:
-        dict: 包含dataset和model_name的字典
+        dict: 包含dataset、model_name、model_type和client_num的字典
     """
     try:
         # 标准化路径分隔符
@@ -89,9 +89,11 @@ def extract_model_info_from_path(model_path):
         # 分割路径
         path_parts = normalized_path.split('/')
         
-        # 查找数据集和模型名
+        # 查找数据集、模型名、模型类型和客户端数量
         dataset = 'unknown'
         model_name = 'unknown'
+        model_type = 'resnet'  # 默认值
+        client_num = 10  # 默认值
         
         # 从路径中提取信息
         for i, part in enumerate(path_parts):
@@ -99,21 +101,35 @@ def extract_model_info_from_path(model_path):
                 dataset = part
             elif part in ['resnet', 'cnn', 'vgg', 'densenet']:
                 model_name = part
+                model_type = part
             elif part == 'resnet18':
                 model_name = 'resnet'
+                model_type = 'resnet'
             elif part == 'cnn_simple':
                 model_name = 'cnn'
+                model_type = 'cnn'
+            elif part.startswith('client') and part[6:].isdigit():
+                # 提取客户端数量，如 client10 -> 10
+                client_num = int(part[6:])
+        
+        # 如果从路径中无法确定模型类型，使用模型名
+        if model_type == 'resnet' and model_name != 'unknown':
+            model_type = model_name
         
         return {
             'dataset': dataset,
-            'model_name': model_name
+            'model_name': model_name,
+            'model_type': model_type,
+            'client_num': client_num
         }
         
     except Exception as e:
         print(f"警告: 无法从路径中提取模型信息: {e}")
         return {
             'dataset': 'unknown',
-            'model_name': 'unknown'
+            'model_name': 'unknown',
+            'model_type': 'resnet',
+            'client_num': 10
         }
 
 
@@ -679,7 +695,7 @@ def main():
     # 解析微调攻击特定的命令行参数
     parser = argparse.ArgumentParser(description='微调攻击实验')
     parser.add_argument('--model_path', type=str, 
-                       default='./save/resnet/cifar100/202510222202_Dp_0.1_iid_True_lt_sign_ep_150_le_2_cn_10_fra_1.0000_acc_0.7213_enhanced.pkl',
+                       default='./save/resnet/cifar10/202510231542_Dp_0.1_iid_True_lt_sign_ep_150_le_2_cn_5_fra_1.0000_acc_0.9319_enhanced.pkl',
                        help='模型文件路径')
     parser.add_argument('--finetune_epochs', type=int, default=50,
                        help='微调轮数')
@@ -700,7 +716,7 @@ def main():
     args.learning_rate = cmd_args.learning_rate if cmd_args.learning_rate is not None else base_args.lr
     args.batch_size = cmd_args.batch_size if cmd_args.batch_size is not None else base_args.batch_size
     args.optimizer = cmd_args.optimizer if cmd_args.optimizer is not None else base_args.optim
-    args.key_matrix_dir = base_args.key_matrix_dir
+    args.key_matrix_dir = base_args.key_matrix_path
     args.autoencoder_dir = os.path.dirname(base_args.encoder_path)  # 从encoder_path推导autoencoder目录
     args.data_root = base_args.data_root
     args.enable_watermark_scaling = base_args.enable_watermark_scaling

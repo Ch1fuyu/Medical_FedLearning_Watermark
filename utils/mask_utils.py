@@ -183,21 +183,27 @@ class MaskManager:
             'encoder_ratio': encoder_count / target_count if target_count > 0 else 0
         }
 
-def create_mask_manager(model, key_matrix_dir: str, args=None) -> MaskManager:
+def create_mask_manager(model, key_matrix_path: str, args=None) -> MaskManager:
     """
     便捷函数：创建掩码管理器
     
     Args:
         model: 目标模型
-        key_matrix_dir: 密钥矩阵目录
+        key_matrix_path: 密钥矩阵路径
         args: 参数对象，包含水印缩放相关配置
         
     Returns:
         MaskManager实例
+        
+    Raises:
+        SystemExit: 当密钥矩阵管理器创建失败时，程序将退出
     """
     try:
-        key_manager = KeyMatrixManager(key_matrix_dir, args)
+        key_manager = KeyMatrixManager(key_matrix_path, args)
         return MaskManager(model, key_manager)
     except Exception as e:
-        print(f"创建密钥矩阵管理器失败: {e}")
-        return MaskManager(model, None)
+        print(f"❌ 创建密钥矩阵管理器失败: {e}")
+        print(f"   密钥矩阵路径: {key_matrix_path}")
+        print("   程序将退出，请检查密钥矩阵文件是否存在且格式正确")
+        import sys
+        sys.exit(1)

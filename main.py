@@ -46,7 +46,7 @@ class FederatedLearningOnChestMNIST(Experiment):
         self.args = args
         self.dp = args.dp
         self.sigma = args.sigma
-        self.key_matrix_dir = getattr(args, 'key_matrix_dir', './save/key_matrix')
+        self.key_matrix_dir = getattr(args, 'key_matrix_path', './save/key_matrix')
         
         logging.info('--------------------------------Start--------------------------------------')
         logging.info(args)

@@ -8,7 +8,7 @@ def parser_args():
     parser.add_argument('--gpu', default='0', type=str, help='GPU device ID')
     
     # ========================= 数据集和模型参数 ========================
-    parser.add_argument('--dataset', type=str, default='cifar100', choices=['chestmnist', 'cifar10', 'cifar100'], help="name of dataset")
+    parser.add_argument('--dataset', type=str, default='cifar10', choices=['chestmnist', 'cifar10', 'cifar100'], help="name of dataset")
     parser.add_argument('--model_name', type=str, default='resnet', choices=['alexnet', 'resnet'],
                         help='model architecture name')
     # 便捷别名：--model 等价于 --model_name
@@ -23,7 +23,7 @@ def parser_args():
     parser.add_argument('--epochs', type=int, default=150, help='total communication rounds')
     parser.add_argument('--local_ep', type=int, default=2, help="local epochs per client: E")
     parser.add_argument('--batch_size', type=int, default=128, help="local batch size: B")
-    parser.add_argument('--client_num', type=int, default=10, help="number of clients: K")
+    parser.add_argument('--client_num', type=int, default=5, help="number of clients: K")
     parser.add_argument('--frac', type=float, default=1, help="fraction of participating clients: C")
     parser.add_argument('--iid', action='store_true', default=True, help='IID data distribution')
     
@@ -75,6 +75,23 @@ def parser_args():
                         help='dataset root directory for downloads and cache')
     
     args = parser.parse_args()
+
+    # ========================= 自动密钥矩阵路径生成 ========================
+    # 根据模型类型和客户端数量自动生成密钥矩阵路径
+    from .key_matrix_utils import get_key_matrix_path
+    import os
+    
+    # 生成密钥矩阵路径
+    args.key_matrix_path = get_key_matrix_path(args.key_matrix_dir, args.model_name, args.client_num)
+    
+    # 检查密钥矩阵是否存在
+    if not os.path.exists(args.key_matrix_path):
+        print(f"⚠️  警告: 密钥矩阵目录不存在: {args.key_matrix_path}")
+        print(f"   请先运行: python train_key_matrix.py --model_type {args.model_name} --client_num {args.client_num}")
+        # 使用基础目录作为回退
+        args.key_matrix_path = args.key_matrix_dir
+    else:
+        print(f"✅ 找到密钥矩阵目录: {args.key_matrix_path}")
 
     # ========================= 预设注册表与自动推导 ========================
     DATASET_PRESETS: Dict[str, Dict[str, Any]] = {

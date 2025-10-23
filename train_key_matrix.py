@@ -165,21 +165,24 @@ class KeyMatrixGenerator:
         
         return key_matrix
     
-    def save_key_matrices(self, key_matrices, position_dict, save_dir):
+    def save_key_matrices(self, key_matrices, position_dict, save_dir, model_type, client_num):
         """保存密钥矩阵到文件"""
-        os.makedirs(save_dir, exist_ok=True)
+        # 创建新的目录结构: save_dir/model_type/client{client_num}/
+        model_dir = os.path.join(save_dir, model_type)
+        client_dir = os.path.join(model_dir, f'client{client_num}')
+        os.makedirs(client_dir, exist_ok=True)
         
         # 保存每个客户端的密钥矩阵
         for client_id, key_matrix in key_matrices.items():
-            client_dir = os.path.join(save_dir, f'client_{client_id}')
-            os.makedirs(client_dir, exist_ok=True)
+            client_subdir = os.path.join(client_dir, f'client_{client_id}')
+            os.makedirs(client_subdir, exist_ok=True)
             
             # 保存密钥矩阵
-            key_matrix_path = os.path.join(client_dir, 'key_matrix.pth')
+            key_matrix_path = os.path.join(client_subdir, 'key_matrix.pth')
             torch.save(key_matrix, key_matrix_path)
             
             # 保存位置信息
-            position_path = os.path.join(client_dir, 'positions.json')
+            position_path = os.path.join(client_subdir, 'positions.json')
             with open(position_path, 'w') as f:
                 json.dump(position_dict[client_id], f, indent=2)
         
@@ -195,11 +198,11 @@ class KeyMatrixGenerator:
             'seed': self.seed
         }
         
-        info_path = os.path.join(save_dir, 'key_matrix_info.json')
+        info_path = os.path.join(client_dir, 'key_matrix_info.json')
         with open(info_path, 'w') as f:
             json.dump(info, f, indent=2)
         
-        print(f"密钥矩阵已保存到: {save_dir}")
+        print(f"密钥矩阵已保存到: {client_dir}")
         return info_path
 
 def load_key_matrix(save_dir, client_id):
@@ -226,7 +229,7 @@ def main():
     parser = argparse.ArgumentParser(description='生成联邦学习密钥矩阵')
     parser.add_argument('--model_type', type=str, default='resnet', 
                        choices=['resnet', 'alexnet'], help='主任务模型类型')
-    parser.add_argument('--client_num', type=int, default=10, help='客户端数量')
+    parser.add_argument('--client_num', type=int, default=5, help='客户端数量')
     parser.add_argument('--watermark_strategy', type=str, default='equal',
                        choices=['equal', 'proportional'], help='水印分配策略')
     parser.add_argument('--save_dir', type=str, default='./save/key_matrix', 
@@ -296,7 +299,7 @@ def main():
     key_matrices, position_dict = generator.generate_key_matrices()
     
     # 保存密钥矩阵
-    info_path = generator.save_key_matrices(key_matrices, position_dict, args.save_dir)
+    info_path = generator.save_key_matrices(key_matrices, position_dict, args.save_dir, args.model_type, args.client_num)
     
     # 显示统计信息
     print("\n=== 密钥矩阵生成完成 ===")

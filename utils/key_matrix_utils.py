@@ -4,6 +4,37 @@ import os
 from typing import Dict, List, Tuple, Optional
 from .watermark_scaling import WatermarkScaling
 
+def get_key_matrix_path(base_dir: str, model_type: str, client_num: int) -> str:
+    """
+    根据模型类型和客户端数量生成密钥矩阵路径
+    
+    Args:
+        base_dir: 基础目录
+        model_type: 模型类型 (resnet, alexnet)
+        client_num: 客户端数量
+        
+    Returns:
+        密钥矩阵目录路径
+    """
+    return os.path.join(base_dir, model_type, f'client{client_num}')
+
+def find_key_matrix_path(base_dir: str, model_type: str, client_num: int) -> Optional[str]:
+    """
+    查找密钥矩阵路径，如果不存在则返回None
+    
+    Args:
+        base_dir: 基础目录
+        model_type: 模型类型 (resnet, alexnet)
+        client_num: 客户端数量
+        
+    Returns:
+        密钥矩阵目录路径，如果不存在则返回None
+    """
+    key_matrix_path = get_key_matrix_path(base_dir, model_type, client_num)
+    if os.path.exists(key_matrix_path):
+        return key_matrix_path
+    return None
+
 class KeyMatrixManager:
     """密钥矩阵管理器，用于加载和管理密钥矩阵（支持实例缓存）"""
     

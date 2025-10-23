@@ -145,15 +145,12 @@ class TrainerPrivateEnhanced:
         
         # 初始化掩码管理器
         if args and getattr(args, 'use_key_matrix', False):
-            try:
-                from utils.mask_utils import create_mask_manager
-                self.mask_manager = create_mask_manager(model, args.key_matrix_dir, args)
-                # 初始化时更新所有客户端的编码器掩码
-                if self.mask_manager:
-                    self.mask_manager.update_encoder_mask()  # 不传client_id，更新所有客户端
-            except Exception as e:
-                print(f"初始化掩码管理器失败: {e}")
-                self.mask_manager = None
+            from utils.mask_utils import create_mask_manager
+            # create_mask_manager 在失败时会直接退出程序
+            self.mask_manager = create_mask_manager(model, args.key_matrix_path, args)
+            # 初始化时更新所有客户端的编码器掩码
+            if self.mask_manager:
+                self.mask_manager.update_encoder_mask()  # 不传client_id，更新所有客户端
         
         # 初始化自编码器（如果使用增强水印模式）
         if args and getattr(args, 'watermark_mode', '') == 'enhanced':
@@ -289,7 +286,7 @@ class TrainerPrivateEnhanced:
             if self._key_manager is None:
                 try:
                     self._key_manager = KeyMatrixManager(
-                        self.args.key_matrix_dir,
+                        self.args.key_matrix_path,
                         args=self.args
                     )
                 except Exception as e:

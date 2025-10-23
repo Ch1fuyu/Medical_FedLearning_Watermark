@@ -229,7 +229,7 @@ class TrainerPrivate(object):
                     try:
                         # 初始化KeyMatrixManager，支持水印缩放
                         self._key_manager = KeyMatrixManager(
-                            self.args.key_matrix_dir,
+                            self.args.key_matrix_path,
                             args=self.args
                         )
                     except Exception as e:

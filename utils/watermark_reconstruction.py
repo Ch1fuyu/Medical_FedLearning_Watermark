@@ -818,7 +818,7 @@ def test_watermark_reconstruction():
     print("测试水印重建功能...")
     
     # 检查必要的文件
-    key_matrix_dir = './save/key_matrix'
+    key_matrix_dir = './save/key_matrix/resnet/client10'  # 默认路径
     autoencoder_weights_dir = './save/autoencoder'
     
     if not os.path.exists(key_matrix_dir):
@@ -894,7 +894,7 @@ def test_deltapcc_batch_evaluation():
     print("\n测试ΔPCC批量评估功能...")
     
     # 检查必要的文件
-    key_matrix_dir = './save/key_matrix'
+    key_matrix_dir = './save/key_matrix/resnet/client10'  # 默认路径
     autoencoder_weights_dir = './save/autoencoder'
     
     if not os.path.exists(key_matrix_dir):
