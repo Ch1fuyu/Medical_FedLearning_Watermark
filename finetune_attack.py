@@ -16,7 +16,6 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-from tqdm import tqdm
 
 # Windows多进程兼容性处理
 if sys.platform.startswith('win'):
@@ -27,6 +26,50 @@ from models.resnet import resnet18
 from utils.dataset import LocalChestMNISTDataset
 from utils.watermark_reconstruction import WatermarkReconstructor
 from utils.delta_pcc_utils import evaluate_delta_pcc, calculate_fixed_tau, format_delta_pcc_result, print_delta_pcc_summary
+
+
+def calculate_metrics(all_predictions, all_targets, dataset_type):
+    """
+    统一计算模型评估指标（准确率和AUC）
+    
+    Args:
+        all_predictions: 模型预测结果
+        all_targets: 真实标签
+        dataset_type: 数据集类型
+        
+    Returns:
+        tuple: (accuracy, mean_auc)
+    """
+    if dataset_type == 'chestmnist':
+        # 多标签二分类任务
+        try:
+            from sklearn.metrics import roc_auc_score
+            auc_scores = [
+                roc_auc_score(all_targets[:, i], all_predictions[:, i])
+                for i in range(all_targets.shape[1])
+                if len(np.unique(all_targets[:, i])) > 1
+            ]
+            mean_auc = np.mean(auc_scores) if auc_scores else 0.0
+        except ImportError:
+            mean_auc = 0.0
+        
+        # 计算准确率（多标签）
+        pred_binary = (all_predictions > 0.5).astype(int)
+        accuracy = np.mean((pred_binary == all_targets).astype(float))
+    else:
+        # 多分类任务
+        try:
+            from sklearn.metrics import roc_auc_score
+            # 使用one-vs-rest策略计算多分类AUC
+            mean_auc = roc_auc_score(all_targets, all_predictions, multi_class='ovr', average='macro')
+        except ImportError:
+            mean_auc = 0.0
+        
+        # 计算准确率（多分类）
+        pred_classes = np.argmax(all_predictions, axis=1)
+        accuracy = np.mean((pred_classes == all_targets).astype(float))
+    
+    return accuracy, mean_auc
 
 
 def extract_model_info_from_path(model_path):
@@ -52,7 +95,7 @@ def extract_model_info_from_path(model_path):
         
         # 从路径中提取信息
         for i, part in enumerate(path_parts):
-            if part in ['cifar10', 'mnist', 'chestmnist']:
+            if part in ['cifar10', 'cifar100', 'chestmnist']:
                 dataset = part
             elif part in ['resnet', 'cnn', 'vgg', 'densenet']:
                 model_name = part
@@ -178,39 +221,59 @@ def load_chestmnist_data(data_root: str = './data'):
     return train_set, test_set
 
 
-def load_cifar10_data(batch_size: int = 128, data_root: str = './data'):
+def load_cifar_data(dataset_name: str, batch_size: int = 128, data_root: str = './data'):
     """
-    加载CIFAR-10数据集用于微调训练
+    加载CIFAR数据集用于微调训练（统一处理CIFAR-10和CIFAR-100）
 
     Args:
+        dataset_name: 数据集名称 ('cifar10' 或 'cifar100')
         batch_size: 批次大小
         data_root: 数据根目录
 
     Returns:
         训练和测试数据加载器
     """
-    # CIFAR-10数据预处理
+    # 数据集配置
+    dataset_configs = {
+        'cifar10': {
+            'dataset_class': datasets.CIFAR10,
+            'mean': [0.4914, 0.4822, 0.4465],
+            'std': [0.2470, 0.2435, 0.2616]
+        },
+        'cifar100': {
+            'dataset_class': datasets.CIFAR100,
+            'mean': [0.5071, 0.4867, 0.4408],
+            'std': [0.2675, 0.2565, 0.2761]
+        }
+    }
+    
+    if dataset_name not in dataset_configs:
+        raise ValueError(f"不支持的数据集: {dataset_name}")
+    
+    config = dataset_configs[dataset_name]
+    
+    # 数据预处理
     transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616])
+        transforms.Normalize(mean=config['mean'], std=config['std'])
     ])
     
     transform_test = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616])
+        transforms.Normalize(mean=config['mean'], std=config['std'])
     ])
 
-    # 加载CIFAR-10数据集
-    train_dataset = datasets.CIFAR10(
+    # 加载数据集
+    train_dataset = config['dataset_class'](
         root=data_root,
         train=True,
         download=True,
         transform=transform_train
     )
     
-    test_dataset = datasets.CIFAR10(
+    test_dataset = config['dataset_class'](
         root=data_root,
         train=False,
         download=True,
@@ -221,8 +284,18 @@ def load_cifar10_data(batch_size: int = 128, data_root: str = './data'):
     train_loader = create_safe_dataloader(train_dataset, batch_size=batch_size, shuffle=True)
     test_loader = create_safe_dataloader(test_dataset, batch_size=batch_size*2, shuffle=False)
 
-    print(f"✓ 已加载CIFAR-10数据集: 训练集 {len(train_dataset)} 个样本, 测试集 {len(test_dataset)} 个样本")
+    print(f"✓ 已加载{dataset_name.upper()}数据集: 训练集 {len(train_dataset)} 个样本, 测试集 {len(test_dataset)} 个样本")
     return train_loader, test_loader
+
+
+def load_cifar10_data(batch_size: int = 128, data_root: str = './data'):
+    """加载CIFAR-10数据集（向后兼容）"""
+    return load_cifar_data('cifar10', batch_size, data_root)
+
+
+def load_cifar100_data(batch_size: int = 128, data_root: str = './data'):
+    """加载CIFAR-100数据集（向后兼容）"""
+    return load_cifar_data('cifar100', batch_size, data_root)
 
 
 def load_main_task_model(model_path: str, device: str = 'cuda'):
@@ -248,9 +321,18 @@ def load_main_task_model(model_path: str, device: str = 'cuda'):
     arguments = checkpoint.get('arguments', {})
     
     # 优先从arguments获取，否则使用默认值
-    num_classes = arguments.get('num_classes', 14)
-    in_channels = arguments.get('in_channels', 3)
     dataset = arguments.get('dataset', 'chestmnist')
+    in_channels = arguments.get('in_channels', 3)
+    
+    # 根据数据集设置默认类别数
+    if dataset.lower() == 'cifar10':
+        num_classes = arguments.get('num_classes', 10)
+    elif dataset.lower() == 'cifar100':
+        num_classes = arguments.get('num_classes', 100)
+    elif dataset.lower() == 'chestmnist':
+        num_classes = arguments.get('num_classes', 14)
+    else:
+        num_classes = arguments.get('num_classes', 14)
     
     # 根据数据集设置input_size
     if dataset.lower() == 'cifar10' or dataset.lower() == 'cifar100':
@@ -305,7 +387,7 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
     # 根据数据集类型选择合适的损失函数
     if dataset_type == 'chestmnist':
         criterion = nn.BCEWithLogitsLoss()
-    else:  # cifar10, mnist等多分类任务
+    else:  # cifar10 等多分类任务
         criterion = nn.CrossEntropyLoss()
     
     # 确保step_size至少为1，避免除零错误
@@ -367,34 +449,7 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
         all_targets = np.concatenate(all_targets, axis=0)
 
         # 计算AUC和准确率（根据数据集类型）
-        if dataset_type == 'chestmnist':
-            # 多标签二分类任务
-            try:
-                from sklearn.metrics import roc_auc_score
-                auc_scores = [
-                    roc_auc_score(all_targets[:, i], all_predictions[:, i])
-                    for i in range(all_targets.shape[1])
-                    if len(np.unique(all_targets[:, i])) > 1
-                ]
-                mean_auc = np.mean(auc_scores) if auc_scores else 0.0
-            except ImportError:
-                mean_auc = 0.0
-            
-            # 计算准确率（多标签）
-            pred_binary = (all_predictions > 0.5).astype(int)
-            accuracy = np.mean((pred_binary == all_targets).astype(float))
-        else:
-            # 多分类任务
-            try:
-                from sklearn.metrics import roc_auc_score
-                # 使用one-vs-rest策略计算多分类AUC
-                mean_auc = roc_auc_score(all_targets, all_predictions, multi_class='ovr', average='macro')
-            except ImportError:
-                mean_auc = 0.0
-            
-            # 计算准确率（多分类）
-            pred_classes = np.argmax(all_predictions, axis=1)
-            accuracy = np.mean((pred_classes == all_targets).astype(float))
+        accuracy, mean_auc = calculate_metrics(all_predictions, all_targets, dataset_type)
 
         # 打印基本指标（每轮都显示）
         print(f"\n=== 第 {epoch+1} 轮评估 ===")
@@ -624,7 +679,7 @@ def main():
     # 解析微调攻击特定的命令行参数
     parser = argparse.ArgumentParser(description='微调攻击实验')
     parser.add_argument('--model_path', type=str, 
-                       default='./save/resnet/cifar10/202510221620_Dp_0.1_iid_True_lt_sign_ep_150_le_2_cn_10_fra_1.0000_acc_0.9298_enhanced.pkl',
+                       default='./save/resnet/cifar100/202510222202_Dp_0.1_iid_True_lt_sign_ep_150_le_2_cn_10_fra_1.0000_acc_0.7213_enhanced.pkl',
                        help='模型文件路径')
     parser.add_argument('--finetune_epochs', type=int, default=50,
                        help='微调轮数')
@@ -688,8 +743,10 @@ def main():
     dataset_type = dataset  # 用于损失函数选择
     
     # 根据数据集类型加载相应的数据
-    if dataset == 'cifar10':
-        train_loader, test_loader = load_cifar10_data(batch_size=batch_size, data_root=args.data_root)
+    if dataset in ['cifar10', 'cifar100']:
+        if dataset == 'cifar100':
+            print("使用CIFAR-100数据集进行微调攻击实验")
+        train_loader, test_loader = load_cifar_data(dataset, batch_size=batch_size, data_root=args.data_root)
         mnist_test_loader = load_mnist_test_data(batch_size=128, data_dir=args.data_root)
     elif dataset == 'chestmnist':
         train_set, test_set = load_chestmnist_data(data_root=args.data_root)
@@ -743,7 +800,7 @@ def main():
     if dataset_type == 'chestmnist':
         criterion = nn.BCEWithLogitsLoss()
         activation_fn = torch.sigmoid
-    else:  # cifar10, mnist等多分类任务
+    else:  # cifar10, cifar100, mnist等多分类任务
         criterion = nn.CrossEntropyLoss()
         activation_fn = torch.softmax
     
@@ -766,34 +823,7 @@ def main():
     all_targets = np.concatenate(all_targets, axis=0)
 
     # 计算AUC和准确率（根据数据集类型）
-    if dataset_type == 'chestmnist':
-        # 多标签二分类任务
-        try:
-            from sklearn.metrics import roc_auc_score
-            auc_scores = [
-                roc_auc_score(all_targets[:, i], all_predictions[:, i])
-                for i in range(all_targets.shape[1])
-                if len(np.unique(all_targets[:, i])) > 1
-            ]
-            mean_auc = np.mean(auc_scores) if auc_scores else 0.0
-        except ImportError:
-            mean_auc = 0.0
-        
-        # 计算准确率（多标签）
-        pred_binary = (all_predictions > 0.5).astype(int)
-        accuracy = np.mean((pred_binary == all_targets).astype(float))
-    else:
-        # 多分类任务
-        try:
-            from sklearn.metrics import roc_auc_score
-            # 使用one-vs-rest策略计算多分类AUC
-            mean_auc = roc_auc_score(all_targets, all_predictions, multi_class='ovr', average='macro')
-        except ImportError:
-            mean_auc = 0.0
-        
-        # 计算准确率（多分类）
-        pred_classes = np.argmax(all_predictions, axis=1)
-        accuracy = np.mean((pred_classes == all_targets).astype(float))
+    accuracy, mean_auc = calculate_metrics(all_predictions, all_targets, dataset_type)
     
     print(f"测试损失: {avg_test_loss:.4f} | AUC: {mean_auc:.4f} | 准确率: {accuracy:.2%}")
     

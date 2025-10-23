@@ -109,6 +109,36 @@ class LocalCIFAR10Dataset(Dataset):
         return image, label
 
 
+class LocalCIFAR100Dataset(Dataset):
+    """本地CIFAR-100数据集类，用于联邦学习"""
+    def __init__(self, data_root, split='train', transform=None):
+        self.transform = transform
+        self.split = split
+        
+        # 使用torchvision加载CIFAR-100数据集
+        if split == 'train':
+            self.dataset = torchvision.datasets.CIFAR100(
+                root=data_root, train=True, download=True, transform=None
+            )
+        elif split == 'test':
+            self.dataset = torchvision.datasets.CIFAR100(
+                root=data_root, train=False, download=True, transform=None
+            )
+        else:
+            raise ValueError(f"Unsupported split: {split}")
+    
+    def __len__(self):
+        return len(self.dataset)
+    
+    def __getitem__(self, idx):
+        image, label = self.dataset[idx]
+
+        if self.transform:
+            image = self.transform(image)
+        
+        return image, label
+
+
 from config.globals import set_seed
 from models.light_autoencoder import LightAutoencoder
 from utils.sampling import *
@@ -185,6 +215,31 @@ def get_data(dataset_name, data_root, iid, client_num):
             dict_users = cifar10_iid(train_set, client_num)
         else:
             dict_users = cifar10_beta(train_set, 0.1, client_num)
+    elif dataset_name == 'cifar100':
+        # CIFAR-100参数
+        normalize = transforms.Normalize(mean=[0.5071, 0.4867, 0.4408], std=[0.2675, 0.2565, 0.2761])
+        num_classes = 100
+        
+        transform_train = transforms.Compose([
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomCrop(32, padding=4),
+            transforms.ToTensor(),
+            normalize,
+        ])
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            normalize,
+        ])
+
+        train_set = LocalCIFAR100Dataset(data_root, split='train', transform=transform_train)
+        test_set = LocalCIFAR100Dataset(data_root, split='test', transform=transform_test)
+        
+        print(f"CIFAR-100 dataset - Training set size: {len(train_set)}, Test set size: {len(test_set)}")
+        
+        if iid:
+            dict_users = cifar100_iid(train_set, client_num)
+        else:
+            dict_users = cifar100_beta(train_set, 0.1, client_num)
     else:
         raise ValueError(f"Unsupported dataset: {dataset_name}")
 
@@ -244,6 +299,29 @@ def get_data_no_fl(dataset_name, data_root, dataset_file=None):
         test_set = LocalCIFAR10Dataset(data_root, split='test', transform=transform_test)
         
         print(f"CIFAR-10 dataset - Training set size: {len(train_set)}, Test set size: {len(test_set)}")
+    elif dataset_name == 'cifar100':
+        print(f"Using CIFAR-100 dataset")
+        
+        # CIFAR-100参数
+        normalize = transforms.Normalize(mean=[0.5071, 0.4867, 0.4408], std=[0.2675, 0.2565, 0.2761])
+        num_classes = 100
+        print("Using CIFAR-100 multi-class classification setup (100 classes)")
+        
+        transform_train = transforms.Compose([
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomCrop(32, padding=4),
+            transforms.ToTensor(),
+            normalize,
+        ])
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            normalize,
+        ])
+
+        train_set = LocalCIFAR100Dataset(data_root, split='train', transform=transform_train)
+        test_set = LocalCIFAR100Dataset(data_root, split='test', transform=transform_test)
+        
+        print(f"CIFAR-100 dataset - Training set size: {len(train_set)}, Test set size: {len(test_set)}")
     else:
         raise ValueError(f"Unsupported dataset: {dataset_name}")
 

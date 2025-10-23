@@ -8,7 +8,7 @@ def parser_args():
     parser.add_argument('--gpu', default='0', type=str, help='GPU device ID')
     
     # ========================= 数据集和模型参数 ========================
-    parser.add_argument('--dataset', type=str, default='cifar10', choices=['chestmnist', 'cifar10'], help="name of dataset")
+    parser.add_argument('--dataset', type=str, default='cifar100', choices=['chestmnist', 'cifar10', 'cifar100'], help="name of dataset")
     parser.add_argument('--model_name', type=str, default='resnet', choices=['alexnet', 'resnet'],
                         help='model architecture name')
     # 便捷别名：--model 等价于 --model_name
