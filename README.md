@@ -1,105 +1,122 @@
 # Medical Federated Learning with Watermarking
 
-基于联邦学习的医学图像分类项目，支持水印技术保护模型知识产权。
+基于联邦学习的医学图像分类项目，集成水印技术保护模型知识产权，支持多种攻击实验。
 
-## 项目概述
+## 🚀 快速开始
 
-本项目实现了在医学图像数据集（ChestMNIST）上的联邦学习训练，并集成了基于密钥矩阵的水印技术，用于保护模型的知识产权。
-
-## 主要特性
-
-- **联邦学习**：支持多客户端分布式训练
-- **水印技术**：基于密钥矩阵的模型水印嵌入
-- **医学图像分类**：支持ChestMNIST多标签分类
-- **模型支持**：ResNet18、AlexNet等主流架构
-- **差分隐私**：可选的隐私保护机制
-
-## 快速开始
-
-### 1. 环境准备
-
+### 环境准备
 ```bash
-# 安装依赖
-pip install torch torchvision numpy matplotlib scikit-learn tqdm
+pip install torch torchvision numpy matplotlib scikit-learn tqdm pandas
 ```
 
-### 2. 生成自编码器水印
-
+### 1. 训练自编码器
 ```bash
 python train_autoencoder.py
 ```
 
-### 3. 生成密钥矩阵
-
+### 2. 生成密钥矩阵
 ```bash
 python train_key_matrix.py --model_type resnet --client_num 10 --dataset chestmnist
 ```
 
-### 4. 运行联邦学习训练
-
+### 3. 联邦学习训练
 ```bash
 python main.py --model resnet --dataset chestmnist --client_num 10 --epochs 100
 ```
 
-## 项目结构
+### 4. 攻击实验
+```bash
+# 微调攻击
+python finetune_attack.py --model_path ./save/resnet/chestmnist/model.pkl
+
+# 剪枝攻击  
+python pruning_attack.py --model_path ./save/resnet/chestmnist/model.pkl
+```
+
+## 📊 支持的数据集
+
+| 数据集 | 类型 | 类别数 | 任务 |
+|--------|------|--------|------|
+| ChestMNIST | 医学图像 | 14 | 多标签分类 |
+| CIFAR-10 | 自然图像 | 10 | 多分类 |
+| CIFAR-100 | 自然图像 | 100 | 多分类 |
+
+## 🏗️ 项目结构
 
 ```
-├── main.py                 # 主程序入口
+├── main.py                 # 联邦学习主程序
+├── finetune_attack.py     # 微调攻击实验
+├── pruning_attack.py      # 剪枝攻击实验
 ├── train_autoencoder.py   # 自编码器训练
 ├── train_key_matrix.py    # 密钥矩阵生成
 ├── models/                # 模型定义
-│   ├── resnet.py         # ResNet模型
-│   ├── alexnet.py        # AlexNet模型
-│   └── light_autoencoder.py  # 轻量自编码器
+│   ├── resnet.py         # ResNet18
+│   ├── alexnet.py        # AlexNet
+│   └── light_autoencoder.py
 ├── utils/                 # 工具模块
 │   ├── dataset.py        # 数据处理
 │   ├── trainer_private.py # 训练器
-│   └── key_matrix_utils.py # 密钥矩阵工具
-├── config/               # 配置文件
-└── save/                # 保存目录
-    ├── autoencoder/     # 自编码器权重
-    └── key_matrix/      # 密钥矩阵
+│   ├── watermark_reconstruction.py # 水印重建
+│   └── delta_pcc_utils.py # ΔPCC评估
+└── save/                 # 结果保存
+    ├── autoencoder/      # 自编码器权重
+    ├── key_matrix/       # 密钥矩阵
+    └── excel/           # 实验结果
 ```
 
-## 核心功能
+## 🔧 核心功能
 
 ### 水印系统
-
-- **密钥矩阵生成**：为每个客户端生成唯一的水印位置
-- **水印嵌入**：在训练过程中将水印嵌入模型参数
-- **水印验证**：支持水印的提取和验证
+- **密钥矩阵生成**：为每个客户端生成唯一水印位置
+- **水印嵌入**：训练过程中嵌入水印到模型参数
+- **水印验证**：支持水印提取和完整性验证
+- **ΔPCC评估**：量化水印完整性变化
 
 ### 联邦学习
+- **多客户端训练**：支持IID/非IID数据分布
+- **模型聚合**：FedAvg算法
+- **隐私保护**：可选差分隐私机制
+- **水印缩放**：自适应水印参数调整
 
-- **客户端训练**：支持本地模型训练
-- **模型聚合**：FedAvg算法聚合客户端模型
-- **隐私保护**：可选的差分隐私机制
+### 攻击实验
+- **微调攻击**：模拟模型微调对水印的影响
+- **剪枝攻击**：测试模型剪枝对水印的破坏性
+- **完整性评估**：量化攻击对水印的破坏程度
 
-## 参数配置
+## ⚙️ 主要参数
 
-主要参数可通过命令行或配置文件设置：
+```bash
+# 基础配置
+--model resnet              # 模型类型 (resnet/alexnet)
+--dataset chestmnist        # 数据集
+--client_num 10            # 客户端数量
+--epochs 100               # 训练轮数
 
-- `--model`: 模型类型 (resnet/alexnet)
-- `--dataset`: 数据集 (chestmnist)
-- `--client_num`: 客户端数量
-- `--epochs`: 训练轮数
-- `--dp`: 是否启用差分隐私
-- `--sigma`: 噪声强度
+# 水印配置
+--watermark_mode enhanced   # 水印模式
+--use_key_matrix           # 使用密钥矩阵
+--enable_watermark_scaling # 启用水印缩放
 
-## 数据集
+# 隐私保护
+--dp                       # 启用差分隐私
+--sigma 0.1                # 噪声强度
+```
 
-项目使用ChestMNIST数据集：
-- **类型**：胸部X光片多标签分类
-- **类别数**：14个疾病类别
-- **图像尺寸**：28×28像素
-- **样本数**：训练集78,468，测试集11,219
+## 📈 实验结果
 
-## 注意事项
+项目支持多种评估指标：
+- **准确率**：模型分类性能
+- **AUC**：多标签分类性能
+- **水印完整性**：水印提取成功率
+- **ΔPCC值**：水印参数相关性变化
 
-- 确保有足够的GPU内存进行训练
-- 数据文件需要放在`data/`目录下
-- 训练结果会保存在`save/`目录下
+## 📝 注意事项
 
-## 许可证
+- 确保GPU内存充足（建议8GB+）
+- 数据文件需放在`data/`目录
+- 训练结果保存在`save/`目录
+- 支持Windows多进程兼容
+
+## 📄 许可证
 
 本项目仅供学术研究使用。
