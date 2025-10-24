@@ -1,7 +1,9 @@
+from typing import Dict, Tuple, Optional
+
 import torch
-import numpy as np
-from typing import Dict, List, Tuple, Optional
+
 from utils.key_matrix_utils import KeyMatrixManager
+
 
 class MaskManager:
     """
@@ -101,9 +103,7 @@ class MaskManager:
                             print(f"⚠️  全局索引超出掩码范围: {param_name}[{local_idx}] -> {global_idx} >= {len(self.encoder_mask)}")
                     else:
                         print(f"⚠️  局部索引超出参数范围: {param_name}[{local_idx}] >= {param_length}")
-            
-            print(f"✓ 编码器掩码已更新，包含 {len(all_positions)} 个水印位置")
-                        
+
         except Exception as e:
             print(f"更新编码器掩码失败: {e}")
             self.encoder_mask.zero_()

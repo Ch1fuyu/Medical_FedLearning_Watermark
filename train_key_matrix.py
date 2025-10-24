@@ -1,15 +1,15 @@
-import torch
-import torch.nn as nn
-import numpy as np
-import os
-import json
-from datetime import datetime
 import argparse
+import json
+import os
+from datetime import datetime
 
+import numpy as np
+import torch
+
+from config.globals import set_seed
+from models.alexnet import AlexNet
 from models.light_autoencoder import LightAutoencoder
 from models.resnet import resnet18
-from models.alexnet import AlexNet
-from config.globals import set_seed
 
 # 设置随机种子
 set_seed()

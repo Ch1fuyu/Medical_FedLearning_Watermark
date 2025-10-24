@@ -10,7 +10,7 @@ from utils.key_matrix_utils import KeyMatrixManager
 from utils.mask_utils import MaskManager
 
 
-def accuracy(output, target, top_k=(1,)):
+def accuracy(output, target):
     """计算多标签分类的准确率"""
     with torch.no_grad():
         pred_prob = torch.sigmoid(output)
@@ -126,17 +126,15 @@ class TesterPrivate:
 class TrainerPrivateEnhanced:
     """增强版训练器，支持MultiLoss和自编码器水印"""
     
-    def __init__(self, model, device, dp, sigma, random_positions, args=None):
+    def __init__(self, model, device, dp, sigma, args=None):
         self.optimizer = None
         self.model = model
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.tester = TesterPrivate(model, device, args=args)
         self.dp = dp
         self.sigma = sigma
-        self.random_positions = random_positions
         self.args = args
         self._key_manager = None
-        self.position_dict = random_positions
         
         # MultiLoss和掩码管理器
         self.multi_loss = MultiLoss()
@@ -146,11 +144,11 @@ class TrainerPrivateEnhanced:
         # 初始化掩码管理器
         if args and getattr(args, 'use_key_matrix', False):
             from utils.mask_utils import create_mask_manager
-            # create_mask_manager 在失败时会直接退出程序
+            # 在失败时会直接退出程序
             self.mask_manager = create_mask_manager(model, args.key_matrix_path, args)
             # 初始化时更新所有客户端的编码器掩码
             if self.mask_manager:
-                self.mask_manager.update_encoder_mask()  # 不传client_id，更新所有客户端
+                self.mask_manager.update_encoder_mask()
         
         # 初始化自编码器（如果使用增强水印模式）
         if args and getattr(args, 'watermark_mode', '') == 'enhanced':
@@ -250,7 +248,7 @@ class TrainerPrivateEnhanced:
         # 使用外部自编码器微调模块
         from .autoencoder_finetuner import finetune_autoencoder_encoder
         
-        success = finetune_autoencoder_encoder(
+        finetune_autoencoder_encoder(
             autoencoder=self.autoencoder,
             device=self.device,
             epochs=epochs,
@@ -259,7 +257,6 @@ class TrainerPrivateEnhanced:
         )
         
         # 简化输出：移除冗余信息
-
 
     def _extract_encoder_parameters(self):
         """提取编码器参数作为水印"""
@@ -276,9 +273,6 @@ class TrainerPrivateEnhanced:
             return
         
         try:
-            if self.mask_manager:
-                self.mask_manager.update_encoder_mask(client_id)
-            
             encoder_params = self._extract_encoder_parameters()
             if encoder_params is None:
                 return
@@ -386,15 +380,13 @@ class TrainerPrivateEnhanced:
                             if total_gradients is None:
                                 total_gradients = gradients.detach()
                                 total_encoder_gradients = encoder_gradients.detach()
+
                                 total_target_mask = target_mask.detach()
                                 total_encoder_mask = encoder_mask.detach()
                                 total_effective_mask = effective_mask.detach()
                             else:
                                 total_gradients += gradients.detach()
                                 total_encoder_gradients += encoder_gradients.detach()
-                                total_target_mask += target_mask.detach()
-                                total_encoder_mask += encoder_mask.detach()
-                                total_effective_mask += effective_mask.detach()
                             
                             batch_count += 1
                             
@@ -436,7 +428,6 @@ class TrainerPrivateEnhanced:
         # 每5个epoch进行水印融合
         if (current_epoch + 1) % 5 == 0:
             self._embed_watermark(client_id, current_epoch)
-            print(f"Client {client_id} - Watermark embedded at epoch {current_epoch + 1}")
 
         # 本地训练结束后，使用累积的梯度数据更新统计量
         if (self.mask_manager and current_epoch >= 0 and batch_count > 0):
@@ -444,17 +435,14 @@ class TrainerPrivateEnhanced:
                 # 计算平均梯度数据
                 avg_gradients = total_gradients / batch_count
                 avg_encoder_gradients = total_encoder_gradients / batch_count
-                avg_target_mask = total_target_mask / batch_count
-                avg_encoder_mask = total_encoder_mask / batch_count
-                avg_effective_mask = total_effective_mask / batch_count
                 
                 # 更新梯度统计量
                 self.multi_loss.update_gradient_stats(
                     avg_gradients,
                     avg_encoder_gradients,
-                    avg_target_mask,
-                    avg_encoder_mask,
-                    avg_effective_mask
+                    total_target_mask,
+                    total_encoder_mask,
+                    total_effective_mask
                 )
                 
             except Exception as e:
@@ -477,12 +465,6 @@ class TrainerPrivateEnhanced:
                     del avg_gradients
                 if 'avg_encoder_gradients' in locals():
                     del avg_encoder_gradients
-                if 'avg_target_mask' in locals():
-                    del avg_target_mask
-                if 'avg_encoder_mask' in locals():
-                    del avg_encoder_mask
-                if 'avg_effective_mask' in locals():
-                    del avg_effective_mask
                 
                 # 强制垃圾回收
                 torch.cuda.empty_cache() if torch.cuda.is_available() else None

@@ -665,11 +665,6 @@ class WatermarkReconstructor:
         # 计算ΔPCC = Δperf / τ
         delta_pcc = delta_perf / self.tau if self.tau > 0 else float('inf')
         
-        # 调试信息
-        print(f"  调试信息: perf_before={self.perf_before:.6f}, perf_after={perf_after:.6f}")
-        print(f"  调试信息: perf_fail={self.perf_fail:.6f}, tau={self.tau:.6f}")
-        print(f"  调试信息: delta_perf={delta_perf:.6f}, delta_pcc={delta_pcc:.6f}")
-        
         # 侵权判断: 只基于ΔPCC < 1 表示侵权
         infringement_detected = delta_pcc < 1.0
         
@@ -813,13 +808,16 @@ def create_test_loader_for_autoencoder(batch_size: int = 128, num_samples: int =
     return test_loader
 
 
-def test_watermark_reconstruction():
+def test_watermark_reconstruction(key_matrix_dir=None, autoencoder_weights_dir=None):
     """测试水印重建功能"""
     print("测试水印重建功能...")
     
     # 检查必要的文件
-    key_matrix_dir = './save/key_matrix/resnet/client10'  # 默认路径
-    autoencoder_weights_dir = './save/autoencoder'
+    if key_matrix_dir is None:
+        # 使用环境变量或默认路径
+        key_matrix_dir = os.environ.get('KEY_MATRIX_DIR', './save/key_matrix/resnet/client10')
+    if autoencoder_weights_dir is None:
+        autoencoder_weights_dir = os.environ.get('AUTOENCODER_DIR', './save/autoencoder')
     
     if not os.path.exists(key_matrix_dir):
         print(f"❌ 密钥矩阵目录不存在: {key_matrix_dir}")
@@ -894,8 +892,8 @@ def test_deltapcc_batch_evaluation():
     print("\n测试ΔPCC批量评估功能...")
     
     # 检查必要的文件
-    key_matrix_dir = './save/key_matrix/resnet/client10'  # 默认路径
-    autoencoder_weights_dir = './save/autoencoder'
+    key_matrix_dir = os.environ.get('KEY_MATRIX_DIR', './save/key_matrix/resnet/client10')
+    autoencoder_weights_dir = os.environ.get('AUTOENCODER_DIR', './save/autoencoder')
     
     if not os.path.exists(key_matrix_dir):
         print(f"❌ 密钥矩阵目录不存在: {key_matrix_dir}")
