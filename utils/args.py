@@ -8,7 +8,7 @@ def parser_args():
     parser.add_argument('--gpu', default='0', type=str, help='GPU device ID')
     
     # ========================= 数据集和模型参数 ========================
-    parser.add_argument('--dataset', type=str, default='cifar10', choices=['chestmnist', 'cifar10', 'cifar100'], help="name of dataset")
+    parser.add_argument('--dataset', type=str, default='chestmnist', choices=['chestmnist', 'cifar10', 'cifar100'], help="name of dataset")
     parser.add_argument('--model_name', type=str, default='resnet', choices=['alexnet', 'resnet'],
                         help='model architecture name')
     # 便捷别名：--model 等价于 --model_name
@@ -28,18 +28,22 @@ def parser_args():
     parser.add_argument('--iid', action='store_true', default=True, help='IID data distribution')
     
     # ========================= 优化器参数 ========================
-    parser.add_argument('--optim', type=str, default='sgd', choices=['sgd', 'adam'], help='optimizer type')
+    parser.add_argument('--optim', type=str, default='adam', choices=['sgd', 'adam'], help='optimizer type')
     parser.add_argument('--lr', type=float, default=0.1, help='learning rate for local updates')
     parser.add_argument('--wd', type=float, default=0.0, help='weight decay')
     
     # ========================= 训练控制参数 ========================
     parser.add_argument('--log_interval', default=1, type=int, help='evaluation interval')
+    parser.add_argument('--baseline_mode', action='store_true', default=False,
+                        help='run baseline training without watermark (equivalent to --enable_watermark=False)')
     
     # ========================= 损失函数参数 ========================
     parser.add_argument('--class_weights', action='store_true', default=False,
                         help='use class weights for imbalanced dataset')
     
     # ========================= 水印与密钥矩阵配置 ========================
+    parser.add_argument('--enable_watermark', action='store_true', default=True,
+                        help='enable watermark embedding (set to False for baseline training)')
     parser.add_argument('--watermark_mode', type=str, default='enhanced', choices=['enhanced', 'normal'],
                         help='watermark embedding mode: enhanced (每5轮融合) or normal (训练后嵌入)')
     parser.add_argument('--use_key_matrix', action='store_true', default=True,
@@ -236,5 +240,16 @@ def parser_args():
 
     # 4) 应用用户 overrides（最后一步，优先级最高）
     _apply_simple_overrides(args, args.override)
+    
+    # 5) 处理基准模式和水印开关的互斥逻辑
+    if args.baseline_mode:
+        args.enable_watermark = False
+        print("🔧 基准模式已启用，自动关闭水印嵌入")
+    
+    # 6) 根据水印开关调整相关参数
+    if not args.enable_watermark:
+        args.use_key_matrix = False
+        args.enable_watermark_scaling = False
+        print("🔧 水印已关闭，相关功能已禁用")
 
     return args

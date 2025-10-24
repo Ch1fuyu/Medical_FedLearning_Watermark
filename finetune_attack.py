@@ -28,59 +28,15 @@ from utils.watermark_reconstruction import WatermarkReconstructor
 from utils.delta_pcc_utils import evaluate_delta_pcc, calculate_fixed_tau, format_delta_pcc_result, print_delta_pcc_summary
 
 
-def calculate_metrics(all_predictions, all_targets, dataset_type):
-    """
-    统一计算模型评估指标（准确率和AUC）
-    
-    Args:
-        all_predictions: 模型预测结果
-        all_targets: 真实标签
-        dataset_type: 数据集类型
-        
-    Returns:
-        tuple: (accuracy, mean_auc)
-    """
-    if dataset_type == 'chestmnist':
-        # 多标签二分类任务
-        try:
-            from sklearn.metrics import roc_auc_score
-            auc_scores = [
-                roc_auc_score(all_targets[:, i], all_predictions[:, i])
-                for i in range(all_targets.shape[1])
-                if len(np.unique(all_targets[:, i])) > 1
-            ]
-            mean_auc = np.mean(auc_scores) if auc_scores else 0.0
-        except ImportError:
-            mean_auc = 0.0
-        
-        # 计算准确率（多标签）
-        pred_binary = (all_predictions > 0.5).astype(int)
-        accuracy = np.mean((pred_binary == all_targets).astype(float))
-    else:
-        # 多分类任务
-        try:
-            from sklearn.metrics import roc_auc_score
-            # 使用one-vs-rest策略计算多分类AUC
-            mean_auc = roc_auc_score(all_targets, all_predictions, multi_class='ovr', average='macro')
-        except ImportError:
-            mean_auc = 0.0
-        
-        # 计算准确率（多分类）
-        pred_classes = np.argmax(all_predictions, axis=1)
-        accuracy = np.mean((pred_classes == all_targets).astype(float))
-    
-    return accuracy, mean_auc
-
-
 def extract_model_info_from_path(model_path):
     """
-    从模型路径中提取数据集、模型名、模型类型和客户端数量信息
+    从模型路径中提取数据集和模型名信息
     
     Args:
         model_path: 模型文件路径
         
     Returns:
-        dict: 包含dataset、model_name、model_type和client_num的字典
+        dict: 包含dataset和model_name的字典
     """
     try:
         # 标准化路径分隔符
@@ -89,11 +45,9 @@ def extract_model_info_from_path(model_path):
         # 分割路径
         path_parts = normalized_path.split('/')
         
-        # 查找数据集、模型名、模型类型和客户端数量
+        # 查找数据集和模型名
         dataset = 'unknown'
         model_name = 'unknown'
-        model_type = 'resnet'  # 默认值
-        client_num = 10  # 默认值
         
         # 从路径中提取信息
         for i, part in enumerate(path_parts):
@@ -101,35 +55,21 @@ def extract_model_info_from_path(model_path):
                 dataset = part
             elif part in ['resnet', 'cnn', 'vgg', 'densenet']:
                 model_name = part
-                model_type = part
             elif part == 'resnet18':
                 model_name = 'resnet'
-                model_type = 'resnet'
             elif part == 'cnn_simple':
                 model_name = 'cnn'
-                model_type = 'cnn'
-            elif part.startswith('client') and part[6:].isdigit():
-                # 提取客户端数量，如 client10 -> 10
-                client_num = int(part[6:])
-        
-        # 如果从路径中无法确定模型类型，使用模型名
-        if model_type == 'resnet' and model_name != 'unknown':
-            model_type = model_name
         
         return {
             'dataset': dataset,
-            'model_name': model_name,
-            'model_type': model_type,
-            'client_num': client_num
+            'model_name': model_name
         }
         
     except Exception as e:
         print(f"警告: 无法从路径中提取模型信息: {e}")
         return {
             'dataset': 'unknown',
-            'model_name': 'unknown',
-            'model_type': 'resnet',
-            'client_num': 10
+            'model_name': 'unknown'
         }
 
 
@@ -237,59 +177,39 @@ def load_chestmnist_data(data_root: str = './data'):
     return train_set, test_set
 
 
-def load_cifar_data(dataset_name: str, batch_size: int = 128, data_root: str = './data'):
+def load_cifar10_data(batch_size: int = 128, data_root: str = './data'):
     """
-    加载CIFAR数据集用于微调训练（统一处理CIFAR-10和CIFAR-100）
+    加载CIFAR-10数据集用于微调训练
 
     Args:
-        dataset_name: 数据集名称 ('cifar10' 或 'cifar100')
         batch_size: 批次大小
         data_root: 数据根目录
 
     Returns:
         训练和测试数据加载器
     """
-    # 数据集配置
-    dataset_configs = {
-        'cifar10': {
-            'dataset_class': datasets.CIFAR10,
-            'mean': [0.4914, 0.4822, 0.4465],
-            'std': [0.2470, 0.2435, 0.2616]
-        },
-        'cifar100': {
-            'dataset_class': datasets.CIFAR100,
-            'mean': [0.5071, 0.4867, 0.4408],
-            'std': [0.2675, 0.2565, 0.2761]
-        }
-    }
-    
-    if dataset_name not in dataset_configs:
-        raise ValueError(f"不支持的数据集: {dataset_name}")
-    
-    config = dataset_configs[dataset_name]
-    
-    # 数据预处理
+    # CIFAR-10数据预处理
     transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize(mean=config['mean'], std=config['std'])
+        transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616])
     ])
     
     transform_test = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize(mean=config['mean'], std=config['std'])
+        transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616])
     ])
 
-    # 加载数据集
-    train_dataset = config['dataset_class'](
+    # 加载CIFAR-10数据集
+    train_dataset = datasets.CIFAR10(
         root=data_root,
         train=True,
         download=True,
         transform=transform_train
     )
     
-    test_dataset = config['dataset_class'](
+    test_dataset = datasets.CIFAR10(
         root=data_root,
         train=False,
         download=True,
@@ -300,18 +220,55 @@ def load_cifar_data(dataset_name: str, batch_size: int = 128, data_root: str = '
     train_loader = create_safe_dataloader(train_dataset, batch_size=batch_size, shuffle=True)
     test_loader = create_safe_dataloader(test_dataset, batch_size=batch_size*2, shuffle=False)
 
-    print(f"✓ 已加载{dataset_name.upper()}数据集: 训练集 {len(train_dataset)} 个样本, 测试集 {len(test_dataset)} 个样本")
+    print(f"✓ 已加载CIFAR-10数据集: 训练集 {len(train_dataset)} 个样本, 测试集 {len(test_dataset)} 个样本")
     return train_loader, test_loader
 
 
-def load_cifar10_data(batch_size: int = 128, data_root: str = './data'):
-    """加载CIFAR-10数据集（向后兼容）"""
-    return load_cifar_data('cifar10', batch_size, data_root)
-
-
 def load_cifar100_data(batch_size: int = 128, data_root: str = './data'):
-    """加载CIFAR-100数据集（向后兼容）"""
-    return load_cifar_data('cifar100', batch_size, data_root)
+    """
+    加载CIFAR-100数据集用于微调训练
+
+    Args:
+        batch_size: 批次大小
+        data_root: 数据根目录
+
+    Returns:
+        训练和测试数据加载器
+    """
+    # CIFAR-100数据预处理
+    transform_train = transforms.Compose([
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5071, 0.4867, 0.4408], std=[0.2675, 0.2565, 0.2761])
+    ])
+    
+    transform_test = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5071, 0.4867, 0.4408], std=[0.2675, 0.2565, 0.2761])
+    ])
+
+    # 加载CIFAR-100数据集
+    train_dataset = datasets.CIFAR100(
+        root=data_root,
+        train=True,
+        download=True,
+        transform=transform_train
+    )
+    
+    test_dataset = datasets.CIFAR100(
+        root=data_root,
+        train=False,
+        download=True,
+        transform=transform_test
+    )
+
+    # 创建数据加载器
+    train_loader = create_safe_dataloader(train_dataset, batch_size=batch_size, shuffle=True)
+    test_loader = create_safe_dataloader(test_dataset, batch_size=batch_size*2, shuffle=False)
+
+    print(f"✓ 已加载CIFAR-100数据集: 训练集 {len(train_dataset)} 个样本, 测试集 {len(test_dataset)} 个样本")
+    return train_loader, test_loader
 
 
 def load_main_task_model(model_path: str, device: str = 'cuda'):
@@ -465,7 +422,34 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
         all_targets = np.concatenate(all_targets, axis=0)
 
         # 计算AUC和准确率（根据数据集类型）
-        accuracy, mean_auc = calculate_metrics(all_predictions, all_targets, dataset_type)
+        if dataset_type == 'chestmnist':
+            # 多标签二分类任务
+            try:
+                from sklearn.metrics import roc_auc_score
+                auc_scores = [
+                    roc_auc_score(all_targets[:, i], all_predictions[:, i])
+                    for i in range(all_targets.shape[1])
+                    if len(np.unique(all_targets[:, i])) > 1
+                ]
+                mean_auc = np.mean(auc_scores) if auc_scores else 0.0
+            except ImportError:
+                mean_auc = 0.0
+            
+            # 计算准确率（多标签）
+            pred_binary = (all_predictions > 0.5).astype(int)
+            accuracy = np.mean((pred_binary == all_targets).astype(float))
+        else:
+            # 多分类任务
+            try:
+                from sklearn.metrics import roc_auc_score
+                # 使用one-vs-rest策略计算多分类AUC
+                mean_auc = roc_auc_score(all_targets, all_predictions, multi_class='ovr', average='macro')
+            except ImportError:
+                mean_auc = 0.0
+            
+            # 计算准确率（多分类）
+            pred_classes = np.argmax(all_predictions, axis=1)
+            accuracy = np.mean((pred_classes == all_targets).astype(float))
 
         # 打印基本指标（每轮都显示）
         print(f"\n=== 第 {epoch+1} 轮评估 ===")
@@ -617,28 +601,19 @@ def evaluate_watermark_integrity(model_state_dict, reconstructor):
 
 
 
-def save_results(results, model_info=None, save_dir: str = './save/finetune_attack', args=None):
+def save_results(results, save_dir: str = './save/finetune_attack'):
     """
     保存实验结果
 
     Args:
         results: 实验结果
-        model_info: 模型信息字典，包含dataset和model_name
         save_dir: 保存目录
-        args: 命令行参数，包含model_path等信息
     """
     os.makedirs(save_dir, exist_ok=True)
 
     # 生成时间戳
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    
-    # 从模型信息中提取数据集和模型名称
-    if model_info:
-        dataset = model_info.get('dataset', 'unknown')
-        model_name = model_info.get('model_name', 'unknown')
-        filename_prefix = f'finetune_attack_{dataset}_{timestamp}'
-    else:
-        filename_prefix = f'finetune_attack_{timestamp}'
+    filename_prefix = f'finetune_attack_{timestamp}'
     
     # 保存详细结果
     results_file = os.path.join(save_dir, f'{filename_prefix}.pkl')
@@ -678,11 +653,6 @@ def save_results(results, model_info=None, save_dir: str = './save/finetune_atta
     pkl_filename = os.path.basename(results_file)
     df.loc[len(df)] = ['PKL_FILE'] + [''] * (len(df.columns) - 2) + [pkl_filename]
     
-    # 在CSV文件最后一行添加被测模型文件名信息
-    if args and hasattr(args, 'model_path'):
-        model_filename = os.path.basename(args.model_path)
-        df.loc[len(df)] = ['MODEL_FILE'] + [''] * (len(df.columns) - 2) + [model_filename]
-    
     df.to_csv(csv_file, index=False, encoding='utf-8-sig')
 
     print(f"✓ 结果已保存到: {save_dir}")
@@ -701,32 +671,57 @@ def main():
     # 解析微调攻击特定的命令行参数
     parser = argparse.ArgumentParser(description='微调攻击实验')
     parser.add_argument('--model_path', type=str, 
-                       default='./save/resnet/cifar10/202510231542_Dp_0.1_iid_True_lt_sign_ep_150_le_2_cn_5_fra_1.0000_acc_0.9319_enhanced.pkl',
+                       default='./save/resnet/chestmnist/202510231942_Dp_0.1_iid_True_lt_sign_ep_150_le_2_cn_5_fra_1.0000_auc_0.7800_enhanced.pkl',
                        help='模型文件路径')
+    parser.add_argument('--model_type', type=str, default='resnet',
+                       choices=['resnet', 'cnn', 'vgg', 'densenet'],
+                       help='模型类型')
+    parser.add_argument('--client_num', type=int, default=5,
+                       help='客户端数量')
+    parser.add_argument('--dataset', type=str, default='chestmnist',
+                       choices=['cifar10', 'cifar100', 'chestmnist'],
+                       help='数据集类型')
+    parser.add_argument('--key_matrix_dir', type=str, default='./save/key_matrix',
+                       help='密钥矩阵基础目录')
+    parser.add_argument('--autoencoder_dir', type=str, default='./save/autoencoder',
+                       help='自编码器目录')
+    parser.add_argument('--optimizer', type=str, default='adam', choices=['sgd', 'adam'],
+                       help='优化器类型（默认使用args.py中的optim）')
     parser.add_argument('--finetune_epochs', type=int, default=50,
                        help='微调轮数')
     parser.add_argument('--learning_rate', type=float, default=0.001,
                        help='学习率（默认使用args.py中的lr）')
     parser.add_argument('--batch_size', type=int, default=None,
                        help='批次大小（默认使用args.py中的batch_size）')
-    parser.add_argument('--optimizer', type=str, default='sgd', choices=['sgd', 'adam'],
-                       help='优化器类型（默认使用args.py中的optim）')
-    
+    parser.add_argument('--enable_scaling', action='store_true', default=True,
+                       help='启用水印参数缩放')
+    parser.add_argument('--scaling_factor', type=float, default=1.0,
+                       help='水印参数缩放因子')
+
     # 解析命令行参数
     cmd_args = parser.parse_args()
     
     # 合并参数：命令行参数优先，否则使用args.py中的参数
     args = argparse.Namespace()
     args.model_path = cmd_args.model_path
+    args.model_type = cmd_args.model_type
+    args.client_num = cmd_args.client_num
+    args.key_matrix_dir = cmd_args.key_matrix_dir
+    args.autoencoder_dir = cmd_args.autoencoder_dir
     args.finetune_epochs = cmd_args.finetune_epochs
     args.learning_rate = cmd_args.learning_rate if cmd_args.learning_rate is not None else base_args.lr
     args.batch_size = cmd_args.batch_size if cmd_args.batch_size is not None else base_args.batch_size
     args.optimizer = cmd_args.optimizer if cmd_args.optimizer is not None else base_args.optim
-    args.key_matrix_dir = base_args.key_matrix_path
-    args.autoencoder_dir = os.path.dirname(base_args.encoder_path)  # 从encoder_path推导autoencoder目录
+    args.enable_scaling = cmd_args.enable_scaling
+    args.scaling_factor = cmd_args.scaling_factor
+    args.dataset = cmd_args.dataset
+    
+    # 使用key_matrix_utils生成正确的密钥矩阵路径
+    from utils.key_matrix_utils import get_key_matrix_path
+    args.key_matrix_path = get_key_matrix_path(cmd_args.key_matrix_dir, cmd_args.model_type, cmd_args.client_num)
+    
+    # 从args.py获取其他必要参数
     args.data_root = base_args.data_root
-    args.enable_watermark_scaling = base_args.enable_watermark_scaling
-    args.scaling_factor = base_args.scaling_factor
     
     # 设置设备
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -734,12 +729,9 @@ def main():
 
     # 配置参数
     model_path = args.model_path
-    key_matrix_dir = args.key_matrix_dir
+    key_matrix_dir = args.key_matrix_path  # 使用生成的完整路径
     autoencoder_dir = args.autoencoder_dir
     
-    # 从模型路径中提取数据集和模型名
-    model_info = extract_model_info_from_path(model_path)
-
     # 微调参数
     finetune_epochs = args.finetune_epochs
     eval_interval = 1  # 每轮都进行基本评估
@@ -754,26 +746,33 @@ def main():
     print(f"  - 学习率: {learning_rate}")
     print(f"  - 批次大小: {batch_size}")
     print(f"  - 优化器: {optimizer_type}")
-    print(f"  - 数据集: {model_info['dataset']}")
-    print(f"  - 模型: {model_info['model_name']}")
+    print(f"  - 模型类型: {args.model_type}")
+    print(f"  - 客户端数量: {args.client_num}")
+    print(f"  - 数据集: {args.dataset}")
+    print(f"  - 密钥矩阵路径: {key_matrix_dir}")
+    print(f"  - 自编码器路径: {autoencoder_dir}")
+    print(f"  - 水印缩放: {args.enable_scaling}, 缩放因子: {args.scaling_factor}")
     print("-" * 60)
 
     # 加载数据
     print("加载数据...")
-    # 从模型路径中提取数据集信息
-    dataset = model_info['dataset']
+    # 使用命令行参数指定的数据集
+    dataset = args.dataset
     dataset_type = dataset  # 用于损失函数选择
     
     # 根据数据集类型加载相应的数据
-    if dataset in ['cifar10', 'cifar100']:
-        if dataset == 'cifar100':
-            print("使用CIFAR-100数据集进行微调攻击实验")
-        train_loader, test_loader = load_cifar_data(dataset, batch_size=batch_size, data_root=args.data_root)
+    if dataset == 'cifar10':
+        train_loader, test_loader = load_cifar10_data(batch_size=batch_size, data_root=args.data_root)
+        mnist_test_loader = load_mnist_test_data(batch_size=128, data_dir=args.data_root)
+    elif dataset == 'cifar100':
+        print("使用CIFAR-100数据集进行微调攻击实验")
+        train_loader, test_loader = load_cifar100_data(batch_size=batch_size, data_root=args.data_root)
+        dataset_type = 'cifar100'
         mnist_test_loader = load_mnist_test_data(batch_size=128, data_dir=args.data_root)
     elif dataset == 'chestmnist':
         train_set, test_set = load_chestmnist_data(data_root=args.data_root)
         train_loader = create_safe_dataloader(train_set, batch_size=batch_size, shuffle=True)
-        test_loader = create_safe_dataloader(test_set, batch_size=batch_size*2, shuffle=False)
+        test_loader = create_safe_dataloader(test_set, batch_size=batch_size, shuffle=False)
         mnist_test_loader = load_mnist_test_data(batch_size=128, data_dir=args.data_root)
     else:
         print(f"❌ 不支持的数据集: {dataset}")
@@ -793,7 +792,7 @@ def main():
     reconstructor = WatermarkReconstructor(
         key_matrix_dir, 
         autoencoder_dir, 
-        enable_scaling=args.enable_watermark_scaling, 
+        enable_scaling=args.enable_scaling, 
         scaling_factor=args.scaling_factor
     )
     
@@ -845,7 +844,34 @@ def main():
     all_targets = np.concatenate(all_targets, axis=0)
 
     # 计算AUC和准确率（根据数据集类型）
-    accuracy, mean_auc = calculate_metrics(all_predictions, all_targets, dataset_type)
+    if dataset_type == 'chestmnist':
+        # 多标签二分类任务
+        try:
+            from sklearn.metrics import roc_auc_score
+            auc_scores = [
+                roc_auc_score(all_targets[:, i], all_predictions[:, i])
+                for i in range(all_targets.shape[1])
+                if len(np.unique(all_targets[:, i])) > 1
+            ]
+            mean_auc = np.mean(auc_scores) if auc_scores else 0.0
+        except ImportError:
+            mean_auc = 0.0
+        
+        # 计算准确率（多标签）
+        pred_binary = (all_predictions > 0.5).astype(int)
+        accuracy = np.mean((pred_binary == all_targets).astype(float))
+    else:
+        # 多分类任务
+        try:
+            from sklearn.metrics import roc_auc_score
+            # 使用one-vs-rest策略计算多分类AUC
+            mean_auc = roc_auc_score(all_targets, all_predictions, multi_class='ovr', average='macro')
+        except ImportError:
+            mean_auc = 0.0
+        
+        # 计算准确率（多分类）
+        pred_classes = np.argmax(all_predictions, axis=1)
+        accuracy = np.mean((pred_classes == all_targets).astype(float))
     
     print(f"测试损失: {avg_test_loss:.4f} | AUC: {mean_auc:.4f} | 准确率: {accuracy:.2%}")
     
@@ -900,7 +926,7 @@ def main():
     # 保存结果
     print("\n" + "=" * 80)
     print("保存实验结果...")
-    save_results(results, model_info, args=args)
+    save_results(results, save_dir='./save/finetune_attack')
 
     # 输出总结
     print("\n" + "=" * 80)
@@ -936,7 +962,7 @@ def main():
                   f"{result['train_loss']:>8.4f}  "
                   f"{result['test_loss']:>8.4f}  "
                   f"{result['test_auc']:>6.4f}  "
-                  f"{result['test_accuracy']:>8.2%}  "  # 准确率更宽显示
+                  f"{result['test_accuracy']:>8.2%}  "
                   f"{delta_pcc_str:>6}  "
                   f"{infringement_str:>6}")
 

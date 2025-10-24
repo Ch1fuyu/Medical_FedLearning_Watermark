@@ -16,7 +16,7 @@ def get_key_matrix_path(base_dir: str, model_type: str, client_num: int) -> str:
     Returns:
         密钥矩阵目录路径
     """
-    return os.path.join(base_dir, model_type, f'client{client_num}')
+    return os.path.join(base_dir, model_type, f'client{client_num}').replace('\\', '/')
 
 def find_key_matrix_path(base_dir: str, model_type: str, client_num: int) -> Optional[str]:
     """

@@ -46,7 +46,7 @@ class FederatedLearningOnChestMNIST(Experiment):
         self.args = args
         self.dp = args.dp
         self.sigma = args.sigma
-        self.key_matrix_dir = getattr(args, 'key_matrix_path', './save/key_matrix')
+        self.key_matrix_dir = getattr(args, 'key_matrix_dir', './save/key_matrix')
         
         logging.info('--------------------------------Start--------------------------------------')
         logging.info(args)
@@ -90,7 +90,7 @@ class FederatedLearningOnChestMNIST(Experiment):
         # 根据watermark_mode参数选择trainer
         if self.args.watermark_mode == 'enhanced':
             logging.info('==> 使用增强水印系统（密钥矩阵 + 自编码器）')
-            self.trainer = TrainerPrivateEnhanced(self.model, self.device, self.dp, self.sigma, self.random_positions, self.args)
+            self.trainer = TrainerPrivateEnhanced(self.model, self.device, self.dp, self.sigma, self.args)
             
             # 初始化自编码器微调器
             self.autoencoder_finetuner = AutoencoderFinetuner(self.device)
@@ -100,7 +100,7 @@ class FederatedLearningOnChestMNIST(Experiment):
             self.trainer = TrainerPrivate(self.model, self.device, self.dp, self.sigma, self.random_positions, self.args)
             self.autoencoder_finetuner = None
             
-        self.tester = TesterPrivate(self.model, self.device)
+        self.tester = TesterPrivate(self.model, self.device, args=self.args)
 
     def construct_model(self):
         if self.model_name == 'resnet':
@@ -452,7 +452,7 @@ class FederatedLearningOnChestMNIST(Experiment):
             from utils.key_matrix_utils import KeyMatrixManager
             
             # 加载密钥矩阵管理器
-            key_manager = KeyMatrixManager(self.key_matrix_dir, args=self.args)
+            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
             
             # 对每个客户端的水印位置进行独占式聚合
             for i, client_id in enumerate(idxs_users):
