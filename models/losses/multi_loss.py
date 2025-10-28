@@ -1,7 +1,67 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
+
+
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for addressing class imbalance in multi-label classification
+    Paper: Focal Loss for Dense Object Detection (https://arxiv.org/abs/1708.02002)
+    """
+    
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+        """
+        Initialize Focal Loss
+        
+        Args:
+            alpha: Weighting factor for rare class (float or list/array)
+                   If None, no class weighting
+            gamma: Focusing parameter (default: 2.0, typical range: 0-5)
+                   Higher gamma gives more attention to hard examples
+            reduction: Specifies the reduction to apply to the output
+                      'none' | 'mean' | 'sum'
+        """
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        # 降低gamma以减轻FocalLoss对困难样本的过度关注
+        self.gamma = 1.0  # 降低到1.0，更接近BCE
+        self.reduction = reduction
+        
+    def forward(self, inputs, targets):
+        """
+        Forward pass
+        
+        Args:
+            inputs: Model predictions (logits) of shape (N, C) or (N, C, H, W)
+            targets: Ground truth labels of shape (N, C) for multi-label or (N,) for single-label
+        
+        Returns:
+            Focal loss value
+        """
+        # Apply sigmoid to get probabilities for binary/multi-label classification
+        probs = torch.sigmoid(inputs)
+        
+        # Compute BCE loss
+        bce_loss = F.binary_cross_entropy_with_logits(inputs, targets.float(), 
+                                                       reduction='none', 
+                                                       weight=self.alpha)
+        
+        # Compute pt (probability of true class)
+        pt = torch.where(targets == 1, probs, 1 - probs)
+        
+        # Compute focal weight: (1 - pt)^gamma
+        focal_weight = (1 - pt) ** self.gamma
+        
+        # Compute focal loss
+        focal_loss = focal_weight * bce_loss
+        
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
 
 class MultiLoss:
     """
@@ -31,21 +91,29 @@ class MultiLoss:
         self.current_var_M = 0.0
         self.current_var_H = 0.0
         
-    def get_alpha(self, current_epoch, total_epochs):
+    def get_alpha(self, current_epoch, total_epochs, alpha_early=None, alpha_late=None):
         """
         根据训练阶段返回alpha值
         
         Args:
             current_epoch: 当前epoch
             total_epochs: 总epoch数
+            alpha_early: 早期训练的alpha值（已从0.000005提升到0.00005）
+            alpha_late: 晚期训练的alpha值（已从0.00001提升到0.0001）
             
         Returns:
             alpha值
         """
+        # 默认值已提升，增强水印鲁棒性
+        if alpha_early is None:
+            alpha_early = 0.00005  # 从0.000005提升10倍
+        if alpha_late is None:
+            alpha_late = 0.0001  # 从0.00001提升10倍
+            
         if current_epoch <= 0.3 * total_epochs:
-            return 0.000005
+            return alpha_early
         else:
-            return 0.00001
+            return alpha_late
     
     def update_gradient_stats(self, target_gradients, encoder_gradients, 
                             target_mask, encoder_mask, effective_mask):
@@ -160,7 +228,7 @@ class MultiLoss:
             combined_target_mask, combined_encoder_mask, combined_effective_mask
         )
     
-    def compute_loss(self, main_loss, current_epoch, total_epochs):
+    def compute_loss(self, main_loss, current_epoch, total_epochs, alpha_early=None, alpha_late=None):
         """
         计算多重损失
         
@@ -168,6 +236,8 @@ class MultiLoss:
             main_loss: 主任务损失
             current_epoch: 当前epoch
             total_epochs: 总epoch数
+            alpha_early: 早期训练的alpha值（从args传入）
+            alpha_late: 晚期训练的alpha值（从args传入）
             
         Returns:
             总损失值
@@ -177,7 +247,7 @@ class MultiLoss:
             return main_loss
             
         # 获取alpha值
-        alpha = self.get_alpha(current_epoch, total_epochs)
+        alpha = self.get_alpha(current_epoch, total_epochs, alpha_early, alpha_late)
         
         # 计算正则化项
         reg_term1 = self._compute_gradient_balance_term(alpha)
@@ -212,8 +282,10 @@ class MultiLoss:
         """计算自适应权重正则项"""
         if self.prevGM == 0:
             return torch.tensor(0.0, requires_grad=True)
-            
-        beta2 = self.prevGM * torch.abs(1 / (self.init_a - main_loss)) / self.init_b
+        
+        # 防止main_loss过大导致计算不稳定
+        main_loss_clamped = torch.clamp(main_loss, max=self.init_a - 1e-6)
+        beta2 = self.prevGM * torch.abs(1 / (self.init_a - main_loss_clamped)) / self.init_b
         reg_term3 = torch.exp(-1 * beta2) * beta2
         return reg_term3
     

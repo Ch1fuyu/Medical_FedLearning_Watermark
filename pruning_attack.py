@@ -1,6 +1,7 @@
 import copy
 import os
 import pandas as pd
+import numpy as np
 from datetime import datetime
 
 import torch
@@ -326,7 +327,20 @@ def threshold_pruning(model, pruning_ratio: float):
     all_weights = torch.cat(all_weights)
     
     # 计算剪枝阈值
-    threshold = torch.quantile(torch.abs(all_weights), pruning_ratio)
+    total_params = len(all_weights)
+    prune_count = int(total_params * pruning_ratio)
+    keep_params = total_params - prune_count
+    
+    print(f"  剪枝配置: 总参数={total_params}, 保留={keep_params}, 剪枝={prune_count}")
+
+    abs_weights = torch.abs(all_weights)
+    # percentile 会返回第 rate% 位置的值作为阈值，例如 pruning_ratio=0.1 表示保留90%，percentile=10 表示10%处的值
+    percentile = pruning_ratio * 100
+
+    threshold_value = np.percentile(abs_weights.detach().cpu().numpy(), percentile)
+    threshold = torch.tensor(threshold_value, dtype=abs_weights.dtype, device=abs_weights.device)
+    
+    print(f"  阈值计算: percentile={percentile:.2f}%, threshold={threshold:.9f}")
     
     # 应用剪枝
     pruned_count = 0
@@ -334,15 +348,13 @@ def threshold_pruning(model, pruning_ratio: float):
     
     for name, param in pruned_model.named_parameters():
         if 'weight' in name:
-            # 创建掩码
             mask = torch.abs(param.data) > threshold
             pruned_count += (~mask).sum().item()
             total_count += param.data.numel()
-            
-            # 应用掩码
+
             param.data *= mask.float()
     
-    print(f"剪枝比例: {pruning_ratio:.1%}, 阈值: {threshold:.6f}, 剪枝参数: {pruned_count}/{total_count}")
+    print(f"剪枝完成: 阈值={threshold:.9f}, 剪枝={pruned_count}/{total_count} ({pruned_count/total_count:.1%}), 剩余={total_count-pruned_count} ({1-pruned_count/total_count:.1%})")
     
     return pruned_model
 
@@ -474,7 +486,7 @@ def main():
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='剪枝攻击实验')
     parser.add_argument('--model_path', type=str, 
-                       default='./save/resnet/chestmnist/202510231942_Dp_0.1_iid_True_lt_sign_ep_150_le_2_cn_5_fra_1.0000_auc_0.7800_enhanced.pkl',
+                       default='./save/resnet/chestmnist/202510271921_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_auc_0.7630_enhanced.pkl',
                        help='模型文件路径')
     parser.add_argument('--key_matrix_dir', type=str, default='./save/key_matrix',
                        help='密钥矩阵基础目录')
@@ -485,7 +497,7 @@ def main():
                        help='模型类型')
     parser.add_argument('--client_num', type=int, default=5,
                        help='客户端数量')
-    parser.add_argument('--enable_scaling', action='store_true', default=True,
+    parser.add_argument('--enable_scaling', action='store_true', default=False,
                        help='启用水印参数缩放')
     parser.add_argument('--scaling_factor', type=float, default=1.0,
                        help='水印参数缩放因子')

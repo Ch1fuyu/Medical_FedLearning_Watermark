@@ -671,12 +671,12 @@ def main():
     # 解析微调攻击特定的命令行参数
     parser = argparse.ArgumentParser(description='微调攻击实验')
     parser.add_argument('--model_path', type=str, 
-                       default='./save/resnet/chestmnist/202510231942_Dp_0.1_iid_True_lt_sign_ep_150_le_2_cn_5_fra_1.0000_auc_0.7800_enhanced.pkl',
+                       default='./save/resnet/chestmnist/202510281303_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_auc_0.7646_enhanced.pkl',
                        help='模型文件路径')
     parser.add_argument('--model_type', type=str, default='resnet',
                        choices=['resnet', 'cnn', 'vgg', 'densenet'],
                        help='模型类型')
-    parser.add_argument('--client_num', type=int, default=5,
+    parser.add_argument('--client_num', type=int, default=10,
                        help='客户端数量')
     parser.add_argument('--dataset', type=str, default='chestmnist',
                        choices=['cifar10', 'cifar100', 'chestmnist'],

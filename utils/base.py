@@ -22,7 +22,6 @@ class Experiment(object):
         self.epochs = args.epochs
         self.batch_size = args.batch_size
         self.lr = args.lr
-        self.loss_type = args.loss_type
         self.in_channels = 3
 
         if args.dataset == 'cifar10':
@@ -35,5 +34,4 @@ class Experiment(object):
         self.data_root = getattr(args, 'data_root', None) or config.globals.data_root
         self.local_ep = args.local_ep
 
-        self.sl_ratio = args.loss_alpha
         self.logdir = f'logs/{self.model_name}_{self.dataset}'

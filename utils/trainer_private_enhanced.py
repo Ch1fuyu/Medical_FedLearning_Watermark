@@ -1,13 +1,13 @@
 import os
+
 import numpy as np
 import torch
 import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score
 
 from models.light_autoencoder import LightAutoencoder
-from models.losses.multi_loss import MultiLoss
+from models.losses.multi_loss import MultiLoss, FocalLoss
 from utils.key_matrix_utils import KeyMatrixManager
-from utils.mask_utils import MaskManager
 
 
 def accuracy(output, target):
@@ -137,9 +137,24 @@ class TrainerPrivateEnhanced:
         self._key_manager = None
         
         # MultiLoss和掩码管理器
-        self.multi_loss = MultiLoss()
+        init_a = 0.6523
+        init_b = 0.0000800375825259
+        if args and hasattr(args, 'multiloss_init_a'):
+            init_a = args.multiloss_init_a
+        if args and hasattr(args, 'multiloss_init_b'):
+            init_b = args.multiloss_init_b
+        self.multi_loss = MultiLoss(init_a=init_a, init_b=init_b)
         self.mask_manager = None
         self.autoencoder = None
+        
+        # 初始化FocalLoss，降低gamma避免过度关注困难样本，提升训练稳定性
+        focal_gamma = 1.0  # 降低到1.0，更接近标准BCE
+        focal_reduction = 'mean'
+        if args and hasattr(args, 'focal_gamma'):
+            focal_gamma = args.focal_gamma
+        if args and hasattr(args, 'focal_reduction'):
+            focal_reduction = args.focal_reduction
+        self.focal_loss = FocalLoss(alpha=None, gamma=focal_gamma, reduction=focal_reduction)
         
         # 初始化掩码管理器
         if args and getattr(args, 'use_key_matrix', False):
@@ -163,12 +178,14 @@ class TrainerPrivateEnhanced:
 
     def get_loss_function(self, pred, target):
         """计算损失函数，根据任务类型分支；
-        multiclass 使用交叉熵，multi-label/binary 使用 BCEWithLogits。
+        multiclass 使用交叉熵，multi-label/binary 使用 FocalLoss（ChestMNIST）。
         """
         if self.args is not None and getattr(self.args, 'task_type', 'multiclass') == 'multiclass':
             return F.cross_entropy(pred, target)
+        
+        # 对于ChestMNIST等multi-label任务，使用FocalLoss
         if self.args is None or not self.args.class_weights:
-            return F.binary_cross_entropy_with_logits(pred, target.float())
+            return self.focal_loss(pred, target)
         
         pos_counts = target.sum(dim=0)
         neg_counts = target.shape[0] - pos_counts
@@ -181,6 +198,7 @@ class TrainerPrivateEnhanced:
                 pos_weights[i] = 1.0
         
         pos_weights = torch.clamp(pos_weights, min=0.1, max=10.0)
+        # 仍然使用加权BCEWithLogits作为备选
         return F.binary_cross_entropy_with_logits(pred, target.float(), pos_weight=pos_weights)
 
     def _compute_accuracy(self, pred, target):
@@ -287,12 +305,6 @@ class TrainerPrivateEnhanced:
                     print(f"加载密钥矩阵管理器失败: {e}")
                     return
             
-            try:
-                position_dict = self._key_manager.load_positions(client_id)
-            except Exception as e:
-                print(f"加载客户端 {client_id} 位置信息失败: {e}")
-                return
-            
             with torch.no_grad():
                 model_params = dict(self.model.named_parameters())
                 watermarked_params = self._key_manager.embed_watermark(
@@ -304,14 +316,6 @@ class TrainerPrivateEnhanced:
                         param.data.copy_(watermarked_params[name])
                 
                 print(f"水印嵌入完成，使用KeyMatrixManager自动缩放")
-                
-                # 水印嵌入完成后清理梯度数据
-                if hasattr(self, 'gradient_batch_data') and len(self.gradient_batch_data) > 0:
-                    print(f"清理客户端 {client_id} 的梯度数据 ({len(self.gradient_batch_data)} 个批次)")
-                    self.clear_gradient_batch_data()
-                    torch.cuda.empty_cache()
-                    import gc
-                    gc.collect()
                                 
         except Exception as e:
             print(f"嵌入水印失败: {e}")
@@ -356,7 +360,15 @@ class TrainerPrivateEnhanced:
                 if current_epoch == 0:
                     total_loss = main_loss
                 else:
-                    total_loss = self.multi_loss.compute_loss(main_loss, current_epoch, total_epochs)
+                    # 从args读取alpha参数
+                    alpha_early = None
+                    alpha_late = None
+                    if self.args and hasattr(self.args, 'multiloss_alpha_early'):
+                        alpha_early = self.args.multiloss_alpha_early
+                    if self.args and hasattr(self.args, 'multiloss_alpha_late'):
+                        alpha_late = self.args.multiloss_alpha_late
+                    total_loss = self.multi_loss.compute_loss(main_loss, current_epoch, total_epochs, 
+                                                              alpha_early, alpha_late)
 
                 total_loss.backward()
 
@@ -425,11 +437,7 @@ class TrainerPrivateEnhanced:
                 print(f"Client {client_id} - Epoch {epoch+1}/{local_ep}: "
                       f"Loss={loss_meter:.4f}, Acc={acc_meter:.4f}, LR={lr:.6f}")
 
-        # 每5个epoch进行水印融合
-        if (current_epoch + 1) % 5 == 0:
-            self._embed_watermark(client_id, current_epoch)
-
-        # 本地训练结束后，使用累积的梯度数据更新统计量
+        # 本地训练结束后，先更新梯度统计量，然后再进行水印嵌入（避免梯度数据被清理导致统计量为0）
         if (self.mask_manager and current_epoch >= 0 and batch_count > 0):
             try:
                 # 计算平均梯度数据
@@ -468,6 +476,10 @@ class TrainerPrivateEnhanced:
                 
                 # 强制垃圾回收
                 torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+        # 每5个epoch进行水印融合（放在梯度统计更新之后）
+        if (current_epoch + 1) % 5 == 0:
+            self._embed_watermark(client_id, current_epoch)
 
         # 定期清理内存
         if current_epoch > 0 and current_epoch % 10 == 0:

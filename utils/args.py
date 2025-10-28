@@ -23,14 +23,14 @@ def parser_args():
     parser.add_argument('--epochs', type=int, default=150, help='total communication rounds')
     parser.add_argument('--local_ep', type=int, default=2, help="local epochs per client: E")
     parser.add_argument('--batch_size', type=int, default=128, help="local batch size: B")
-    parser.add_argument('--client_num', type=int, default=5, help="number of clients: K")
+    parser.add_argument('--client_num', type=int, default=10, help="number of clients: K")
     parser.add_argument('--frac', type=float, default=1, help="fraction of participating clients: C")
     parser.add_argument('--iid', action='store_true', default=True, help='IID data distribution')
     
     # ========================= 优化器参数 ========================
     parser.add_argument('--optim', type=str, default='adam', choices=['sgd', 'adam'], help='optimizer type')
-    parser.add_argument('--lr', type=float, default=0.1, help='learning rate for local updates')
-    parser.add_argument('--wd', type=float, default=0.0, help='weight decay')
+    parser.add_argument('--lr', type=float, default=0.001, help='learning rate for local updates (0.1 is too high, changed to 0.001)')
+    parser.add_argument('--wd', type=float, default=0.0001, help='weight decay')
     
     # ========================= 训练控制参数 ========================
     parser.add_argument('--log_interval', default=1, type=int, help='evaluation interval')
@@ -40,6 +40,26 @@ def parser_args():
     # ========================= 损失函数参数 ========================
     parser.add_argument('--class_weights', action='store_true', default=False,
                         help='use class weights for imbalanced dataset')
+    
+    # ========================= 多重损失函数参数 (MultiLoss) ========================
+    parser.add_argument('--use_multiloss', action='store_true', default=True,
+                        help='enable multi-term loss function for watermark robustness')
+    parser.add_argument('--multiloss_init_a', type=float, default=0.6523,
+                        help='initial alpha parameter for MultiLoss')
+    parser.add_argument('--multiloss_init_b', type=float, default=0.0000800375825259,
+                        help='initial beta parameter for MultiLoss')
+    parser.add_argument('--multiloss_alpha_early', type=float, default=0.00005,
+                        help='alpha value for early training phase (first 30% of epochs), increased for better watermark robustness')
+    parser.add_argument('--multiloss_alpha_late', type=float, default=0.0001,
+                        help='alpha value for late training phase (last 70% of epochs), increased for better watermark robustness')
+    
+    # ========================= Focal Loss 参数 ========================
+    parser.add_argument('--use_focal_loss', action='store_true', default=True,
+                        help='enable FocalLoss for imbalanced multi-label classification')
+    parser.add_argument('--focal_gamma', type=float, default=2.0,
+                        help='focal loss gamma parameter (focusing parameter), range: [0, 5]')
+    parser.add_argument('--focal_reduction', type=str, default='mean', choices=['mean', 'sum', 'none'],
+                        help='focal loss reduction method')
     
     # ========================= 水印与密钥矩阵配置 ========================
     parser.add_argument('--enable_watermark', action='store_true', default=True,
@@ -56,12 +76,8 @@ def parser_args():
     # ========================= 水印缩放参数 ========================
     parser.add_argument('--enable_watermark_scaling', action='store_true', default=True,
                         help='enable watermark parameter scaling for better embedding')
-    parser.add_argument('--scaling_factor', type=float, default=1,
+    parser.add_argument('--scaling_factor', type=float, default=1.0,
                         help='fixed scaling factor for watermark parameters')
-
-    # ========================= 水印和IPR参数 ========================
-    parser.add_argument('--loss_type', default='sign', choices=['sign', 'CE'], help='signature loss type')
-    parser.add_argument('--loss_alpha', type=float, default=0.2, help='signature loss scale factor')
     
     # ========================= 差分隐私参数 ========================
     parser.add_argument('--dp', action='store_true', default=False, help='enable differential privacy')

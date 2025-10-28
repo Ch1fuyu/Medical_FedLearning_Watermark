@@ -521,8 +521,9 @@ def main(args):
     enhanced = "_enhanced" if args.watermark_mode == 'enhanced' else ""
 
     # 根据选择指标命名文件
-    file_name = '{}_Dp_{}_iid_{}_lt_{}_ep_{}_le_{}_cn_{}_fra_{:.4f}_{}_{{:.4f}}{}.pkl'.format(
-        formatted_now, args.sigma, args.iid, args.loss_type,
+    watermark_suffix = f"wm_{args.watermark_mode}" if hasattr(args, 'watermark_mode') and args.watermark_mode else "wm_basic"
+    file_name = '{}_Dp_{}_iid_{}_{}_ep_{}_le_{}_cn_{}_fra_{:.4f}_{}_{{:.4f}}{}.pkl'.format(
+        formatted_now, args.sigma, args.iid, watermark_suffix,
         args.epochs, args.local_ep, args.client_num, args.frac, best_metric_name, enhanced
     )
     file_name = file_name.format(best_metric_value)
