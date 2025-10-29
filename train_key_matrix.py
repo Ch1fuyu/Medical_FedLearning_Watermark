@@ -74,19 +74,31 @@ class KeyMatrixGenerator:
         """获取模型参数信息（仅包含卷积层参数）"""
         param_info = []
         start_idx = 0
+        skipped_count = 0
         for name, param in self.model.named_parameters():
-            # 只包含卷积层参数
-            if not ('conv' in name.lower() and 'weight' in name.lower()):
-                print(f"跳过非卷积层参数: {name} (shape: {param.shape})")
-                continue
+            # 检查是否为卷积层参数：1. 包含 'conv' 和 'weight'
+            # 2. 或包含 'downsample.0.weight' (ResNet 的 1x1 卷积) 3. 参数维度为 4D (卷积层权重)
+            is_conv_weight = (
+                'conv' in name.lower() and 'weight' in name.lower()
+            ) or (
+                'downsample.0.weight' in name.lower()  # ResNet downsample conv
+            )
+            
+            # 还必须是4D张量（卷积层权重的形状）
+            if is_conv_weight and len(param.shape) == 4:
+                param_info.append({
+                    'name': name,
+                    'shape': list(param.shape),
+                    'numel': param.numel(),
+                    'start_idx': start_idx
+                })
+                start_idx += param.numel()
+            else:
+                skipped_count += 1
                 
-            param_info.append({
-                'name': name,
-                'shape': list(param.shape),
-                'numel': param.numel(),
-                'start_idx': start_idx
-            })
-            start_idx += param.numel()
+        if skipped_count > 0:
+            print(f"已跳过 {skipped_count} 个非卷积层参数（BN、FC层等）")
+        print(f"共提取 {len(param_info)} 个卷积层")
         return param_info
     
     def _calculate_watermark_sizes(self):
@@ -278,7 +290,7 @@ def main():
     if args.model_type == 'resnet':
         model = resnet18(num_classes=num_classes, in_channels=in_channels, input_size=input_size)
     elif args.model_type == 'alexnet':
-        model = AlexNet(in_channels, num_classes)
+        model = AlexNet(in_channels, num_classes, input_size=input_size)
     else:
         raise ValueError(f"不支持的模型类型: {args.model_type}")
     

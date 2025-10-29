@@ -64,9 +64,12 @@ class BaselineFederatedLearning(Experiment):
     def get_model(self):
         """获取模型"""
         if self.args.model_name == 'alexnet':
-            model = AlexNet(self.args.num_classes)
+            model = AlexNet(self.args.in_channels, self.args.num_classes, 
+                           input_size=self.args.input_size)
         elif self.args.model_name in ['resnet', 'resnet18']:
-            model = resnet18(self.args.num_classes)
+            model = resnet18(num_classes=self.args.num_classes, 
+                           in_channels=self.args.in_channels, 
+                           input_size=self.args.input_size)
         else:
             raise ValueError(f"不支持的模型: {self.args.model_name}")
         

@@ -339,7 +339,14 @@ def construct_random_wm_position(model, client_num):
     # 只获取卷积层参数索引
     conv_param_indices = []
     for name, param in model.named_parameters():
-        if 'conv' in name and 'weight' in name:  # 只处理卷积层权重
+        # 检查是否为卷积层参数：
+        is_conv_weight = (
+            'conv' in name.lower() and 'weight' in name.lower()
+        ) or (
+            'downsample.0.weight' in name.lower()  # ResNet downsample conv
+        )
+        
+        if is_conv_weight and len(param.shape) == 4:
             conv_param_indices.extend([(name, i) for i in range(param.numel())])
 
     print(f"Convolutional layer parameter count: {len(conv_param_indices)}")

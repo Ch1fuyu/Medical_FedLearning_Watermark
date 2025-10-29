@@ -106,7 +106,7 @@ class FederatedLearningOnChestMNIST(Experiment):
         if self.model_name == 'resnet':
             model = resnet18(num_classes=self.num_classes, in_channels=self.in_channels, input_size=self.args.input_size)
         else:
-            model = AlexNet(self.in_channels, self.num_classes)
+            model = AlexNet(self.in_channels, self.num_classes, input_size=self.args.input_size)
         self.model = model.to(self.device)
 
     def _cleanup_memory(self):
