@@ -154,6 +154,19 @@ def load_main_task_model(model_path: str, device: str = 'cuda'):
     num_classes = arguments.get('num_classes', 14)
     in_channels = arguments.get('in_channels', 3)
     dataset = arguments.get('dataset', 'chestmnist')
+    model_name = arguments.get('model_name', 'unknown')
+    
+    # 如果无法从arguments获取model_name，尝试从路径提取
+    if model_name == 'unknown':
+        # 从模型路径提取模型名称
+        normalized_path = model_path.replace('\\', '/')
+        path_parts = normalized_path.split('/')
+        for part in path_parts:
+            if part in ['resnet', 'alexnet']:
+                model_name = part
+                break
+        else:
+            model_name = 'resnet'  # 默认使用resnet
     
     # 根据数据集设置input_size
     if dataset.lower() == 'cifar10' or dataset.lower() == 'cifar100':
@@ -162,11 +175,6 @@ def load_main_task_model(model_path: str, device: str = 'cuda'):
         input_size = 224
     else:  # chestmnist等
         input_size = 28
-    
-    # 从模型路径提取模型名称
-    model_name = os.path.basename(model_path)
-    if '.' in model_name:
-        model_name = model_name.split('.')[0]  # 去掉扩展名
     
     # 构建模型信息字典
     model_info = {
@@ -180,11 +188,18 @@ def load_main_task_model(model_path: str, device: str = 'cuda'):
     }
     
     print(f"✓ 检测到数据集: {dataset}, 类别数: {num_classes}, 输入通道: {in_channels}, 输入尺寸: {input_size}")
-    print(f"✓ 模型名称: {model_name}")
+    print(f"✓ 模型类型: {model_name}")
     
-    # 创建模型实例
-    model = resnet18(num_classes=num_classes, in_channels=in_channels, input_size=input_size)
-    
+    # 根据模型名称创建对应的模型实例
+    if model_name in ['alexnet']:
+        from models.alexnet import alexnet
+        model = alexnet(num_classes=num_classes, in_channels=in_channels, input_size=input_size)
+    elif model_name in ['resnet', 'resnet18']:
+        model = resnet18(num_classes=num_classes, in_channels=in_channels, input_size=input_size)
+    else:
+        print(f"⚠️  未知模型类型: {model_name}，使用默认resnet18")
+        model = resnet18(num_classes=num_classes, in_channels=in_channels, input_size=input_size)
+
     # 加载模型权重
     model.load_state_dict(checkpoint['net_info']['best_model'][0])
     print(f"✓ 已加载主任务模型: {model_path}")
@@ -486,16 +501,16 @@ def main():
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='剪枝攻击实验')
     parser.add_argument('--model_path', type=str, 
-                       default='./save/resnet/chestmnist/202510271921_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_auc_0.7630_enhanced.pkl',
+                       default='./save/alexnet/cifar10/202510291530_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_acc_0.8071_enhanced.pkl',
                        help='模型文件路径')
     parser.add_argument('--key_matrix_dir', type=str, default='./save/key_matrix',
                        help='密钥矩阵基础目录')
     parser.add_argument('--autoencoder_dir', type=str, default='./save/autoencoder',
                        help='自编码器目录')
-    parser.add_argument('--model_type', type=str, default='resnet',
-                       choices=['resnet', 'cnn', 'vgg', 'densenet'],
+    parser.add_argument('--model_type', type=str, default='alexnet',
+                       choices=['resnet', 'alexnet'],
                        help='模型类型')
-    parser.add_argument('--client_num', type=int, default=5,
+    parser.add_argument('--client_num', type=int, default=10,
                        help='客户端数量')
     parser.add_argument('--enable_scaling', action='store_true', default=False,
                        help='启用水印参数缩放')

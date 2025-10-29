@@ -45,3 +45,8 @@ class AlexNet(nn.Module):
         x = x.view(x.size(0), -1)
         x = self.classifier(x)
         return x
+
+# 为了与resnet的导入方式兼容
+def alexnet(num_classes, in_channels, input_size):
+    """创建AlexNet模型的工厂函数"""
+    return AlexNet(in_channels=in_channels, num_classes=num_classes, input_size=input_size)

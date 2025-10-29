@@ -53,7 +53,7 @@ def extract_model_info_from_path(model_path):
         for i, part in enumerate(path_parts):
             if part in ['cifar10', 'cifar100', 'chestmnist']:
                 dataset = part
-            elif part in ['resnet', 'cnn', 'vgg', 'densenet']:
+            elif part in ['resnet', 'alexnet', 'cnn', 'vgg', 'densenet']:
                 model_name = part
             elif part == 'resnet18':
                 model_name = 'resnet'
@@ -296,6 +296,12 @@ def load_main_task_model(model_path: str, device: str = 'cuda'):
     # 优先从arguments获取，否则使用默认值
     dataset = arguments.get('dataset', 'chestmnist')
     in_channels = arguments.get('in_channels', 3)
+    model_name = arguments.get('model_name', 'unknown')
+    
+    # 如果无法从arguments获取model_name，尝试从路径提取
+    if model_name == 'unknown':
+        model_info = extract_model_info_from_path(model_path)
+        model_name = model_info.get('model_name', 'resnet')  # 默认使用resnet
     
     # 根据数据集设置默认类别数
     if dataset.lower() == 'cifar10':
@@ -316,9 +322,17 @@ def load_main_task_model(model_path: str, device: str = 'cuda'):
         input_size = 28
     
     print(f"✓ 检测到数据集: {dataset}, 类别数: {num_classes}, 输入通道: {in_channels}, 输入尺寸: {input_size}")
+    print(f"✓ 模型类型: {model_name}")
 
-    # 创建模型实例
-    model = resnet18(num_classes=num_classes, in_channels=in_channels, input_size=input_size)
+    # 根据模型名称创建对应的模型实例
+    if model_name in ['alexnet']:
+        from models.alexnet import alexnet
+        model = alexnet(num_classes=num_classes, in_channels=in_channels, input_size=input_size)
+    elif model_name in ['resnet', 'resnet18']:
+        model = resnet18(num_classes=num_classes, in_channels=in_channels, input_size=input_size)
+    else:
+        print(f"⚠️  未知模型类型: {model_name}，使用默认resnet18")
+        model = resnet18(num_classes=num_classes, in_channels=in_channels, input_size=input_size)
 
     # 加载模型权重
     model.load_state_dict(checkpoint['net_info']['best_model'][0])
@@ -363,10 +377,6 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
     else:  # cifar10 等多分类任务
         criterion = nn.CrossEntropyLoss()
     
-    # 确保step_size至少为1，避免除零错误
-    step_size = max(1, epochs//3) if epochs > 0 else 1
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=0.1)
-
     model_states, performance_metrics = [], []
     print(f"开始微调训练，共 {epochs} 轮，每 {eval_interval} 轮评估一次，每 {pcc_interval} 轮计算PCC")
     
@@ -398,7 +408,6 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
             continue
 
         avg_loss = total_loss / len(train_loader)
-        scheduler.step()
 
         # 每轮都进行基本评估（损失、AUC、准确率）
         model.eval()
@@ -673,12 +682,12 @@ def main():
     parser.add_argument('--model_path', type=str, 
                        default='./save/resnet/chestmnist/202510281303_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_auc_0.7646_enhanced.pkl',
                        help='模型文件路径')
-    parser.add_argument('--model_type', type=str, default='resnet',
-                       choices=['resnet', 'cnn', 'vgg', 'densenet'],
+    parser.add_argument('--model_type', type=str, default='alexnet',
+                       choices=['resnet', 'alexnet'],
                        help='模型类型')
     parser.add_argument('--client_num', type=int, default=10,
                        help='客户端数量')
-    parser.add_argument('--dataset', type=str, default='chestmnist',
+    parser.add_argument('--dataset', type=str, default='cifar10',
                        choices=['cifar10', 'cifar100', 'chestmnist'],
                        help='数据集类型')
     parser.add_argument('--key_matrix_dir', type=str, default='./save/key_matrix',
@@ -718,7 +727,16 @@ def main():
     
     # 使用key_matrix_utils生成正确的密钥矩阵路径
     from utils.key_matrix_utils import get_key_matrix_path
-    args.key_matrix_path = get_key_matrix_path(cmd_args.key_matrix_dir, cmd_args.model_type, cmd_args.client_num)
+    
+    # 从模型路径自动推断正确的模型类型
+    model_info = extract_model_info_from_path(args.model_path)
+    inferred_model_type = model_info.get('model_name', cmd_args.model_type)
+    
+    print(f"🔍 从模型路径推断的模型类型: {inferred_model_type}")
+    print(f"   原指定的模型类型: {cmd_args.model_type}")
+    
+    # 使用推断的模型类型
+    args.key_matrix_path = get_key_matrix_path(cmd_args.key_matrix_dir, inferred_model_type, cmd_args.client_num)
     
     # 从args.py获取其他必要参数
     args.data_root = base_args.data_root
