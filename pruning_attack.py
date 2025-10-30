@@ -322,11 +322,11 @@ def threshold_pruning(model, pruning_ratio: float):
     Returns:
         剪枝后的模型
     """
-    if pruning_ratio <= 0:
-        return model
-    
-    # 创建模型副本
+    # 始终创建模型副本，即使剪枝比例为0
     pruned_model = copy.deepcopy(model)
+    
+    if pruning_ratio <= 0:
+        return pruned_model
     
     # 收集所有权重参数
     all_weights = []
@@ -501,7 +501,7 @@ def main():
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='剪枝攻击实验')
     parser.add_argument('--model_path', type=str, 
-                       default='./save/alexnet/cifar10/202510291530_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_acc_0.8071_enhanced.pkl',
+                       default='./save/alexnet/chestmnist/202510301443_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_auc_0.6783_enhanced.pkl',
                        help='模型文件路径')
     parser.add_argument('--key_matrix_dir', type=str, default='./save/key_matrix',
                        help='密钥矩阵基础目录')
@@ -510,12 +510,8 @@ def main():
     parser.add_argument('--model_type', type=str, default='alexnet',
                        choices=['resnet', 'alexnet'],
                        help='模型类型')
-    parser.add_argument('--client_num', type=int, default=10,
+    parser.add_argument('--client_num', type=int, default=5,
                        help='客户端数量')
-    parser.add_argument('--enable_scaling', action='store_true', default=False,
-                       help='启用水印参数缩放')
-    parser.add_argument('--scaling_factor', type=float, default=1.0,
-                       help='水印参数缩放因子')
     args = parser.parse_args()
     
     # 生成密钥矩阵路径
@@ -543,12 +539,10 @@ def main():
         print(f"模型类型: {args.model_type}, 客户端数量: {args.client_num}")
         print(f"密钥矩阵路径: {args.key_matrix_path}")
         
-        # 初始化水印重建器（使用命令行参数）
+        # 初始化水印重建器
         reconstructor = WatermarkReconstructor(
             key_matrix_dir=args.key_matrix_path, 
-            autoencoder_weights_dir=args.autoencoder_dir, 
-            enable_scaling=args.enable_scaling, 
-            scaling_factor=args.scaling_factor
+            autoencoder_weights_dir=args.autoencoder_dir
         )
         
         # ==================== 水印检测容忍度设置 ====================
@@ -589,8 +583,14 @@ def main():
             
             # 评估ΔPCC
             # 使用原始模型作为基准，比较剪枝前后的性能
+            original_state = model.state_dict()
+            pruned_state = pruned_model.state_dict()
+            
+            # 🔍 调试：检查两个状态字典是否真的不同
+            print(f"    🔍 状态字典检查: 原始ID={id(original_state)}, 剪枝后ID={id(pruned_state)}, 是否同一对象={original_state is pruned_state}")
+            
             delta_pcc_result = evaluate_delta_pcc(
-                model.state_dict(), pruned_model.state_dict(), reconstructor, test_loader, device, 
+                original_state, pruned_state, reconstructor, test_loader, device, 
                 perf_fail_ratio=PERF_FAIL_RATIO, fixed_tau=fixed_tau
             )
             

@@ -680,21 +680,21 @@ def main():
     # 解析微调攻击特定的命令行参数
     parser = argparse.ArgumentParser(description='微调攻击实验')
     parser.add_argument('--model_path', type=str, 
-                       default='./save/resnet/chestmnist/202510281303_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_auc_0.7646_enhanced.pkl',
+                       default='./save/alexnet/chestmnist/202510301443_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_auc_0.6783_enhanced.pkl',
                        help='模型文件路径')
     parser.add_argument('--model_type', type=str, default='alexnet',
                        choices=['resnet', 'alexnet'],
                        help='模型类型')
-    parser.add_argument('--client_num', type=int, default=10,
+    parser.add_argument('--client_num', type=int, default=5,
                        help='客户端数量')
-    parser.add_argument('--dataset', type=str, default='cifar10',
+    parser.add_argument('--dataset', type=str, default='chestmnist',
                        choices=['cifar10', 'cifar100', 'chestmnist'],
                        help='数据集类型')
     parser.add_argument('--key_matrix_dir', type=str, default='./save/key_matrix',
                        help='密钥矩阵基础目录')
     parser.add_argument('--autoencoder_dir', type=str, default='./save/autoencoder',
                        help='自编码器目录')
-    parser.add_argument('--optimizer', type=str, default='adam', choices=['sgd', 'adam'],
+    parser.add_argument('--optimizer', type=str, default='sgd', choices=['sgd', 'adam'],
                        help='优化器类型（默认使用args.py中的optim）')
     parser.add_argument('--finetune_epochs', type=int, default=50,
                        help='微调轮数')
@@ -702,10 +702,6 @@ def main():
                        help='学习率（默认使用args.py中的lr）')
     parser.add_argument('--batch_size', type=int, default=None,
                        help='批次大小（默认使用args.py中的batch_size）')
-    parser.add_argument('--enable_scaling', action='store_true', default=True,
-                       help='启用水印参数缩放')
-    parser.add_argument('--scaling_factor', type=float, default=1.0,
-                       help='水印参数缩放因子')
 
     # 解析命令行参数
     cmd_args = parser.parse_args()
@@ -721,8 +717,6 @@ def main():
     args.learning_rate = cmd_args.learning_rate if cmd_args.learning_rate is not None else base_args.lr
     args.batch_size = cmd_args.batch_size if cmd_args.batch_size is not None else base_args.batch_size
     args.optimizer = cmd_args.optimizer if cmd_args.optimizer is not None else base_args.optim
-    args.enable_scaling = cmd_args.enable_scaling
-    args.scaling_factor = cmd_args.scaling_factor
     args.dataset = cmd_args.dataset
     
     # 使用key_matrix_utils生成正确的密钥矩阵路径
@@ -769,7 +763,6 @@ def main():
     print(f"  - 数据集: {args.dataset}")
     print(f"  - 密钥矩阵路径: {key_matrix_dir}")
     print(f"  - 自编码器路径: {autoencoder_dir}")
-    print(f"  - 水印缩放: {args.enable_scaling}, 缩放因子: {args.scaling_factor}")
     print("-" * 60)
 
     # 加载数据
@@ -809,9 +802,7 @@ def main():
     # 初始化水印重建器（使用args中的统一设置）
     reconstructor = WatermarkReconstructor(
         key_matrix_dir, 
-        autoencoder_dir, 
-        enable_scaling=args.enable_scaling, 
-        scaling_factor=args.scaling_factor
+        autoencoder_dir
     )
     
     # 预计算固定阈值τ，避免重复计算

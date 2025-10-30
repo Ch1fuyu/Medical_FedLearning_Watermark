@@ -9,7 +9,7 @@ def parser_args():
     
     # ========================= 数据集和模型参数 ========================
     parser.add_argument('--dataset', type=str, default='chestmnist', choices=['chestmnist', 'cifar10', 'cifar100'], help="name of dataset")
-    parser.add_argument('--model_name', type=str, default='resnet', choices=['alexnet', 'resnet'],
+    parser.add_argument('--model_name', type=str, default='alexnet', choices=['alexnet', 'resnet'],
                         help='model architecture name')
     # 便捷别名：--model 等价于 --model_name
     parser.add_argument('--model', dest='model_name', type=str, choices=['alexnet', 'resnet'], help='alias of --model_name')
@@ -23,14 +23,16 @@ def parser_args():
     parser.add_argument('--epochs', type=int, default=150, help='total communication rounds')
     parser.add_argument('--local_ep', type=int, default=2, help="local epochs per client: E")
     parser.add_argument('--batch_size', type=int, default=128, help="local batch size: B")
-    parser.add_argument('--client_num', type=int, default=10, help="number of clients: K")
+    parser.add_argument('--client_num', type=int, default=5, help="number of clients: K")
     parser.add_argument('--frac', type=float, default=1, help="fraction of participating clients: C")
     parser.add_argument('--iid', action='store_true', default=True, help='IID data distribution')
     
     # ========================= 优化器参数 ========================
     parser.add_argument('--optim', type=str, default='adam', choices=['sgd', 'adam'], help='optimizer type')
-    parser.add_argument('--lr', type=float, default=0.001, help='learning rate for local updates (0.1 is too high, changed to 0.001)')
-    parser.add_argument('--wd', type=float, default=0.0001, help='weight decay')
+    parser.add_argument('--lr', type=float, default=0.005, help='learning rate for local updates (reduced from 0.01 to 0.001 for better convergence)')
+    parser.add_argument('--wd', type=float, default=0.0005, help='weight decay (L2 regularization, increased from 0.0001 to 0.0005)')
+    parser.add_argument('--use_lr_scheduler', action='store_true', default=True, help='use cosine annealing learning rate scheduler')
+    parser.add_argument('--dropout_rate', type=float, default=0.5, help='dropout rate for AlexNet classifier (default: 0.5)')
     
     # ========================= 训练控制参数 ========================
     parser.add_argument('--log_interval', default=1, type=int, help='evaluation interval')
@@ -54,7 +56,7 @@ def parser_args():
                         help='alpha value for late training phase (last 70% of epochs), increased for better watermark robustness')
     
     # ========================= Focal Loss 参数 ========================
-    parser.add_argument('--use_focal_loss', action='store_true', default=True,
+    parser.add_argument('--use_focal_loss', action='store_true', default=False,
                         help='enable FocalLoss for imbalanced multi-label classification')
     parser.add_argument('--focal_gamma', type=float, default=2.0,
                         help='focal loss gamma parameter (focusing parameter), range: [0, 5]')
@@ -72,12 +74,6 @@ def parser_args():
                         help='directory containing generated key matrices')
     parser.add_argument('--encoder_path', type=str, default='save/autoencoder/encoder.pth',
                         help='path to the trained autoencoder encoder weights')
-    
-    # ========================= 水印缩放参数 ========================
-    parser.add_argument('--enable_watermark_scaling', action='store_true', default=True,
-                        help='enable watermark parameter scaling for better embedding')
-    parser.add_argument('--scaling_factor', type=float, default=1.0,
-                        help='fixed scaling factor for watermark parameters')
     
     # ========================= 差分隐私参数 ========================
     parser.add_argument('--dp', action='store_true', default=False, help='enable differential privacy')
@@ -265,7 +261,6 @@ def parser_args():
     # 6) 根据水印开关调整相关参数
     if not args.enable_watermark:
         args.use_key_matrix = False
-        args.enable_watermark_scaling = False
         print("🔧 水印已关闭，相关功能已禁用")
 
     return args

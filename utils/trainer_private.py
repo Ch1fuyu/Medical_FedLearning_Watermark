@@ -170,15 +170,29 @@ class TrainerPrivate(object):
     def local_update(self, dataloader, local_ep, lr, client_id, **kwargs):
         self.model.train()
         
-        # 根据args.optim参数选择优化器
+        # 提取 current_epoch 和 total_epochs（用于全局学习率调度）
+        current_epoch = kwargs.get('current_epoch', 0)
+        total_epochs = kwargs.get('total_epochs', 100)
+        
+        # 如果启用学习率调度器，根据全局轮次计算当前学习率
+        if self.args and getattr(self.args, 'use_lr_scheduler', False):
+            import math
+            # 余弦退火：基于全局训练轮次
+            progress = current_epoch / total_epochs  # 0 到 1
+            lr_min = lr * 0.01
+            adjusted_lr = lr_min + (lr - lr_min) * (1 + math.cos(math.pi * progress)) / 2
+        else:
+            adjusted_lr = lr
+        
+        # 根据args.optim参数选择优化器（使用调整后的学习率）
         if self.args and hasattr(self.args, 'optim'):
             if self.args.optim.lower() == 'adam':
-                self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=getattr(self.args, 'wd', 0.0))
+                self.optimizer = torch.optim.Adam(self.model.parameters(), lr=adjusted_lr, weight_decay=getattr(self.args, 'wd', 0.0))
             else:  # 默认使用SGD
-                self.optimizer = torch.optim.SGD(self.model.parameters(), lr=lr, momentum=0.9, weight_decay=getattr(self.args, 'wd', 0.0))
+                self.optimizer = torch.optim.SGD(self.model.parameters(), lr=adjusted_lr, momentum=0.9, weight_decay=getattr(self.args, 'wd', 0.0))
         else:
             # 向后兼容：如果没有args或optim参数，使用SGD
-            self.optimizer = torch.optim.SGD(self.model.parameters(), lr=lr, momentum=0.9)
+            self.optimizer = torch.optim.SGD(self.model.parameters(), lr=adjusted_lr, momentum=0.9)
 
         epoch_loss, epoch_acc = [], []
 
@@ -217,9 +231,10 @@ class TrainerPrivate(object):
             epoch_loss.append(loss_meter)
             epoch_acc.append(acc_meter)
 
+            # 简洁输出：只在最后epoch打印
             if epoch + 1 == local_ep:
-                print(f"Client {client_id} - Epoch {epoch+1}/{local_ep}: "
-                      f"Loss={loss_meter:.4f}, Acc={acc_meter:.4f}, LR={lr:.6f}")
+                from tqdm import tqdm
+                tqdm.write(f"C{client_id} E{epoch+1}/{local_ep}: L={loss_meter:.4f} A={acc_meter:.4f} LR={adjusted_lr:.6f}")
 
         # 本地训练结束后，进行水印嵌入
         if self.args is not None and getattr(self.args, 'use_key_matrix', False):

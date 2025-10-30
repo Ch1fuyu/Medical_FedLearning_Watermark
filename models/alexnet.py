@@ -3,7 +3,7 @@ import torch
 from models.layers.conv2d import ConvBlock
 
 class AlexNet(nn.Module):
-    def __init__(self, in_channels, num_classes, input_size=28):
+    def __init__(self, in_channels, num_classes, input_size=28, dropout_rate=0.5):
         super().__init__()
         max_pool_idx = [1, 3, 7]
         layers = []
@@ -37,16 +37,19 @@ class AlexNet(nn.Module):
             dummy = torch.zeros(1, in_channels, input_size, input_size)
             feat = self.features(dummy)
             flatten_dim = feat.view(1, -1).shape[1]
+        # 添加 Dropout 防止过拟合，可配置 dropout rate
+        self.dropout = nn.Dropout(dropout_rate)
         self.classifier = nn.Linear(flatten_dim, num_classes)
 
     def forward(self, x):
         for m in self.features:
             x = m(x)
         x = x.view(x.size(0), -1)
+        x = self.dropout(x)
         x = self.classifier(x)
         return x
 
 # 为了与resnet的导入方式兼容
-def alexnet(num_classes, in_channels, input_size):
+def alexnet(num_classes, in_channels, input_size, dropout_rate=0.5):
     """创建AlexNet模型的工厂函数"""
-    return AlexNet(in_channels=in_channels, num_classes=num_classes, input_size=input_size)
+    return AlexNet(in_channels=in_channels, num_classes=num_classes, input_size=input_size, dropout_rate=dropout_rate)

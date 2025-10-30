@@ -64,8 +64,9 @@ class BaselineFederatedLearning(Experiment):
     def get_model(self):
         """获取模型"""
         if self.args.model_name == 'alexnet':
+            dropout_rate = getattr(self.args, 'dropout_rate', 0.5)
             model = AlexNet(self.args.in_channels, self.args.num_classes, 
-                           input_size=self.args.input_size)
+                           input_size=self.args.input_size, dropout_rate=dropout_rate)
         elif self.args.model_name in ['resnet', 'resnet18']:
             model = resnet18(num_classes=self.args.num_classes, 
                            in_channels=self.args.in_channels, 
@@ -124,8 +125,15 @@ class BaselineFederatedLearning(Experiment):
                 local_data = DatasetSplit(train_data, user_groups[idx])
                 local_loader = DataLoader(local_data, batch_size=self.args.batch_size, shuffle=True)
                 
-                # 本地训练
-                w, loss = trainer.local_update(local_loader, self.args.local_ep, self.args.lr, idx)
+                # 本地训练（传递全局轮次信息用于学习率调度）
+                w, loss = trainer.local_update(
+                    local_loader, 
+                    self.args.local_ep, 
+                    self.args.lr, 
+                    idx,
+                    current_epoch=epoch,
+                    total_epochs=self.args.epochs
+                )
                 local_weights.append(copy.deepcopy(w))
                 local_losses.append(loss)
             

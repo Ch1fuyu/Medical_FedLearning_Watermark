@@ -314,25 +314,35 @@ class TrainerPrivateEnhanced:
                 for name, param in self.model.named_parameters():
                     if name in watermarked_params:
                         param.data.copy_(watermarked_params[name])
-                
-                print(f"水印嵌入完成，使用KeyMatrixManager自动缩放")
+                # 静默嵌入，减少日志输出
+                pass
                                 
         except Exception as e:
-            print(f"嵌入水印失败: {e}")
+            print(f"⚠️ 水印嵌入失败: {e}")
 
     def local_update(self, dataloader, local_ep, lr, client_id, current_epoch=0, total_epochs=100):
         """本地更新，支持MultiLoss和自编码器训练"""
         self.model.train()
         
-        # 根据args.optim参数选择优化器
+        # 如果启用学习率调度器，根据全局轮次计算当前学习率
+        if self.args and getattr(self.args, 'use_lr_scheduler', False):
+            import math
+            # 余弦退火：基于全局训练轮次
+            progress = current_epoch / total_epochs  # 0 到 1
+            lr_min = lr * 0.01
+            adjusted_lr = lr_min + (lr - lr_min) * (1 + math.cos(math.pi * progress)) / 2
+        else:
+            adjusted_lr = lr
+        
+        # 根据args.optim参数选择优化器（使用调整后的学习率）
         if self.args and hasattr(self.args, 'optim'):
             if self.args.optim.lower() == 'adam':
-                self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=getattr(self.args, 'wd', 0.0))
+                self.optimizer = torch.optim.Adam(self.model.parameters(), lr=adjusted_lr, weight_decay=getattr(self.args, 'wd', 0.0))
             else:  # 默认使用SGD
-                self.optimizer = torch.optim.SGD(self.model.parameters(), lr=lr, momentum=0.9, weight_decay=getattr(self.args, 'wd', 0.0))
+                self.optimizer = torch.optim.SGD(self.model.parameters(), lr=adjusted_lr, momentum=0.9, weight_decay=getattr(self.args, 'wd', 0.0))
         else:
             # 向后兼容：如果没有args或optim参数，使用SGD
-            self.optimizer = torch.optim.SGD(self.model.parameters(), lr=lr, momentum=0.9)
+            self.optimizer = torch.optim.SGD(self.model.parameters(), lr=adjusted_lr, momentum=0.9)
 
         epoch_loss, epoch_acc = [], []
         
@@ -433,9 +443,10 @@ class TrainerPrivateEnhanced:
             torch.cuda.empty_cache()
             epoch_acc.append(acc_meter)
 
+            # 简洁输出：只在最后epoch打印
             if epoch + 1 == local_ep:
-                print(f"Client {client_id} - Epoch {epoch+1}/{local_ep}: "
-                      f"Loss={loss_meter:.4f}, Acc={acc_meter:.4f}, LR={lr:.6f}")
+                from tqdm import tqdm
+                tqdm.write(f"C{client_id} E{epoch+1}/{local_ep}: L={loss_meter:.4f} A={acc_meter:.4f} LR={adjusted_lr:.6f}")
 
         # 本地训练结束后，先更新梯度统计量，然后再进行水印嵌入（避免梯度数据被清理导致统计量为0）
         if (self.mask_manager and current_epoch >= 0 and batch_count > 0):
@@ -454,9 +465,8 @@ class TrainerPrivateEnhanced:
                 )
                 
             except Exception as e:
-                print(f"Client {client_id} 梯度统计更新失败: {e}")
-                print("梯度统计更新失败，终止训练")
-                raise RuntimeError(f"梯度统计更新失败，训练终止: {e}")
+                print(f"⚠️ C{client_id} 梯度统计更新失败: {e}")
+                raise RuntimeError(f"梯度统计更新失败: {e}")
             finally:
                 # 确保清理梯度数据，防止内存泄漏
                 if 'total_gradients' in locals():

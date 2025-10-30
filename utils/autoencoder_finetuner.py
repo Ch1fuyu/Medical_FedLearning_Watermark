@@ -41,9 +41,9 @@ class AutoencoderFinetuner:
                     drop_last=True,  # 丢弃最后一个不完整的batch
                     persistent_workers=False  # 避免内存泄漏
                 )
-                print(f"MNIST数据集已加载: {len(self._mnist_dataset)} 样本")
+                pass  # 静默加载
             except Exception as e:
-                print(f"加载MNIST数据集失败: {e}")
+                print(f"⚠️ 加载MNIST数据集失败: {e}")
                 return None
         
         return self._mnist_loader
@@ -151,10 +151,8 @@ class AutoencoderFinetuner:
                         else:
                             raise e
                 
+                # 静默训练，不输出日志
                 avg_loss = total_loss / (batch_count * batch_size) if batch_count > 0 else 0.0
-                # 简化输出：只在最后一个epoch显示
-                if epoch + 1 == epochs:
-                    print(f"自编码器微调完成, Loss: {avg_loss:.8f}")
             
             # 恢复解码器参数的原始梯度状态
             for param, original_grad_state in zip(autoencoder.decoder.parameters(), decoder_grad_state):

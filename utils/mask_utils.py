@@ -64,7 +64,7 @@ class MaskManager:
             client_id: 客户端ID（可选，如果为None则更新所有客户端）
         """
         if self.key_matrix_manager is None:
-            print("警告: 没有密钥矩阵管理器，无法更新编码器掩码")
+            # 静默跳过，减少日志
             return
         
         try:
@@ -84,7 +84,7 @@ class MaskManager:
                     positions = self.key_matrix_manager.load_positions(cid)
                     all_positions.update(positions)
                 except Exception as e:
-                    print(f"加载客户端 {cid} 位置信息失败: {e}")
+                    # 静默处理错误
                     continue
             
             # 更新编码器掩码（包含所有客户端的位置）
@@ -99,10 +99,8 @@ class MaskManager:
                         
                         if global_idx < len(self.encoder_mask):
                             self.encoder_mask[global_idx] = 1.0
-                        else:
-                            print(f"⚠️  全局索引超出掩码范围: {param_name}[{local_idx}] -> {global_idx} >= {len(self.encoder_mask)}")
-                    else:
-                        print(f"⚠️  局部索引超出参数范围: {param_name}[{local_idx}] >= {param_length}")
+                        # 静默跳过越界索引
+                        pass
 
         except Exception as e:
             print(f"更新编码器掩码失败: {e}")

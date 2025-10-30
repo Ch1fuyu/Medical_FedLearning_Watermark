@@ -290,7 +290,8 @@ def main():
     if args.model_type == 'resnet':
         model = resnet18(num_classes=num_classes, in_channels=in_channels, input_size=input_size)
     elif args.model_type == 'alexnet':
-        model = AlexNet(in_channels, num_classes, input_size=input_size)
+        # 使用默认 dropout_rate=0.5，密钥矩阵生成不需要调整 dropout
+        model = AlexNet(in_channels, num_classes, input_size=input_size, dropout_rate=0.5)
     else:
         raise ValueError(f"不支持的模型类型: {args.model_type}")
     

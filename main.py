@@ -106,7 +106,8 @@ class FederatedLearningOnChestMNIST(Experiment):
         if self.model_name == 'resnet':
             model = resnet18(num_classes=self.num_classes, in_channels=self.in_channels, input_size=self.args.input_size)
         else:
-            model = AlexNet(self.in_channels, self.num_classes, input_size=self.args.input_size)
+            dropout_rate = getattr(self.args, 'dropout_rate', 0.5)
+            model = AlexNet(self.in_channels, self.num_classes, input_size=self.args.input_size, dropout_rate=dropout_rate)
         self.model = model.to(self.device)
 
     def _cleanup_memory(self):
@@ -159,11 +160,13 @@ class FederatedLearningOnChestMNIST(Experiment):
 
             local_ws, local_losses = [], []
 
-            logging.info('Epoch: %d / %d, lr: %f' % (epoch + 1, self.epochs, self.lr))
+            logging.info('Epoch: %d / %d' % (epoch + 1, self.epochs))
             
             # 自编码器微调：每一轮联邦训练开始时都执行
             if self.autoencoder_finetuner is not None and hasattr(self.trainer, 'autoencoder'):
-                logging.info(f'==> 第{epoch+1}轮联邦训练开始，微调自编码器...')
+                # 仅首轮和每10轮打印日志
+                if (epoch + 1) % 10 == 0 or epoch == 0:
+                    logging.info(f'==> 轮次{epoch+1}: 微调自编码器...')
                 try:
                     # 微调自编码器的编码器部分
                     success = self.autoencoder_finetuner.finetune_encoder(
@@ -223,18 +226,14 @@ class FederatedLearningOnChestMNIST(Experiment):
             if hasattr(self.trainer, 'optimizer') and self.trainer.optimizer is not None:
                 self.trainer.optimizer.zero_grad()
             
-            # 梯度统计已在每个客户端的本地训练过程中更新，无需额外处理
-            if epoch >= 0 and hasattr(self.trainer, 'multi_loss'):
+            # 梯度统计（仅每10轮打印一次）
+            if epoch >= 0 and hasattr(self.trainer, 'multi_loss') and (epoch + 1) % 10 == 0:
                 try:
-                    # 打印当前梯度统计信息（来自最后一个客户端的统计）
                     stats = self.trainer.get_gradient_stats()
                     if stats:
-                        logging.info(f'第{epoch+1}轮联邦训练后梯度统计:')
-                        logging.info(f'  prevGM: {stats.get("prevGM", 0):.6f}')
-                        logging.info(f'  prevGH: {stats.get("prevGH", 0):.6f}')
-                        logging.info(f'  prevRatio: {stats.get("prevRatio", 1):.6f}')
+                        logging.info(f'轮次{epoch+1}梯度统计 - GM:{stats.get("prevGM", 0):.6f} GH:{stats.get("prevGH", 0):.6f} Ratio:{stats.get("prevRatio", 1):.6f}')
                 except Exception as e:
-                    logging.error(f'获取梯度统计失败: {e}')
+                    pass  # 静默处理错误
 
 
             if (epoch + 1) == self.epochs or (epoch + 1) % 1 == 0:
@@ -267,7 +266,7 @@ class FederatedLearningOnChestMNIST(Experiment):
                         # 优化模型存储，减少内存占用
                         optimized_state = self._optimize_model_storage(self.model.state_dict())
                         self.logs['best_model'] = [optimized_state]
-                        logging.info(f'New best model saved! AUC improved to {auc_val:.4f}')
+                        logging.info(f'🌟 最佳模型已保存! AUC↑{auc_val:.4f}')
                 else:
                     if self.logs['best_model_acc'] < acc_val_label_mean:
                         self.logs['best_model_acc'] = acc_val_label_mean
@@ -275,23 +274,22 @@ class FederatedLearningOnChestMNIST(Experiment):
                         self.logs['best_model_auc'] = auc_val
                         optimized_state = self._optimize_model_storage(self.model.state_dict())
                         self.logs['best_model'] = [optimized_state]
-                        logging.info(f'New best model saved! ACC improved to {acc_val_label_mean:.4f}')
+                        logging.info(f'🌟 最佳模型已保存! ACC↑{acc_val_label_mean:.4f}')
 
                 if self.logs['best_train_acc'] < acc_train_label_mean:
                     self.logs['best_train_acc'] = acc_train_label_mean
                     self.logs['best_train_loss'] = loss_train_mean
 
+                # 合并训练和验证指标到一行
                 logging.info(
-                    f"Train Loss {loss_train_mean:.4f} --- Val Loss {loss_val_mean:.4f}")
-                logging.info(
-                    f"Train: acc(label) {acc_train_label_mean:.4f}, acc(sample) {acc_train_sample_mean:.4f} (AUC {auc_train:.4f}) | "
-                    f"Val: acc(label) {acc_val_label_mean:.4f}, acc(sample) {acc_val_sample_mean:.4f} (AUC {auc_val:.4f}) | "
-                    f"Highest ACC: {self.logs['highest_acc_ever']:.4f} | Highest AUC: {self.logs['highest_auc_ever']:.4f}")
+                    f"轮次{epoch+1} | Train Loss:{loss_train_mean:.4f} Acc:{acc_train_label_mean:.4f} AUC:{auc_train:.4f} | "
+                    f"Val Loss:{loss_val_mean:.4f} Acc:{acc_val_label_mean:.4f} AUC:{auc_val:.4f} | "
+                    f"Best Acc:{self.logs['highest_acc_ever']:.4f} Best AUC:{self.logs['highest_auc_ever']:.4f}")
                 
-                # 打印增强水印系统统计信息
-                if hasattr(self.trainer, 'multi_loss'):
+                # MultiLoss统计信息（仅每10轮打印）
+                if hasattr(self.trainer, 'multi_loss') and (epoch + 1) % 10 == 0:
                     stats = self.trainer.multi_loss.get_stats()
-                    logging.info(f"MultiLoss统计 - prevGM: {stats['prevGM']:.6f}, prevGH: {stats['prevGH']:.6f}, prevRatio: {stats['prevRatio']:.6f}")
+                    logging.info(f"MultiLoss - GM:{stats['prevGM']:.6f} GH:{stats['prevGH']:.6f} Ratio:{stats['prevRatio']:.6f}")
                 
                 # 记录本轮统计数据
                 stats_row = {
@@ -346,9 +344,9 @@ class FederatedLearningOnChestMNIST(Experiment):
                             test_samples=500  # 使用较少样本进行快速评估
                         )
                         stats_row['autoencoder_performance'] = float(current_performance)
-                        # 简化输出：只在特定轮次显示性能
-                        if (epoch + 1) % 10 == 0 or epoch == 0:
-                            logging.info(f'📊 轮次 {epoch + 1} 自编码器性能: {current_performance:.6f}')
+                        # 自编码器性能（仅每20轮显示）
+                        if (epoch + 1) % 20 == 0:
+                            logging.info(f'📊 自编码器性能: {current_performance:.6f}')
                     except Exception as e:
                         stats_row['autoencoder_performance'] = float('inf')
                         logging.warning(f'⚠️ 无法评估自编码器性能: {e}')
@@ -370,16 +368,14 @@ class FederatedLearningOnChestMNIST(Experiment):
                 
                 stats_rows.append(stats_row)
 
-        logging.info('-------------------------------Result--------------------------------------')
+        logging.info('='*60 + ' 训练结果 ' + '='*60)
         logging.info(
-            f'Test loss: {self.logs["best_model_loss"]:.4f} --- Test acc: {self.logs["best_model_acc"]:.4f} --- Test auc: {self.logs["best_model_auc"]:.4f}')
-        logging.info('历史最高统计:')
+            f'最佳模型 | Loss:{self.logs["best_model_loss"]:.4f} Acc:{self.logs["best_model_acc"]:.4f} AUC:{self.logs["best_model_auc"]:.4f}')
         logging.info(
-            f'  历史最高准确率: {self.logs["highest_acc_ever"]:.4f} (对应AUC: {self.logs["auc_when_highest_acc"]:.4f})')
-        logging.info(
-            f'  历史最高AUC: {self.logs["highest_auc_ever"]:.4f} (对应准确率: {self.logs["acc_when_highest_auc"]:.4f})')
+            f'历史最高 | Acc:{self.logs["highest_acc_ever"]:.4f}(AUC:{self.logs["auc_when_highest_acc"]:.4f}) | '
+            f'AUC:{self.logs["highest_auc_ever"]:.4f}(Acc:{self.logs["acc_when_highest_auc"]:.4f})')
         end = time.time()
-        logging.info('Time: {:.1f} min'.format((end - start) / 60))
+        logging.info(f'训练耗时: {(end - start) / 60:.1f} 分钟')
         
         # 最终内存清理
         self._cleanup_memory()

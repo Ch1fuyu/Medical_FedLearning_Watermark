@@ -2,7 +2,6 @@ import torch
 import json
 import os
 from typing import Dict, List, Tuple, Optional
-from .watermark_scaling import WatermarkScaling
 
 def get_key_matrix_path(base_dir: str, model_type: str, client_num: int) -> str:
     """
@@ -40,42 +39,28 @@ class KeyMatrixManager:
     
     _instances = {}  # 类变量，存储不同配置的实例
     
-    def __new__(cls, key_matrix_dir: str, args=None, enable_scaling: bool = None, 
-                scaling_factor: float = None):
+    def __new__(cls, key_matrix_dir: str, args=None):
         """
         单例模式：相同配置只创建一个实例
         
         Args:
             key_matrix_dir: 密钥矩阵保存目录
-            args: 参数对象，包含水印缩放相关配置
-            enable_scaling: 是否启用水印参数缩放
-            scaling_factor: 固定缩放因子
+            args: 参数对象（保留用于兼容性，但不再使用）
         """
-        # 创建实例标识符
-        if args is not None:
-            enable_scaling = getattr(args, 'enable_watermark_scaling', True)
-            scaling_factor = getattr(args, 'scaling_factor', 1.0)
-        else:
-            enable_scaling = enable_scaling if enable_scaling is not None else True
-            scaling_factor = scaling_factor if scaling_factor is not None else 0.1
-        
-        instance_key = (key_matrix_dir, enable_scaling, scaling_factor)
+        instance_key = key_matrix_dir
         
         if instance_key not in cls._instances:
             instance = super(KeyMatrixManager, cls).__new__(cls)
             cls._instances[instance_key] = instance
         return cls._instances[instance_key]
     
-    def __init__(self, key_matrix_dir: str, args=None, enable_scaling: bool = None, 
-                 scaling_factor: float = None):
+    def __init__(self, key_matrix_dir: str, args=None):
         """
         初始化密钥矩阵管理器
         
         Args:
             key_matrix_dir: 密钥矩阵保存目录
-            args: 参数对象，包含水印缩放相关配置
-            enable_scaling: 是否启用水印参数缩放（如果args为None则使用此参数）
-            scaling_factor: 固定缩放因子（如果args为None则使用此参数）
+            args: 参数对象（保留用于兼容性，但不再使用）
         """
         # 避免重复初始化
         if hasattr(self, 'key_matrix_dir'):
@@ -84,22 +69,6 @@ class KeyMatrixManager:
         self.key_matrix_dir = key_matrix_dir
         self.info = self._load_info()
         self.client_num = self.info['client_num']
-        
-        # 从args中获取缩放参数，如果没有args则使用传入的参数
-        if args is not None:
-            self.enable_scaling = getattr(args, 'enable_watermark_scaling', True)
-            self.scaling_factor = getattr(args, 'scaling_factor', 1.0)
-        else:
-            self.enable_scaling = enable_scaling if enable_scaling is not None else True
-            self.scaling_factor = scaling_factor if scaling_factor is not None else 0.1
-        
-        # 初始化水印缩放器（使用单例模式）
-        if self.enable_scaling:
-            self.watermark_scaler = WatermarkScaling(self.scaling_factor)
-            print(f"🔧 水印参数缩放已启用: 缩放因子={self.scaling_factor}")
-        else:
-            self.watermark_scaler = None
-            print("🔧 水印参数缩放已禁用")
         
     def _load_info(self) -> dict:
         """加载密钥矩阵信息"""
@@ -161,7 +130,7 @@ class KeyMatrixManager:
     def embed_watermark(self, model_params: Dict[str, torch.Tensor], 
                        client_id: int, watermark_values: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
-        将水印嵌入到模型参数中（支持自适应缩放）
+        将水印嵌入到模型参数中
         
         Args:
             model_params: 模型参数字典
@@ -179,10 +148,6 @@ class KeyMatrixManager:
         for name, param in model_params.items():
             watermarked_params[name] = param.clone()
         
-        # 缩放水印参数（如果启用了缩放）
-        if self.enable_scaling and self.watermark_scaler:
-            watermark_values = self.watermark_scaler.scale_watermark_parameters(watermark_values)
-        
         # 嵌入水印到各个参数中
         watermark_idx = 0
         for param_name, param_idx in positions:
@@ -199,7 +164,7 @@ class KeyMatrixManager:
     def extract_watermark(self, model_params: Dict[str, torch.Tensor], 
                          client_id: int, check_pruning: bool = False) -> torch.Tensor:
         """
-        从模型参数中提取水印（支持缩放恢复）
+        从模型参数中提取水印
         
         Args:
             model_params: 模型参数字典
@@ -244,13 +209,6 @@ class KeyMatrixManager:
         
         # 直接堆叠tensor，避免精度损失
         watermark_tensor = torch.stack(watermark_values)
-        
-        # 如果启用了缩放，需要恢复原始水印参数
-        if self.enable_scaling and self.watermark_scaler:
-            # 使用统一的缩放因子恢复水印参数
-            watermark_tensor = self.watermark_scaler.restore_watermark_parameters(
-                watermark_tensor, self.scaling_factor
-            )
         
         return watermark_tensor
     
@@ -305,22 +263,19 @@ class KeyMatrixManager:
     @classmethod
     def get_instance_info(cls):
         """获取实例信息"""
-        return {key: f"KeyMatrixManager(dir={key[0]}, scaling={key[1]}, factor={key[2]})" 
+        return {key: f"KeyMatrixManager(dir={key})" 
                 for key in cls._instances.keys()}
 
-def load_key_matrix_manager(key_matrix_dir: str, args=None, enable_scaling: bool = True, 
-                           scaling_factor: float = 0.1) -> KeyMatrixManager:
+def load_key_matrix_manager(key_matrix_dir: str, args=None) -> KeyMatrixManager:
     """
     便捷函数：加载密钥矩阵管理器
     
     Args:
         key_matrix_dir: 密钥矩阵保存目录
-        args: 参数对象，包含水印缩放相关配置
-        enable_scaling: 是否启用水印参数缩放（如果args为None则使用此参数）
-        scaling_factor: 固定缩放因子（如果args为None则使用此参数）
+        args: 参数对象（保留用于兼容性，但不再使用）
         
     Returns:
         KeyMatrixManager实例
     """
-    return KeyMatrixManager(key_matrix_dir, args, enable_scaling, scaling_factor)
+    return KeyMatrixManager(key_matrix_dir, args)
 
