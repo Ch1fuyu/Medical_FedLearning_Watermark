@@ -51,7 +51,7 @@ def test_autoencoder_mse(autoencoder, test_loader, device: str = 'cuda'):
 
 def evaluate_delta_pcc(original_model_state, current_model_state, reconstructor, 
                       test_loader, device: str = 'cuda', perf_fail_ratio: float = 0.1, 
-                      fixed_tau: Optional[float] = None):
+                      fixed_tau: Optional[float] = None, model=None):
     """
     评估ΔPCC（性能变化百分比）- 统一版本
     
@@ -65,6 +65,7 @@ def evaluate_delta_pcc(original_model_state, current_model_state, reconstructor,
         device: 设备类型
         perf_fail_ratio: 失效性能比例（仅在fixed_tau为None时使用）
         fixed_tau: 固定阈值τ（如果提供，则使用此值而不是动态计算）
+        model: 模型对象（可选），用于确保参数顺序一致性
         
     Returns:
         dict: 包含ΔPCC评估结果的字典，如果失败返回None
@@ -102,8 +103,10 @@ def evaluate_delta_pcc(original_model_state, current_model_state, reconstructor,
         import hashlib
         # 使用第一个客户端进行调试（客户端ID从0开始）
         debug_client_id = 0
-        orig_wm = reconstructor.key_manager.extract_watermark(original_model_state, client_id=debug_client_id)
-        curr_wm = reconstructor.key_manager.extract_watermark(current_model_state, client_id=debug_client_id)
+        # 使用传入的模型对象（如果有），否则尝试从 reconstructor 获取
+        model_for_extraction = model if model is not None else getattr(reconstructor, 'model', None)
+        orig_wm = reconstructor.key_manager.extract_watermark(original_model_state, client_id=debug_client_id, model=model_for_extraction)
+        curr_wm = reconstructor.key_manager.extract_watermark(current_model_state, client_id=debug_client_id, model=model_for_extraction)
         
         def get_tensor_hash(tensor):
             if len(tensor) == 0:
@@ -179,7 +182,7 @@ def evaluate_delta_pcc(original_model_state, current_model_state, reconstructor,
 
 
 def calculate_fixed_tau(original_model_state, reconstructor, test_loader, 
-                       device: str = 'cuda', perf_fail_ratio: float = 0.1):
+                       device: str = 'cuda', perf_fail_ratio: float = 0.1, model=None):
     """
     计算固定阈值τ（基于原始模型）
     
@@ -189,6 +192,7 @@ def calculate_fixed_tau(original_model_state, reconstructor, test_loader,
         test_loader: MNIST测试数据加载器
         device: 设备类型
         perf_fail_ratio: 失效性能比例
+        model: 模型对象（可选），用于确保参数顺序一致性
         
     Returns:
         float: 固定阈值τ，如果计算失败返回None

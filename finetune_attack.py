@@ -81,39 +81,53 @@ def create_safe_dataloader(dataset, batch_size, shuffle=False, num_workers=None)
         dataset: 数据集
         batch_size: 批次大小
         shuffle: 是否打乱数据
-        num_workers: 工作进程数，None时自动选择
+        num_workers: 工作进程数，None时自动选择（Windows上默认0避免序列化问题）
         
     Returns:
         数据加载器
     """
     import sys
     
-    # 优化多进程设置，提高数据加载效率
+    # Windows上使用单进程模式避免序列化问题，Linux/Mac上可以使用多进程
     if num_workers is None:
         if sys.platform.startswith('win'):
-            num_workers = 2  # Windows上使用2个进程
+            num_workers = 0  # Windows上禁用多进程，避免EOFError和序列化问题
         else:
             num_workers = 4  # Linux/Mac上使用4个进程
     
-    try:
-        return DataLoader(
-            dataset, 
-            batch_size=batch_size, 
-            shuffle=shuffle, 
-            num_workers=num_workers,
-            pin_memory=True,  # 启用内存固定，提高GPU传输效率
-            persistent_workers=True if num_workers > 0 else False,  # 保持工作进程，减少重启开销
-            drop_last=False  # 保留最后一个不完整的batch
-        )
-    except Exception as e:
-        print(f"⚠️  多进程数据加载失败，回退到单进程模式: {e}")
+    # 如果指定了num_workers，直接使用
+    if num_workers == 0:
+        # 单进程模式，不需要pin_memory和persistent_workers
         return DataLoader(
             dataset, 
             batch_size=batch_size, 
             shuffle=shuffle, 
             num_workers=0,
-            pin_memory=False
+            pin_memory=False,
+            drop_last=False
         )
+    else:
+        # 多进程模式（仅用于Linux/Mac）
+        try:
+            return DataLoader(
+                dataset, 
+                batch_size=batch_size, 
+                shuffle=shuffle, 
+                num_workers=num_workers,
+                pin_memory=True,  # 启用内存固定，提高GPU传输效率
+                persistent_workers=True,  # 保持工作进程，减少重启开销
+                drop_last=False  # 保留最后一个不完整的batch
+            )
+        except Exception as e:
+            print(f"⚠️  多进程数据加载失败，回退到单进程模式: {e}")
+            return DataLoader(
+                dataset, 
+                batch_size=batch_size, 
+                shuffle=shuffle, 
+                num_workers=0,
+                pin_memory=False,
+                drop_last=False
+            )
 
 
 def load_mnist_test_data(batch_size: int = 128, data_dir: str = './data'):
@@ -295,7 +309,6 @@ def load_main_task_model(model_path: str, device: str = 'cuda'):
     
     # 优先从arguments获取，否则使用默认值
     dataset = arguments.get('dataset', 'chestmnist')
-    in_channels = arguments.get('in_channels', 3)
     model_name = arguments.get('model_name', 'unknown')
     
     # 如果无法从arguments获取model_name，尝试从路径提取
@@ -303,23 +316,46 @@ def load_main_task_model(model_path: str, device: str = 'cuda'):
         model_info = extract_model_info_from_path(model_path)
         model_name = model_info.get('model_name', 'resnet')  # 默认使用resnet
     
-    # 根据数据集设置默认类别数
-    if dataset.lower() == 'cifar10':
-        num_classes = arguments.get('num_classes', 10)
-    elif dataset.lower() == 'cifar100':
-        num_classes = arguments.get('num_classes', 100)
-    elif dataset.lower() == 'chestmnist':
-        num_classes = arguments.get('num_classes', 14)
-    else:
-        num_classes = arguments.get('num_classes', 14)
+    # 数据集预设配置（与 utils/args.py 保持一致）
+    DATASET_PRESETS = {
+        'chestmnist': {
+            'num_classes': 14,
+            'in_channels': 1,
+            'input_size': 28,
+        },
+        'cifar10': {
+            'num_classes': 10,
+            'in_channels': 3,
+            'input_size': 32,
+        },
+        'cifar100': {
+            'num_classes': 100,
+            'in_channels': 3,
+            'input_size': 32,
+        },
+        'imagenet': {
+            'num_classes': 1000,
+            'in_channels': 3,
+            'input_size': 224,
+        },
+    }
     
-    # 根据数据集设置input_size
-    if dataset.lower() == 'cifar10' or dataset.lower() == 'cifar100':
-        input_size = 32
-    elif dataset.lower() == 'imagenet':
-        input_size = 224
-    else:  # chestmnist等
-        input_size = 28
+    # 根据数据集获取预设值
+    ds_key = dataset.lower()
+    preset = DATASET_PRESETS.get(ds_key, DATASET_PRESETS['chestmnist'])  # 默认使用chestmnist预设
+    
+    # 优先从arguments获取，如果为None则使用预设值
+    num_classes = arguments.get('num_classes')
+    if num_classes is None:
+        num_classes = preset['num_classes']
+    
+    in_channels = arguments.get('in_channels')
+    if in_channels is None:
+        in_channels = preset['in_channels']
+    
+    input_size = arguments.get('input_size')
+    if input_size is None:
+        input_size = preset['input_size']
     
     print(f"✓ 检测到数据集: {dataset}, 类别数: {num_classes}, 输入通道: {in_channels}, 输入尺寸: {input_size}")
     print(f"✓ 模型类型: {model_name}")
@@ -365,6 +401,7 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
         mnist_test_loader: MNIST测试数据加载器
         fixed_tau: 固定阈值τ
     """
+    from tqdm import tqdm
     # 根据optimizer_type参数选择优化器
     if optimizer_type.lower() == 'sgd':
         optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=1e-4)
@@ -413,7 +450,7 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
         model.eval()
         test_loss, all_predictions, all_targets = 0.0, [], []
         with torch.no_grad():
-            for data, target in test_loader:
+            for data, target in tqdm(test_loader, desc=f"E{epoch+1}评估", leave=False):
                 data, target = data.to(device), target.to(device)
                 output = model(data)
                 
@@ -481,7 +518,7 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
                 with torch.no_grad():
                     delta_pcc_result = evaluate_delta_pcc(
                         original_model_state, model_states[-1], reconstructor,
-                        mnist_test_loader, device, perf_fail_ratio=0.1, fixed_tau=fixed_tau
+                        mnist_test_loader, device, perf_fail_ratio=0.1, fixed_tau=fixed_tau, model=model
                     )
             
             # 打印ΔPCC结果
@@ -543,13 +580,14 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
     return model_states, performance_metrics
 
 
-def evaluate_watermark_integrity(model_state_dict, reconstructor):
+def evaluate_watermark_integrity(model_state_dict, reconstructor, model=None):
     """
     评估水印完整性
 
     Args:
         model_state_dict: 模型状态字典
         reconstructor: 水印重建器
+        model: 模型对象（可选），用于确保参数顺序一致性
 
     Returns:
         水印完整性评估结果
@@ -575,8 +613,8 @@ def evaluate_watermark_integrity(model_state_dict, reconstructor):
 
         for cid in all_client_ids:
             try:
-                # 提取水印参数
-                watermark_values = key_manager.extract_watermark(model_state_dict, cid, check_pruning=True)
+                # 提取水印参数（传入模型对象以确保参数顺序一致）
+                watermark_values = key_manager.extract_watermark(model_state_dict, cid, check_pruning=True, model=model)
                 total_watermark_params += len(watermark_values)
 
                 # 检查被破坏的水印参数（完全等于0的参数）
@@ -680,21 +718,21 @@ def main():
     # 解析微调攻击特定的命令行参数
     parser = argparse.ArgumentParser(description='微调攻击实验')
     parser.add_argument('--model_path', type=str, 
-                       default='./save/alexnet/cifar100/202510301345_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_acc_0.6637_enhanced.pkl',
+                       default='./save/alexnet/chestmnist/202510311439_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_auc_0.7623_enhanced.pkl',
                        help='模型文件路径')
     parser.add_argument('--model_type', type=str, default='alexnet',
                        choices=['resnet', 'alexnet'],
                        help='模型类型')
     parser.add_argument('--client_num', type=int, default=10,
                        help='客户端数量')
-    parser.add_argument('--dataset', type=str, default='cifar100',
+    parser.add_argument('--dataset', type=str, default='chestmnist',
                        choices=['cifar10', 'cifar100', 'chestmnist'],
                        help='数据集类型')
     parser.add_argument('--key_matrix_dir', type=str, default='./save/key_matrix',
                        help='密钥矩阵基础目录')
     parser.add_argument('--autoencoder_dir', type=str, default='./save/autoencoder',
                        help='自编码器目录')
-    parser.add_argument('--optimizer', type=str, default='sgd', choices=['sgd', 'adam'],
+    parser.add_argument('--optimizer', type=str, default='adam', choices=['sgd', 'adam'],
                        help='优化器类型（默认使用args.py中的optim）')
     parser.add_argument('--finetune_epochs', type=int, default=50,
                        help='微调轮数')
@@ -809,7 +847,7 @@ def main():
     print("预计算固定阈值τ...")
     fixed_tau = None
     if reconstructor and original_model_state and mnist_test_loader:
-        fixed_tau = calculate_fixed_tau(original_model_state, reconstructor, mnist_test_loader, device, perf_fail_ratio=0.05)
+        fixed_tau = calculate_fixed_tau(original_model_state, reconstructor, mnist_test_loader, device, perf_fail_ratio=0.05, model=model)
         if fixed_tau is None:
             print("❌ 无法计算固定阈值，将使用动态阈值")
         else:
@@ -834,8 +872,11 @@ def main():
         criterion = nn.CrossEntropyLoss()
         activation_fn = torch.softmax
     
+    # 添加进度提示
+    from tqdm import tqdm
+    print("正在评估模型性能...")
     with torch.no_grad():
-        for data, target in test_loader:
+        for batch_idx, (data, target) in enumerate(tqdm(test_loader, desc="评估中", leave=False)):
             data, target = data.to(device), target.to(device)
             output = model(data)
             

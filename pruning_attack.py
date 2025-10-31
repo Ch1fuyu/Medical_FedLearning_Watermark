@@ -151,8 +151,6 @@ def load_main_task_model(model_path: str, device: str = 'cuda'):
     arguments = checkpoint.get('arguments', {})
     
     # 优先从arguments获取，否则使用默认值
-    num_classes = arguments.get('num_classes', 14)
-    in_channels = arguments.get('in_channels', 3)
     dataset = arguments.get('dataset', 'chestmnist')
     model_name = arguments.get('model_name', 'unknown')
     
@@ -168,13 +166,46 @@ def load_main_task_model(model_path: str, device: str = 'cuda'):
         else:
             model_name = 'resnet'  # 默认使用resnet
     
-    # 根据数据集设置input_size
-    if dataset.lower() == 'cifar10' or dataset.lower() == 'cifar100':
-        input_size = 32
-    elif dataset.lower() == 'imagenet':
-        input_size = 224
-    else:  # chestmnist等
-        input_size = 28
+    # 数据集预设配置（与 utils/args.py 保持一致）
+    DATASET_PRESETS = {
+        'chestmnist': {
+            'num_classes': 14,
+            'in_channels': 1,
+            'input_size': 28,
+        },
+        'cifar10': {
+            'num_classes': 10,
+            'in_channels': 3,
+            'input_size': 32,
+        },
+        'cifar100': {
+            'num_classes': 100,
+            'in_channels': 3,
+            'input_size': 32,
+        },
+        'imagenet': {
+            'num_classes': 1000,
+            'in_channels': 3,
+            'input_size': 224,
+        },
+    }
+    
+    # 根据数据集获取预设值
+    ds_key = dataset.lower()
+    preset = DATASET_PRESETS.get(ds_key, DATASET_PRESETS['chestmnist'])  # 默认使用chestmnist预设
+    
+    # 优先从arguments获取，如果为None则使用预设值
+    num_classes = arguments.get('num_classes')
+    if num_classes is None:
+        num_classes = preset['num_classes']
+    
+    in_channels = arguments.get('in_channels')
+    if in_channels is None:
+        in_channels = preset['in_channels']
+    
+    input_size = arguments.get('input_size')
+    if input_size is None:
+        input_size = preset['input_size']
     
     # 构建模型信息字典
     model_info = {
@@ -501,7 +532,7 @@ def main():
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='剪枝攻击实验')
     parser.add_argument('--model_path', type=str, 
-                       default='./save/alexnet/cifar100/202510301345_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_acc_0.6637_enhanced.pkl',
+                       default='./save/alexnet/chestmnist/202510311439_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_auc_0.7623_enhanced.pkl',
                        help='模型文件路径')
     parser.add_argument('--key_matrix_dir', type=str, default='./save/key_matrix',
                        help='密钥矩阵基础目录')

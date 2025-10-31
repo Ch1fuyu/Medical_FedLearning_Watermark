@@ -13,8 +13,8 @@ def parser_args():
                         help='model architecture name')
     # 便捷别名：--model 等价于 --model_name
     parser.add_argument('--model', dest='model_name', type=str, choices=['alexnet', 'resnet'], help='alias of --model_name')
-    parser.add_argument('--num_classes', default=14, type=int, help='number of classes')
-    parser.add_argument('--in_channels', type=int, default=3, help='input channels')
+    parser.add_argument('--num_classes', default=None, type=int, help='number of classes')
+    parser.add_argument('--in_channels', type=int, default=None, help='input channels')
     # 高层预设开关
     parser.add_argument('--preset', type=str, default=None, help='experiment preset name for one-click config')
     parser.add_argument('--override', type=str, default=None, help='comma-separated key=value overrides')
@@ -29,8 +29,8 @@ def parser_args():
     
     # ========================= 优化器参数 ========================
     parser.add_argument('--optim', type=str, default='adam', choices=['sgd', 'adam'], help='optimizer type')
-    parser.add_argument('--lr', type=float, default=0.005, help='learning rate for local updates (reduced from 0.01 to 0.001 for better convergence)')
-    parser.add_argument('--wd', type=float, default=0.0005, help='weight decay (L2 regularization, increased from 0.0001 to 0.0005)')
+    parser.add_argument('--lr', type=float, default=0.001, help='learning rate for local updates (reduced from 0.01 to 0.001 for better convergence)')
+    parser.add_argument('--wd', type=float, default=0.0001, help='weight decay (L2 regularization, increased from 0.0001 to 0.0005)')
     parser.add_argument('--use_lr_scheduler', action='store_true', default=True, help='use cosine annealing learning rate scheduler')
     parser.add_argument('--dropout_rate', type=float, default=0.5, help='dropout rate for AlexNet classifier (default: 0.5)')
     
@@ -111,14 +111,14 @@ def parser_args():
 
     # ========================= 预设注册表与自动推导 ========================
     DATASET_PRESETS: Dict[str, Dict[str, Any]] = {
-        # ChestMNIST：多标签，14 类，输入通道根据数据处理转换为 RGB
+        # ChestMNIST：多标签，14 类，单通道灰度图像
         'chestmnist': {
             'task_type': 'multilabel',
             'num_classes': 14,
-            'in_channels': 3,
+            'in_channels': 1,
             'input_size': 28,
-            'normalize_mean': [0.5, 0.5, 0.5],
-            'normalize_std': [0.5, 0.5, 0.5],
+            'normalize_mean': [0.5],
+            'normalize_std': [0.5],
             'default_batch_size': 128,
             'metrics': ['loss', 'acc_label', 'acc_sample', 'auc'],
         },
@@ -232,7 +232,7 @@ def parser_args():
     if ds_key in DATASET_PRESETS:
         ds_cfg = DATASET_PRESETS[ds_key]
         # num_classes
-        if 'num_classes' in ds_cfg and (args.num_classes is None or args.num_classes == 14 and ds_key != 'chestmnist'):
+        if 'num_classes' in ds_cfg and args.num_classes is None:
             args.num_classes = ds_cfg['num_classes']
         # in_channels
         if 'in_channels' in ds_cfg and args.in_channels is None:

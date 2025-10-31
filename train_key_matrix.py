@@ -129,10 +129,11 @@ class KeyMatrixGenerator:
         """生成所有客户端的密钥矩阵"""
         watermark_sizes = self._calculate_watermark_sizes()
         
-        # 获取所有可用的参数位置
+        # 获取所有可用的参数位置（使用局部索引）
         all_positions = []
         for param_info in self.model_param_info:
             for i in range(param_info['numel']):
+                # 使用局部索引：i (在参数内部的索引)
                 all_positions.append((param_info['name'], i))
         
         # 随机打乱位置
@@ -168,11 +169,27 @@ class KeyMatrixGenerator:
         for param_info in self.model_param_info:
             key_matrix[param_info['name']] = torch.zeros(param_info['shape'])
         
-        # 在指定位置设置为1
-        for param_name, param_idx in positions:
-            # 将一维索引转换为多维索引
+        # 在指定位置设置为1（positions 中存储的是局部索引）
+        for param_name, local_idx in positions:
+            if param_name not in key_matrix:
+                continue
+            
+            # 验证局部索引范围
+            param_info = None
+            for info in self.model_param_info:
+                if info['name'] == param_name:
+                    param_info = info
+                    break
+            
+            if param_info is None:
+                continue
+            
+            if local_idx < 0 or local_idx >= param_info['numel']:
+                continue
+            
+            # 将一维局部索引转换为多维索引
             param_shape = key_matrix[param_name].shape
-            multi_idx = np.unravel_index(param_idx, param_shape)
+            multi_idx = np.unravel_index(local_idx, param_shape)
             key_matrix[param_name][multi_idx] = 1.0
         
         return key_matrix

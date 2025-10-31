@@ -87,20 +87,16 @@ class MaskManager:
                     # 静默处理错误
                     continue
             
-            # 更新编码器掩码（包含所有客户端的位置）
+            # 更新编码器掩码（将局部索引转换为全局索引）
             for param_name, local_idx in all_positions:
+                # 检查参数是否在位置映射中
                 if param_name in self.param_positions:
                     start_idx, end_idx = self.param_positions[param_name]
-                    param_length = end_idx - start_idx
-                    
-                    # 检查局部索引是否在参数范围内
-                    if local_idx < param_length:
-                        global_idx = start_idx + local_idx
-                        
-                        if global_idx < len(self.encoder_mask):
-                            self.encoder_mask[global_idx] = 1.0
-                        # 静默跳过越界索引
-                        pass
+                    # 将局部索引转换为全局索引
+                    global_idx = start_idx + local_idx
+                    # 验证全局索引范围
+                    if global_idx >= 0 and global_idx < len(self.encoder_mask):
+                        self.encoder_mask[global_idx] = 1.0
 
         except Exception as e:
             print(f"更新编码器掩码失败: {e}")
