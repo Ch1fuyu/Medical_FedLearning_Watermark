@@ -40,7 +40,7 @@ def load_test_data(dataset_name: str, batch_size: int = 128, data_dir: str = './
         test_dataset = datasets.CIFAR100(data_dir, train=False, download=True, transform=transform)
         
     elif dataset_name.lower() == 'chestmnist':
-        normalize = transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        normalize = transforms.Normalize(mean=[0.5], std=[0.5])
         transform = transforms.Compose([
             transforms.ToTensor(),
             normalize,
@@ -322,11 +322,11 @@ def threshold_pruning(model, pruning_ratio: float):
     Returns:
         剪枝后的模型
     """
-    # 始终创建模型副本，即使剪枝比例为0
-    pruned_model = copy.deepcopy(model)
-    
     if pruning_ratio <= 0:
-        return pruned_model
+        return model
+    
+    # 创建模型副本
+    pruned_model = copy.deepcopy(model)
     
     # 收集所有权重参数
     all_weights = []
@@ -501,7 +501,7 @@ def main():
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='剪枝攻击实验')
     parser.add_argument('--model_path', type=str, 
-                       default='./save/alexnet/chestmnist/202510301443_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_auc_0.6783_enhanced.pkl',
+                       default='./save/alexnet/cifar100/202510301345_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_acc_0.6637_enhanced.pkl',
                        help='模型文件路径')
     parser.add_argument('--key_matrix_dir', type=str, default='./save/key_matrix',
                        help='密钥矩阵基础目录')
@@ -510,7 +510,7 @@ def main():
     parser.add_argument('--model_type', type=str, default='alexnet',
                        choices=['resnet', 'alexnet'],
                        help='模型类型')
-    parser.add_argument('--client_num', type=int, default=5,
+    parser.add_argument('--client_num', type=int, default=10,
                        help='客户端数量')
     args = parser.parse_args()
     
@@ -583,14 +583,8 @@ def main():
             
             # 评估ΔPCC
             # 使用原始模型作为基准，比较剪枝前后的性能
-            original_state = model.state_dict()
-            pruned_state = pruned_model.state_dict()
-            
-            # 🔍 调试：检查两个状态字典是否真的不同
-            print(f"    🔍 状态字典检查: 原始ID={id(original_state)}, 剪枝后ID={id(pruned_state)}, 是否同一对象={original_state is pruned_state}")
-            
             delta_pcc_result = evaluate_delta_pcc(
-                original_state, pruned_state, reconstructor, test_loader, device, 
+                model.state_dict(), pruned_model.state_dict(), reconstructor, test_loader, device, 
                 perf_fail_ratio=PERF_FAIL_RATIO, fixed_tau=fixed_tau
             )
             

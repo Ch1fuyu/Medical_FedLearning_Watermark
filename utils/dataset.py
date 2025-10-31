@@ -60,8 +60,8 @@ class LocalChestMNISTDataset(Dataset):
         # 转换为PIL图像
         from PIL import Image
         if len(image.shape) == 2:
-            # 灰度图像，转换为RGB
-            image = Image.fromarray(image, mode='L').convert('RGB')
+            # 灰度图像，保持为灰度（单通道）
+            image = Image.fromarray(image, mode='L')
         else:
             # RGB图像
             image = Image.fromarray(image)

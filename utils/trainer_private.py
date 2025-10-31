@@ -168,6 +168,7 @@ class TrainerPrivate(object):
         return accuracy(pred, target)[0]
 
     def local_update(self, dataloader, local_ep, lr, client_id, **kwargs):
+        self.model.to(self.device)  # 确保模型在正确的设备上
         self.model.train()
         
         # 提取 current_epoch 和 total_epochs（用于全局学习率调度）

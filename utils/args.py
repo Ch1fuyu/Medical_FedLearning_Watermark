@@ -23,7 +23,7 @@ def parser_args():
     parser.add_argument('--epochs', type=int, default=150, help='total communication rounds')
     parser.add_argument('--local_ep', type=int, default=2, help="local epochs per client: E")
     parser.add_argument('--batch_size', type=int, default=128, help="local batch size: B")
-    parser.add_argument('--client_num', type=int, default=5, help="number of clients: K")
+    parser.add_argument('--client_num', type=int, default=10, help="number of clients: K")
     parser.add_argument('--frac', type=float, default=1, help="fraction of participating clients: C")
     parser.add_argument('--iid', action='store_true', default=True, help='IID data distribution')
     

@@ -322,6 +322,7 @@ class TrainerPrivateEnhanced:
 
     def local_update(self, dataloader, local_ep, lr, client_id, current_epoch=0, total_epochs=100):
         """本地更新，支持MultiLoss和自编码器训练"""
+        self.model.to(self.device)  # 确保模型在正确的设备上
         self.model.train()
         
         # 如果启用学习率调度器，根据全局轮次计算当前学习率
