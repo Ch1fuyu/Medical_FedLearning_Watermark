@@ -40,7 +40,7 @@ def get_baseline_config():
     config.epochs = 150  # 全局训练轮次
     config.local_ep = 2  # 每个客户端的本地训练轮次
     config.batch_size = 128  # 批次大小
-    config.client_num = 5  # 客户端数量
+    config.client_num = 10  # 客户端数量
     config.frac = 1.0  # 参与训练的客户端比例 (1.0 = 100%)
     config.iid = True  # IID数据分布
     
@@ -95,6 +95,7 @@ def get_baseline_config():
     # ==================== 其他参数 ====================
     config.log_interval = 1  # 评估间隔
     config.baseline_mode = True  # 基准模式标志
+    config.patience = 10  # Early stopping耐心值（如果验证指标连续N轮未提升则停止训练，设置为0禁用）
     
     return config
 
@@ -189,7 +190,16 @@ class BaselineFederatedLearning(Experiment):
         # 用于保存最佳模型
         best_model_state = None
         best_auc = 0.0
+        best_acc = 0.0
         best_epoch = 0
+        
+        # Early Stopping 配置
+        patience = getattr(self.args, 'patience', 10)
+        early_stop_counter = 0
+        
+        # 决定模型选择依据：ChestMNIST 按 AUC，其他（如 CIFAR-10/100）按准确率
+        dataset_key = (self.args.dataset or '').lower()
+        select_by_auc = (dataset_key == 'chestmnist')
         
         # 联邦学习主循环
         for epoch in range(self.args.epochs):
@@ -249,18 +259,46 @@ class BaselineFederatedLearning(Experiment):
             val_sample_accs.append(test_sample_acc)  # 样本级准确率
             val_aucs.append(test_auc)
             
-            # 保存最佳模型
-            if test_auc > best_auc:
-                best_auc = test_auc
-                best_epoch = epoch
-                best_model_state = copy.deepcopy(global_model.state_dict())
-                logging.info(f"⭐ 新的最佳模型! AUC: {best_auc:.4f}")
+            # 保存最佳模型和Early Stopping判断
+            if select_by_auc:
+                # ChestMNIST：基于AUC
+                if test_auc > best_auc:
+                    best_auc = test_auc
+                    best_acc = test_acc  # 同时记录准确率
+                    best_epoch = epoch
+                    best_model_state = copy.deepcopy(global_model.state_dict())
+                    early_stop_counter = 0
+                    logging.info(f"⭐ 新的最佳模型! AUC: {best_auc:.4f}")
+                else:
+                    early_stop_counter += 1
+            else:
+                # CIFAR-10/100：基于准确率
+                if test_acc > best_acc:
+                    best_acc = test_acc
+                    best_auc = test_auc  # 同时记录AUC
+                    best_epoch = epoch
+                    best_model_state = copy.deepcopy(global_model.state_dict())
+                    early_stop_counter = 0
+                    logging.info(f"⭐ 新的最佳模型! 准确率: {best_acc:.4f}%")
+                else:
+                    early_stop_counter += 1
             
             # 记录训练进度
-            logging.info(f"📊 训练损失: {avg_train_loss:.4f}, 训练准确率: {train_acc:.2f}% (样本级: {train_sample_acc:.2f}%)")
-            logging.info(f"📊 测试损失: {test_loss:.4f}, 测试准确率: {test_acc:.2f}% (样本级: {test_sample_acc:.2f}%)")
+            logging.info(f"📊 训练损失: {avg_train_loss:.4f}, 训练准确率: {train_acc:.4f}% (样本级: {train_sample_acc:.4f}%)")
+            logging.info(f"📊 测试损失: {test_loss:.4f}, 测试准确率: {test_acc:.4f}% (样本级: {test_sample_acc:.4f}%)")
             logging.info(f"📊 测试AUC: {test_auc:.4f}")
-            logging.info(f"🏆 当前最佳AUC: {best_auc:.4f} (轮次 {best_epoch + 1})")
+            if select_by_auc:
+                logging.info(f"🏆 当前最佳AUC: {best_auc:.4f} (轮次 {best_epoch + 1})")
+            else:
+                logging.info(f"🏆 当前最佳准确率: {best_acc:.4f}% (轮次 {best_epoch + 1})")
+            
+            # Early Stopping检查
+            if patience > 0 and early_stop_counter >= patience:
+                if select_by_auc:
+                    logging.info(f"🛑 Early stopping 触发于轮次 {epoch + 1}。最佳验证AUC: {best_auc:.4f}")
+                else:
+                    logging.info(f"🛑 Early stopping 触发于轮次 {epoch + 1}。最佳验证准确率: {best_acc:.4f}%")
+                break
             
             # 清理内存
             del local_weights, local_losses
@@ -367,6 +405,7 @@ def main():
     logging.info(f"     - 客户端数量: {args.client_num}")
     logging.info(f"     - 参与比例: {args.frac * 100:.0f}%")
     logging.info(f"     - 数据分布: {'IID' if args.iid else 'Non-IID'}")
+    logging.info(f"     - Early Stopping耐心值: {args.patience} {'(已启用)' if args.patience > 0 else '(已禁用)'}")
     logging.info("")
     logging.info(f"  🔹 优化器参数:")
     logging.info(f"     - 优化器: {args.optim.upper()}")
