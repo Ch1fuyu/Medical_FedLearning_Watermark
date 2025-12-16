@@ -55,6 +55,20 @@ def parser_args():
     parser.add_argument('--multiloss_alpha_late', type=float, default=0.0001,
                         help='alpha value for late training phase (last 70% of epochs), increased for better watermark robustness')
     
+    # ========================= 正则项消融实验参数 ========================
+    parser.add_argument('--use_reg1', action='store_true', default=True,
+                        help='enable reg_term1 (gradient balance regularization term)')
+    parser.add_argument('--use_reg2', action='store_true', default=True,
+                        help='enable reg_term2 (variance ratio regularization term)')
+    parser.add_argument('--use_reg3', action='store_true', default=True,
+                        help='enable reg_term3 (adaptive weight regularization term)')
+    parser.add_argument('--disable_reg1', action='store_true', default=False,
+                        help='disable reg_term1 (gradient balance regularization term)')
+    parser.add_argument('--disable_reg2', action='store_true', default=False,
+                        help='disable reg_term2 (variance ratio regularization term)')
+    parser.add_argument('--disable_reg3', action='store_true', default=False,
+                        help='disable reg_term3 (adaptive weight regularization term)')
+    
     # ========================= Focal Loss 参数 ========================
     parser.add_argument('--use_focal_loss', action='store_true', default=False,
                         help='enable FocalLoss for imbalanced multi-label classification')
@@ -252,6 +266,14 @@ def parser_args():
 
     # 4) 应用用户 overrides（最后一步，优先级最高）
     _apply_simple_overrides(args, args.override)
+    
+    # 5) 处理正则项消融实验参数（disable参数优先级高于use参数）
+    if hasattr(args, 'disable_reg1') and args.disable_reg1:
+        args.use_reg1 = False
+    if hasattr(args, 'disable_reg2') and args.disable_reg2:
+        args.use_reg2 = False
+    if hasattr(args, 'disable_reg3') and args.disable_reg3:
+        args.use_reg3 = False
     
     # 5) 处理基准模式和水印开关的互斥逻辑
     if args.baseline_mode:

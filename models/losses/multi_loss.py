@@ -228,7 +228,8 @@ class MultiLoss:
             combined_target_mask, combined_encoder_mask, combined_effective_mask
         )
     
-    def compute_loss(self, main_loss, current_epoch, total_epochs, alpha_early=None, alpha_late=None):
+    def compute_loss(self, main_loss, current_epoch, total_epochs, alpha_early=None, alpha_late=None,
+                     use_reg1=True, use_reg2=True, use_reg3=True):
         """
         计算多重损失
         
@@ -238,6 +239,9 @@ class MultiLoss:
             total_epochs: 总epoch数
             alpha_early: 早期训练的alpha值（从args传入）
             alpha_late: 晚期训练的alpha值（从args传入）
+            use_reg1: 是否使用梯度平衡正则项（reg_term1）
+            use_reg2: 是否使用方差比例正则项（reg_term2）
+            use_reg3: 是否使用自适应权重正则项（reg_term3）
             
         Returns:
             总损失值
@@ -249,10 +253,12 @@ class MultiLoss:
         # 获取alpha值
         alpha = self.get_alpha(current_epoch, total_epochs, alpha_early, alpha_late)
         
-        # 计算正则化项
-        reg_term1 = self._compute_gradient_balance_term(alpha)
-        reg_term2 = self._compute_variance_ratio_term(alpha)
-        reg_term3 = self._compute_adaptive_weight_term(main_loss)
+        # 计算正则化项（根据参数选择性启用）
+        # 确保禁用时的0张量在正确的设备上
+        device = main_loss.device
+        reg_term1 = self._compute_gradient_balance_term(alpha) if use_reg1 else torch.tensor(0.0, requires_grad=True, device=device)
+        reg_term2 = self._compute_variance_ratio_term(alpha) if use_reg2 else torch.tensor(0.0, requires_grad=True, device=device)
+        reg_term3 = self._compute_adaptive_weight_term(main_loss) if use_reg3 else torch.tensor(0.0, requires_grad=True, device=device)
         
         # 总损失
         total_loss = main_loss + reg_term1 + reg_term2 + reg_term3

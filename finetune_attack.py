@@ -718,12 +718,12 @@ def main():
     # 解析微调攻击特定的命令行参数
     parser = argparse.ArgumentParser(description='微调攻击实验')
     parser.add_argument('--model_path', type=str, 
-                       default='./save/alexnet/chestmnist/202510311439_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_auc_0.7623_enhanced.pkl',
+                       default='./save/alexnet/chestmnist/202511111912_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_auc_0.7600_r3_enhanced.pkl',
                        help='模型文件路径')
     parser.add_argument('--model_type', type=str, default='alexnet',
                        choices=['resnet', 'alexnet'],
                        help='模型类型')
-    parser.add_argument('--client_num', type=int, default=10,
+    parser.add_argument('--client_num', type=int, default=5,
                        help='客户端数量')
     parser.add_argument('--dataset', type=str, default='chestmnist',
                        choices=['cifar10', 'cifar100', 'chestmnist'],

@@ -99,54 +99,8 @@ def evaluate_delta_pcc(original_model_state, current_model_state, reconstructor,
             print("❌ 自编码器重建失败")
             return None
         
-        # 🔍 调试：检查提取的水印参数是否变化
-        import hashlib
-        # 使用第一个客户端进行调试（客户端ID从0开始）
-        debug_client_id = 0
-        # 使用传入的模型对象（如果有），否则尝试从 reconstructor 获取
-        model_for_extraction = model if model is not None else getattr(reconstructor, 'model', None)
-        orig_wm = reconstructor.key_manager.extract_watermark(original_model_state, client_id=debug_client_id, model=model_for_extraction)
-        curr_wm = reconstructor.key_manager.extract_watermark(current_model_state, client_id=debug_client_id, model=model_for_extraction)
-        
-        def get_tensor_hash(tensor):
-            if len(tensor) == 0:
-                return "empty"
-            return hashlib.md5(f"{tensor.sum().item()}_{tensor.std().item()}".encode()).hexdigest()[:8]
-        
-        orig_wm_hash = get_tensor_hash(orig_wm)
-        curr_wm_hash = get_tensor_hash(curr_wm)
-        print(f"    🔍 水印参数哈希: 原始={orig_wm_hash}, 当前={curr_wm_hash}, 相同={orig_wm_hash==curr_wm_hash}")
-        print(f"    🔍 水印参数统计: 原始sum={orig_wm.sum().item():.6f}, 当前sum={curr_wm.sum().item():.6f}")
-        print(f"    🔍 水印参数零值: 原始={(orig_wm==0).sum().item()}/{len(orig_wm)}, 当前={(curr_wm==0).sum().item()}/{len(curr_wm)}")
-        print(f"    🔍 水印参数差异: max_diff={torch.abs(curr_wm - orig_wm).max().item():.9f}, mean_diff={torch.abs(curr_wm - orig_wm).mean().item():.9f}")
-        
         # 5. 测试重建自编码器的性能
         perf_after = test_autoencoder_mse(current_reconstructed_autoencoder, test_loader, device)
-        
-        # 🔍 调试：直接比较两个自编码器的编码器参数
-        orig_encoder_params = torch.cat([p.view(-1) for p in original_reconstructed_autoencoder.encoder.parameters()])
-        curr_encoder_params = torch.cat([p.view(-1) for p in current_reconstructed_autoencoder.encoder.parameters()])
-        encoder_diff = torch.abs(orig_encoder_params - curr_encoder_params)
-        print(f"    🔍 自编码器编码器参数: 原始sum={orig_encoder_params.sum().item():.6f}, 当前sum={curr_encoder_params.sum().item():.6f}")
-        print(f"    🔍 编码器参数差异: max={encoder_diff.max().item():.9f}, mean={encoder_diff.mean().item():.9f}, 非零差异={(encoder_diff > 1e-9).sum().item()}/{len(encoder_diff)}")
-        
-        # 🔍 检查被剪枝的水印参数的值
-        zero_mask = (curr_wm == 0) & (orig_wm != 0)
-        if zero_mask.sum() > 0:
-            pruned_values = orig_wm[zero_mask]
-            print(f"    🔍 被剪枝的{zero_mask.sum().item()}个水印参数: mean={pruned_values.mean().item():.9f}, max={pruned_values.abs().max().item():.9f}, min={pruned_values.abs().min().item():.9f}")
-        
-        # 🔍 调试：检查模型状态字典是否真的不同
-        import hashlib
-        def get_state_hash(state_dict):
-            """计算状态字典的哈希值"""
-            # 将所有参数连接成一个字符串并计算哈希
-            param_str = ''.join([f"{k}:{v.sum().item()}" for k, v in state_dict.items()])
-            return hashlib.md5(param_str.encode()).hexdigest()[:8]
-        
-        orig_hash = get_state_hash(original_model_state)
-        curr_hash = get_state_hash(current_model_state)
-        print(f"    🔍 模型状态哈希: 原始={orig_hash}, 当前={curr_hash}, 是否相同={orig_hash==curr_hash}")
         
         # 6. 计算性能变化
         delta_perf = abs(perf_after - perf_before)
