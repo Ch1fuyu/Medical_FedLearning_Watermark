@@ -26,11 +26,33 @@ def accuracy(output, target):
 class TesterPrivate:
     """测试器类，用于模型评估"""
     
-    def __init__(self, model, device, verbose=False, args=None):
+    def __init__(self, model, device, verbose=False, args=None, loss_fn=None):
         self.model = model
         self.device = device
         self.verbose = verbose
         self.args = args
+        self.loss_fn = loss_fn  # 可选的外部损失函数（如FocalLoss）
+
+    def _compute_loss(self, pred, target):
+        """根据任务类型计算损失，支持外部损失函数"""
+        # 如果有外部损失函数，优先使用
+        if self.loss_fn is not None:
+            return self.loss_fn(pred, target)
+
+        # 默认使用标准损失函数
+        if self.args is not None and getattr(self.args, 'task_type', 'multiclass') == 'multiclass':
+            return F.cross_entropy(pred, target, reduction='mean')
+        return F.binary_cross_entropy_with_logits(pred, target.float(), reduction='mean')
+
+    def _compute_loss_sum(self, pred, target):
+        """计算损失的 sum 版本，用于累积"""
+        # 如果有外部损失函数，转换为 sum
+        if self.loss_fn is not None:
+            return self.loss_fn(pred, target) * target.size(0)
+
+        if self.args is not None and getattr(self.args, 'task_type', 'multiclass') == 'multiclass':
+            return F.cross_entropy(pred, target, reduction='sum')
+        return F.binary_cross_entropy_with_logits(pred, target.float(), reduction='sum')
 
     def test(self, dataloader):
         """测试模型性能"""
@@ -54,7 +76,7 @@ class TesterPrivate:
                 pred = self.model(data)
 
                 if self.args is not None and getattr(self.args, 'task_type', 'multiclass') == 'multiclass':
-                    loss_meter += F.cross_entropy(pred, target, reduction='sum').item()
+                    loss_meter += self._compute_loss_sum(pred, target).item()
                     # top-1 accuracy
                     preds_top1 = pred.argmax(dim=1)
                     label_acc = (preds_top1 == target).float().mean() * 100.0
@@ -69,7 +91,7 @@ class TesterPrivate:
                     all_y_score.append(probs.detach().cpu().numpy())
                 else:
                     # multilabel/binary
-                    loss_meter += F.binary_cross_entropy_with_logits(pred, target.float(), reduction='sum').item()
+                    loss_meter += self._compute_loss_sum(pred, target).item()
                     acc_results = accuracy(pred, target)
                     label_acc = acc_results[0]
                     sample_acc = acc_results[1]
@@ -146,7 +168,7 @@ class TrainerPrivateEnhanced:
         self.multi_loss = MultiLoss(init_a=init_a, init_b=init_b)
         self.mask_manager = None
         self.autoencoder = None
-        
+
         # 初始化FocalLoss，降低gamma避免过度关注困难样本，提升训练稳定性
         focal_gamma = 1.0  # 降低到1.0，更接近标准BCE
         focal_reduction = 'mean'
@@ -155,6 +177,9 @@ class TrainerPrivateEnhanced:
         if args and hasattr(args, 'focal_reduction'):
             focal_reduction = args.focal_reduction
         self.focal_loss = FocalLoss(alpha=None, gamma=focal_gamma, reduction=focal_reduction)
+
+        # 传递focal_loss给TesterPrivate，确保test时使用相同的损失函数
+        self.tester = TesterPrivate(model, device, args=args, loss_fn=self.focal_loss)
         
         # 初始化掩码管理器
         if args and getattr(args, 'use_key_matrix', False):
