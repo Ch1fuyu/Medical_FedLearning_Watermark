@@ -648,19 +648,28 @@ def evaluate_watermark_integrity(model_state_dict, reconstructor, model=None):
 
 
 
-def save_results(results, save_dir: str = './save/finetune_attack'):
+def save_results(results, model_path: str, save_dir: str = './save/finetune_attack'):
     """
     保存实验结果
 
     Args:
         results: 实验结果
+        model_path: 微调对象模型路径
         save_dir: 保存目录
     """
     os.makedirs(save_dir, exist_ok=True)
 
     # 生成时间戳
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename_prefix = f'finetune_attack_{timestamp}'
+    timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+    
+    # 从模型路径提取原始模型的日期前缀（文件名格式：YYYYMMDDHHMMSS_...）
+    model_filename = os.path.basename(model_path)
+    import re
+    match = re.match(r'^(\d{14})_', model_filename)
+    model_date_prefix = match.group(1) if match else 'unknown'
+    
+    # 文件名前缀：finetune_attack_实验时间戳_原始模型日期
+    filename_prefix = f'finetune_attack_{timestamp}_{model_date_prefix}'
     
     # 保存详细结果
     results_file = os.path.join(save_dir, f'{filename_prefix}.pkl')
@@ -689,15 +698,22 @@ def save_results(results, save_dir: str = './save/finetune_attack'):
 
     df = pd.DataFrame(df_data)
     
-    # 格式化数值列，保留6位小数
+    # 格式化数值列：默认保留6位小数，ΔPCC保留8位小数（便于精细对比）
     numeric_columns = ['train_loss', 'test_loss', 'test_auc', 'test_accuracy', 'learning_rate', 
                       'perf_fail', 'tau', 'delta_perf', 'delta_pcc']
+    precision_map = {
+        'delta_pcc': 8,
+    }
     for col in numeric_columns:
         if col in df.columns:
-            df[col] = df[col].apply(lambda x: f"{x:.6f}" if pd.notna(x) and isinstance(x, (int, float)) else x)
+            prec = precision_map.get(col, 6)
+            df[col] = df[col].apply(
+                lambda x, p=prec: f"{float(x):.{p}f}"
+                if pd.notna(x) and isinstance(x, (int, float, np.floating)) else x
+            )
     
-    # 在CSV文件最后一行添加PKL文件名信息
-    pkl_filename = os.path.basename(results_file)
+    # 在CSV文件最后一行添加PKL文件名信息（保存原始模型路径）
+    pkl_filename = os.path.basename(model_path)
     df.loc[len(df)] = ['PKL_FILE'] + [''] * (len(df.columns) - 2) + [pkl_filename]
     
     df.to_csv(csv_file, index=False, encoding='utf-8-sig')
@@ -705,6 +721,19 @@ def save_results(results, save_dir: str = './save/finetune_attack'):
     print(f"✓ 结果已保存到: {save_dir}")
     print(f"  - 详细结果: {results_file}")
     print(f"  - 汇总结果: {csv_file}")
+
+    # 保存CSV时额外输出最高ΔPCC（8位小数），便于快速核对
+    try:
+        delta_pcc_values = [
+            float(r.get('delta_pcc'))
+            for r in results
+            if r.get('delta_pcc') is not None
+        ]
+        if delta_pcc_values:
+            max_delta_pcc = max(delta_pcc_values)
+            print(f"  - 最高ΔPCC: {max_delta_pcc:.8f}")
+    except Exception:
+        pass
 
 
 def main():
@@ -718,7 +747,7 @@ def main():
     # 解析微调攻击特定的命令行参数
     parser = argparse.ArgumentParser(description='微调攻击实验')
     parser.add_argument('--model_path', type=str, 
-                       default='./save/alexnet/chestmnist/202511111912_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_auc_0.7600_r3_enhanced.pkl',
+                       default='./save/alexnet/chestmnist/202603101242_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_auc_0.7256_r1_r2_r3_enhanced.pkl',
                        help='模型文件路径')
     parser.add_argument('--model_type', type=str, default='alexnet',
                        choices=['resnet', 'alexnet'],
@@ -732,7 +761,7 @@ def main():
                        help='密钥矩阵基础目录')
     parser.add_argument('--autoencoder_dir', type=str, default='./save/autoencoder',
                        help='自编码器目录')
-    parser.add_argument('--optimizer', type=str, default='adam', choices=['sgd', 'adam'],
+    parser.add_argument('--optimizer', type=str, default='sgd', choices=['sgd', 'adam'],
                        help='优化器类型（默认使用args.py中的optim）')
     parser.add_argument('--finetune_epochs', type=int, default=50,
                        help='微调轮数')
@@ -976,7 +1005,7 @@ def main():
     # 保存结果
     print("\n" + "=" * 80)
     print("保存实验结果...")
-    save_results(results, save_dir='./save/finetune_attack')
+    save_results(results, args.model_path, save_dir='./save/finetune_attack')
 
     # 输出总结
     print("\n" + "=" * 80)
@@ -989,7 +1018,7 @@ def main():
         print("-" * 80)
         
         for result in results:
-            delta_pcc_str = f"{result['delta_pcc']:.4f}" if result['delta_pcc'] is not None else "N/A"
+            delta_pcc_str = f"{result['delta_pcc']:.8f}" if result['delta_pcc'] is not None else "N/A"
             infringement_str = "是" if result['is_infringement'] else "否" if result['is_infringement'] is not None else "N/A"
             
             print(f"{result['epoch']:>3}  "
@@ -997,7 +1026,7 @@ def main():
                   f"{result['test_loss']:>8.4f}  "
                   f"{result['test_auc']:>8.4f}  "  # AUC更宽显示
                   f"{result['test_accuracy']:>6.2%}  "  # 准确率稍窄
-                  f"{delta_pcc_str:>6}  "
+                  f"{delta_pcc_str:>10}  "
                   f"{infringement_str:>6}")
     else:
         # CIFAR10等多分类任务
@@ -1005,7 +1034,7 @@ def main():
         print("-" * 80)
         
         for result in results:
-            delta_pcc_str = f"{result['delta_pcc']:.4f}" if result['delta_pcc'] is not None else "N/A"
+            delta_pcc_str = f"{result['delta_pcc']:.8f}" if result['delta_pcc'] is not None else "N/A"
             infringement_str = "是" if result['is_infringement'] else "否" if result['is_infringement'] is not None else "N/A"
             
             print(f"{result['epoch']:>3}  "
@@ -1013,7 +1042,7 @@ def main():
                   f"{result['test_loss']:>8.4f}  "
                   f"{result['test_auc']:>6.4f}  "
                   f"{result['test_accuracy']:>8.2%}  "
-                  f"{delta_pcc_str:>6}  "
+                  f"{delta_pcc_str:>10}  "
                   f"{infringement_str:>6}")
 
     # 分析趋势
@@ -1040,7 +1069,7 @@ def main():
             initial_delta_pcc = delta_pcc_values[0]
             final_delta_pcc = delta_pcc_values[-1]
             delta_pcc_change = final_delta_pcc - initial_delta_pcc
-            print(f"ΔPCC变化: {initial_delta_pcc:.4f} → {final_delta_pcc:.4f} (变化: {delta_pcc_change:+.4f})")
+            print(f"ΔPCC变化: {initial_delta_pcc:.8f} → {final_delta_pcc:.8f} (变化: {delta_pcc_change:+.8f})")
         
         # 分析侵权判断
         infringement_count = sum(1 for r in results if r['is_infringement'] is True)
