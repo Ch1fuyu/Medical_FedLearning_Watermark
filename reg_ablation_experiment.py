@@ -8,10 +8,10 @@
 - reg_term3: 自适应权重正则项 (adaptive weight)
 
 使用方法：
-python reg_ablation_experiment.py --dataset chestmnist --model_name alexnet --disable_reg1  # 禁用reg1
-python reg_ablation_experiment.py --dataset chestmnist --model_name alexnet --disable_reg2  # 禁用reg2
-python reg_ablation_experiment.py --dataset chestmnist --model_name alexnet --disable_reg3  # 禁用reg3
-python reg_ablation_experiment.py --dataset chestmnist --model_name alexnet --disable_reg1 --disable_reg2  # 只使用reg3
+python reg_ablation_experiment.py --dataset chestmnist --model_name alexnet --use_reg1=False  # 禁用reg1
+python reg_ablation_experiment.py --dataset chestmnist --model_name alexnet --use_reg2=False  # 禁用reg2
+python reg_ablation_experiment.py --dataset chestmnist --model_name alexnet --use_reg3=False  # 禁用reg3
+python reg_ablation_experiment.py --dataset chestmnist --model_name alexnet --use_reg1=False --use_reg2=False  # 只使用reg3
 """
 import copy
 import os
@@ -179,7 +179,7 @@ class RegAblationExperiment(Experiment):
         idxs_users = []
 
         # Early Stopping 配置
-        patience = 10
+        patience = 150
         early_stop_counter = 0
         best_val_acc = -np.inf
         best_val_auc = -np.inf
