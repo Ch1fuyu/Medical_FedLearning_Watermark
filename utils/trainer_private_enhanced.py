@@ -25,16 +25,21 @@ def accuracy(output, target):
 
 class TesterPrivate:
     """测试器类，用于模型评估"""
-    
-    def __init__(self, model, device, verbose=False, args=None, loss_fn=None):
+
+    def __init__(self, model, device, verbose=False, args=None, loss_fn=None, get_loss_fn=None):
         self.model = model
         self.device = device
         self.verbose = verbose
         self.args = args
         self.loss_fn = loss_fn  # 可选的外部损失函数（如FocalLoss）
+        self.get_loss_fn = get_loss_fn  # 获取正确损失函数的回调
 
     def _compute_loss(self, pred, target):
         """根据任务类型计算损失，支持外部损失函数"""
+        # 如果有 get_loss_fn 回调（优先级最高），使用它获取正确的损失函数
+        if self.get_loss_fn is not None:
+            return self.get_loss_fn(pred, target)
+
         # 如果有外部损失函数，优先使用
         if self.loss_fn is not None:
             return self.loss_fn(pred, target)
@@ -46,6 +51,10 @@ class TesterPrivate:
 
     def _compute_loss_sum(self, pred, target):
         """计算损失的 sum 版本，用于累积"""
+        # 如果有 get_loss_fn 回调（优先级最高），使用它获取正确的损失函数
+        if self.get_loss_fn is not None:
+            return self.get_loss_fn(pred, target) * target.size(0)
+
         # 如果有外部损失函数，转换为 sum
         if self.loss_fn is not None:
             return self.loss_fn(pred, target) * target.size(0)
@@ -178,8 +187,8 @@ class TrainerPrivateEnhanced:
             focal_reduction = args.focal_reduction
         self.focal_loss = FocalLoss(alpha=None, gamma=focal_gamma, reduction=focal_reduction)
 
-        # 传递focal_loss给TesterPrivate，确保test时使用相同的损失函数
-        self.tester = TesterPrivate(model, device, args=args, loss_fn=self.focal_loss)
+        # 传递focal_loss和get_loss_function方法给TesterPrivate，确保test时使用正确的损失函数
+        self.tester = TesterPrivate(model, device, args=args, loss_fn=self.focal_loss, get_loss_fn=self.get_loss_function)
         
         # 初始化掩码管理器
         if args and getattr(args, 'use_key_matrix', False):
