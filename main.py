@@ -184,34 +184,68 @@ class FederatedLearningOnChestMNIST(Experiment):
 
             # ========== 第三步：模型泄漏追踪 ==========
             if leak_info is not None:
-                leaked_model_state = leak_info['model_params']
                 actual_leaker = leak_info['leaked_client']
+                attack_mode = leak_info.get('attack_mode', 'none')
 
-                # 执行追踪（基于下发的定制模型）
-                similarity_rankings, detected_leaker = self._track_model_leakage(
-                    leaked_model_state, idxs_users
-                )
+                if attack_mode == 'gaussian_noise' and 'attacked_models' in leak_info:
+                    # 三种噪声等级分别追踪
+                    attack_results = {}
+                    for level, attacked_model in leak_info['attacked_models'].items():
+                        similarity_rankings, detected_leaker = self._track_model_leakage(
+                            attacked_model, idxs_users
+                        )
+                        attack_results[level] = {
+                            'detected_leaker': detected_leaker,
+                            'similarity_rankings': similarity_rankings,
+                            'is_correct': (actual_leaker == detected_leaker)
+                        }
 
-                # 记录追踪结果
-                trace_result = {
-                    'round': epoch + 1,
-                    'actual_leaked_client': actual_leaker,
-                    'detected_leaked_client': detected_leaker,
-                    'is_correct': (actual_leaker == detected_leaker),
-                    'similarity_rankings': similarity_rankings
-                }
-                self.trace_results.append(trace_result)
+                        logging.info(f"[追踪结果-噪声等级{level}] 轮次 {epoch + 1}")
+                        logging.info(f"  实际泄漏者: 客户端 {actual_leaker}")
+                        logging.info(f"  检测结果: 客户端 {detected_leaker}")
+                        logging.info(f"  追踪正确性: {'✓ 正确' if attack_results[level]['is_correct'] else '✗ 错误'}")
+                        logging.info(f"  相似度排名:")
+                        for rank, (cid, sim) in enumerate(similarity_rankings[:5], 1):
+                            marker = " <-- 检测" if cid == detected_leaker else ""
+                            actual_marker = " (实际泄漏者)" if cid == actual_leaker else ""
+                            logging.info(f"    {rank}. 客户端 {cid}: 相似度 = {sim:.6f}{marker}{actual_marker}")
 
-                # 输出追踪结果
-                logging.info(f"[追踪结果] 轮次 {epoch + 1}")
-                logging.info(f"  实际泄漏者: 客户端 {actual_leaker}")
-                logging.info(f"  检测结果: 客户端 {detected_leaker}")
-                logging.info(f"  追踪正确性: {'✓ 正确' if trace_result['is_correct'] else '✗ 错误'}")
-                logging.info(f"  相似度排名:")
-                for rank, (cid, sim) in enumerate(similarity_rankings[:5], 1):
-                    marker = " <-- 检测" if cid == detected_leaker else ""
-                    actual_marker = " (实际泄漏者)" if cid == actual_leaker else ""
-                    logging.info(f"    {rank}. 客户端 {cid}: 相似度 = {sim:.6f}{marker}{actual_marker}")
+                    # 记录汇总结果（使用等级2的结果作为主要判断）
+                    primary_result = attack_results.get(2, attack_results.get(1, {}))
+                    trace_result = {
+                        'round': epoch + 1,
+                        'actual_leaked_client': actual_leaker,
+                        'detected_leaked_client': primary_result.get('detected_leaker'),
+                        'is_correct': primary_result.get('is_correct', False),
+                        'similarity_rankings': primary_result.get('similarity_rankings', []),
+                        'attack_results': attack_results
+                    }
+                    self.trace_results.append(trace_result)
+                else:
+                    # 无攻击模式，使用原始模型追踪
+                    leaked_model_state = leak_info['model_params']
+                    similarity_rankings, detected_leaker = self._track_model_leakage(
+                        leaked_model_state, idxs_users
+                    )
+
+                    trace_result = {
+                        'round': epoch + 1,
+                        'actual_leaked_client': actual_leaker,
+                        'detected_leaked_client': detected_leaker,
+                        'is_correct': (actual_leaker == detected_leaker),
+                        'similarity_rankings': similarity_rankings
+                    }
+                    self.trace_results.append(trace_result)
+
+                    logging.info(f"[追踪结果] 轮次 {epoch + 1}")
+                    logging.info(f"  实际泄漏者: 客户端 {actual_leaker}")
+                    logging.info(f"  检测结果: 客户端 {detected_leaker}")
+                    logging.info(f"  追踪正确性: {'✓ 正确' if trace_result['is_correct'] else '✗ 错误'}")
+                    logging.info(f"  相似度排名:")
+                    for rank, (cid, sim) in enumerate(similarity_rankings[:5], 1):
+                        marker = " <-- 检测" if cid == detected_leaker else ""
+                        actual_marker = " (实际泄漏者)" if cid == actual_leaker else ""
+                        logging.info(f"    {rank}. 客户端 {cid}: 相似度 = {sim:.6f}{marker}{actual_marker}")
             
             # ========== 第四步：本地训练（使用下发的定制模型） ==========
             local_ws, local_losses = [], []
@@ -801,6 +835,7 @@ class FederatedLearningOnChestMNIST(Experiment):
         模拟模型泄漏事件（发生在本地训练之前）
 
         根据配置的泄漏间隔从参与训练的客户端中随机选择一个泄漏其下发的定制模型
+        同时应用三种等级的噪声攻击，用于测试追踪系统在有攻击情况下的表现
 
         Args:
             epoch: 当前轮次
@@ -836,11 +871,35 @@ class FederatedLearningOnChestMNIST(Experiment):
             else:
                 leaked_model_copy[k] = v
 
+        # 获取配置的噪声攻击设置
+        attack_mode = getattr(self.args, 'leak_attack_mode', 'none')
+
         leak_info = {
             'round': epoch + 1,
             'leaked_client': leaked_client,
-            'model_params': leaked_model_copy
+            'original_model_params': leaked_model_copy,
+            'attack_mode': attack_mode
         }
+
+        # 根据攻击模式生成不同版本的泄漏模型
+        if attack_mode == 'gaussian_noise':
+            # 三种噪声等级：1=弱, 2=中, 3=强
+            noise_configs = self.args.leak_noise_configs  # 从配置中心获取
+            attacked_models = {}
+
+            for level, scale in noise_configs.items():
+                attacked_models[level] = self._add_noise_to_client_watermark(
+                    leaked_model_copy, leaked_client, scale
+                )
+                logging.info(f"   [攻击模拟] 等级{level}: 已对客户端 {leaked_client} 的水印区域添加高斯噪声 (scale={scale})")
+
+            leak_info['attacked_models'] = attacked_models
+            # 默认使用中等强度进行追踪（便于观察）
+            leak_info['model_params'] = attacked_models.get(2, leaked_model_copy)
+        else:
+            # 无攻击模式，直接使用原始模型
+            leak_info['model_params'] = leaked_model_copy
+            leak_info['attacked_models'] = {}
 
         # 记录泄漏事件
         self.leakage_records.append(leak_info)
@@ -850,6 +909,99 @@ class FederatedLearningOnChestMNIST(Experiment):
         logging.info(f"=" * 60)
 
         return leak_info
+
+    def _add_noise_to_client_watermark(self, model_state, client_id, noise_scale):
+        """
+        对指定客户端的水印区域添加高斯噪声
+
+        Args:
+            model_state: 模型参数字典
+            client_id: 客户端ID
+            noise_scale: 噪声标准差（相对于水印参数值）
+
+        Returns:
+            添加噪声后的模型参数字典
+        """
+        try:
+            from utils.key_matrix_utils import KeyMatrixManager
+            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
+
+            # 深拷贝模型
+            noisy_model = {}
+            for k, v in model_state.items():
+                if isinstance(v, torch.Tensor):
+                    noisy_model[k] = v.clone().detach()
+                else:
+                    noisy_model[k] = v
+
+            # 获取该客户端的水印位置
+            positions = key_manager.load_positions(client_id)
+
+            # 构建参数偏移映射
+            offset_map, _ = self._build_param_offset_map(model_state)
+
+            # 计算水印区域的参数统计
+            watermark_values = []
+            for param_name, global_idx in positions:
+                local_idx = None
+                actual_param_name = None
+
+                # 检查是否可以直接使用
+                if param_name in noisy_model:
+                    param_flat = noisy_model[param_name].view(-1)
+                    if global_idx < param_flat.numel():
+                        local_idx = global_idx
+                        watermark_values.append(param_flat[local_idx].item())
+                        continue
+
+                # 全局索引转换
+                if param_name in offset_map:
+                    param_offset = offset_map[param_name]
+                    param_flat = noisy_model[param_name].view(-1)
+                    if param_offset <= global_idx < param_offset + param_flat.numel():
+                        local_idx = global_idx - param_offset
+                        watermark_values.append(param_flat[local_idx].item())
+
+            # 计算噪声标准差
+            if watermark_values:
+                value_std = np.std(watermark_values)
+                value_mean = np.mean(np.abs(watermark_values))
+                # 使用参数值的相对值作为噪声基准
+                noise_std = max(value_mean * noise_scale, 1e-6)
+            else:
+                noise_std = noise_scale
+
+            # 添加噪声
+            for param_name, global_idx in positions:
+                local_idx = None
+                actual_param_name = None
+
+                if param_name in noisy_model:
+                    param_flat = noisy_model[param_name].view(-1)
+                    if global_idx < param_flat.numel():
+                        local_idx = global_idx
+                        actual_param_name = param_name
+
+                if actual_param_name is None and param_name in offset_map:
+                    param_offset = offset_map[param_name]
+                    param_flat = noisy_model[param_name].view(-1)
+                    if param_offset <= global_idx < param_offset + param_flat.numel():
+                        local_idx = global_idx - param_offset
+                        actual_param_name = param_name
+
+                if actual_param_name and local_idx is not None:
+                    original_value = param_flat[local_idx].item()
+                    noise = np.random.normal(0, noise_std)
+                    new_value = original_value + noise
+                    param_flat[local_idx] = new_value
+
+            logging.info(f"   [噪声统计] 水印参数均值={np.mean(watermark_values):.6f}, 标准差={value_std:.6f}, 噪声std={noise_std:.6f}")
+
+            return noisy_model
+
+        except Exception as e:
+            logging.warning(f"Failed to add noise to watermark: {e}")
+            return model_state
 
     def _build_param_offset_map(self, model_params):
         """

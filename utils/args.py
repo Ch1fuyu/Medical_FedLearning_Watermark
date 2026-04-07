@@ -89,6 +89,14 @@ def parser_args():
                         help='enable model leakage tracking simulation and detection')
     parser.add_argument('--leak_interval', type=int, default=30,
                         help='leak simulation interval (every N rounds), set to 0 to disable')
+    parser.add_argument('--leak_attack_mode', type=str, default='none', choices=['none', 'gaussian_noise'],
+                        help='attack mode after model leakage: gaussian_noise adds noise to watermark region')
+    parser.add_argument('--leak_noise_weak', type=float, default=0.01,
+                        help='weak noise scale for level 1 (ratio of mean watermark value)')
+    parser.add_argument('--leak_noise_medium', type=float, default=0.05,
+                        help='medium noise scale for level 2 (ratio of mean watermark value)')
+    parser.add_argument('--leak_noise_strong', type=float, default=0.1,
+                        help='strong noise scale for level 3 (ratio of mean watermark value)')
     
     # ========================= 差分隐私参数 ========================
     parser.add_argument('--dp', action='store_true', default=False, help='enable differential privacy')
@@ -277,5 +285,12 @@ def parser_args():
     if not args.enable_watermark:
         args.use_key_matrix = False
         print("🔧 水印已关闭，相关功能已禁用")
+
+    # 7) 初始化泄漏追踪噪声配置
+    args.leak_noise_configs = {
+        1: args.leak_noise_weak,
+        2: args.leak_noise_medium,
+        3: args.leak_noise_strong
+    }
 
     return args
