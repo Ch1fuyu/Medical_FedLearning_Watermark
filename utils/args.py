@@ -36,6 +36,8 @@ def parser_args():
     
     # ========================= 训练控制参数 ========================
     parser.add_argument('--log_interval', default=1, type=int, help='evaluation interval')
+    parser.add_argument('--patience', type=int, default=0,
+                        help='early stopping patience (number of rounds without improvement)')
     parser.add_argument('--baseline_mode', action='store_true', default=False,
                         help='run baseline training without watermark (equivalent to --enable_watermark=False)')
     
@@ -81,6 +83,12 @@ def parser_args():
                         help='directory containing generated key matrices')
     parser.add_argument('--encoder_path', type=str, default='save/autoencoder/encoder.pth',
                         help='path to the trained autoencoder encoder weights')
+    
+    # ========================= 模型泄漏追踪配置 ========================
+    parser.add_argument('--enable_leakage_tracking', action='store_true', default=True,
+                        help='enable model leakage tracking simulation and detection')
+    parser.add_argument('--leak_interval', type=int, default=30,
+                        help='leak simulation interval (every N rounds), set to 0 to disable')
     
     # ========================= 差分隐私参数 ========================
     parser.add_argument('--dp', action='store_true', default=False, help='enable differential privacy')
