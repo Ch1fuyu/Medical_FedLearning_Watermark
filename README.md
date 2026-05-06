@@ -21,7 +21,7 @@ python train_key_matrix.py --model_type resnet --client_num 10 --dataset chestmn
 
 ### 3. 联邦学习训练
 ```bash
-python main.py --model resnet --dataset chestmnist --client_num 10 --epochs 100
+python main.py --model_name resnet --dataset chestmnist --client_num 10 --epochs 100
 ```
 
 ### 4. 攻击实验
@@ -87,7 +87,7 @@ python pruning_attack.py --model_path ./save/resnet/chestmnist/model.pkl
 
 ```bash
 # 基础配置
---model resnet              # 模型类型 (resnet/alexnet)
+--model_name resnet              # 模型类型 (resnet/alexnet)
 --dataset chestmnist        # 数据集
 --client_num 10            # 客户端数量
 --epochs 100               # 训练轮数
