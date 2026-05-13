@@ -58,7 +58,21 @@ class RegAblationExperiment(Experiment):
     正则项消融实验：可以选择性启用/禁用三个正则项
     保持水印嵌入逻辑不变（使用KeyMatrixManager进行参数替换）
     同时包含模型泄漏追踪功能
+    
+    正则项配置说明：
+    - reg1: 梯度平衡正则项 (gradient balance) - 平衡目标模型梯度与编码器区域梯度
+    - reg2: 方差比例正则项 (variance ratio) - 控制梯度方差比例
+    - reg3: 自适应权重正则项 (adaptive weight) - 基于主任务损失自适应调整
     """
+    
+    # ========== 正则项消融实验配置区域 ==========
+    # 修改此处的值来启用/禁用不同的正则项
+    REG_CONFIG = {
+        'reg1': True,  # 梯度平衡正则项
+        'reg2': True,  # 方差比例正则项
+        'reg3': True,  # 自适应权重正则项
+    }
+    # ===========================================
     
     def __init__(self, args):
         super().__init__(args)
@@ -68,10 +82,15 @@ class RegAblationExperiment(Experiment):
         self.sigma = args.sigma
         self.key_matrix_dir = getattr(args, 'key_matrix_dir', './save/key_matrix')
         
-        # 获取正则项配置
-        self.use_reg1 = getattr(args, 'use_reg1', True)
-        self.use_reg2 = getattr(args, 'use_reg2', True)
-        self.use_reg3 = getattr(args, 'use_reg3', True)
+        # 从类配置读取正则项配置
+        self.use_reg1 = self.REG_CONFIG['reg1']
+        self.use_reg2 = self.REG_CONFIG['reg2']
+        self.use_reg3 = self.REG_CONFIG['reg3']
+        
+        # 将配置添加到args中，供TrainerRegAblation读取
+        self.args.use_reg1 = self.use_reg1
+        self.args.use_reg2 = self.use_reg2
+        self.args.use_reg3 = self.use_reg3
         
         # 构建正则项配置字符串
         reg_config = []
