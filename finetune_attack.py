@@ -648,7 +648,8 @@ def evaluate_watermark_integrity(model_state_dict, reconstructor, model=None):
 
 
 
-def save_results(results, model_path: str, save_dir: str = './save/finetune_attack', dataset_name: str = 'unknown'):
+def save_results(results, model_path: str, save_dir: str = './save/finetune_attack',
+                 dataset_name: str = 'unknown', save_mode: str = 'paper'):
     """
     保存实验结果
 
@@ -656,78 +657,137 @@ def save_results(results, model_path: str, save_dir: str = './save/finetune_atta
         results: 实验结果
         model_path: 微调对象模型路径
         save_dir: 保存目录
-        dataset_name: 数据集名称（如 cifar10, chestmnist 等）
+        dataset_name: 数据集名称
+        save_mode: 保存模式 - 'all'(完整+论文数据), 'paper'(仅论文数据,默认), 'full'(仅完整结果)
     """
     os.makedirs(save_dir, exist_ok=True)
 
     # 生成时间戳
     timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-    
-    # 文件名前缀：finetune_attack_实验时间戳_数据集名称
+
+    # 文件名前缀
     filename_prefix = f'finetune_attack_{timestamp}_{dataset_name}'
-    
-    # 保存详细结果
-    results_file = os.path.join(save_dir, f'{filename_prefix}.pkl')
-    torch.save(results, results_file)
 
-    # 保存CSV格式的简化结果
-    csv_file = os.path.join(save_dir, f'{filename_prefix}.csv')
+    # 根据save_mode保存
+    if save_mode in ['all', 'full']:
+        # 保存详细结果 (pkl)
+        results_file = os.path.join(save_dir, f'{filename_prefix}.pkl')
+        torch.save(results, results_file)
 
+        # 保存CSV格式的完整结果
+        csv_file = os.path.join(save_dir, f'{filename_prefix}.csv')
+
+        import pandas as pd
+        df_data = []
+        for result in results:
+            df_data.append({
+                'epoch': result['epoch'],
+                'train_loss': result['train_loss'],
+                'test_loss': result['test_loss'],
+                'test_auc': result['test_auc'],
+                'test_accuracy': result['test_accuracy'],
+                'learning_rate': result['learning_rate'],
+                'perf_fail': result.get('perf_fail', None),
+                'tau': result.get('tau', None),
+                'delta_perf': result.get('delta_perf', None),
+                'delta_pcc': result.get('delta_pcc', None),
+                'is_infringement': result.get('is_infringement', None),
+                'result_text': result.get('result_text', 'N/A')
+            })
+
+        df = pd.DataFrame(df_data)
+
+        # 格式化数值列
+        numeric_columns = ['train_loss', 'test_loss', 'test_auc', 'test_accuracy', 'learning_rate',
+                          'perf_fail', 'tau', 'delta_perf', 'delta_pcc']
+        precision_map = {'delta_pcc': 8}
+        for col in numeric_columns:
+            if col in df.columns:
+                prec = precision_map.get(col, 6)
+                df[col] = df[col].apply(
+                    lambda x, p=prec: f"{float(x):.{p}f}"
+                    if pd.notna(x) and isinstance(x, (int, float, np.floating)) else x
+                )
+
+        # 添加模型文件信息
+        pkl_filename = os.path.basename(model_path)
+        df.loc[len(df)] = ['PKL_FILE'] + [''] * (len(df.columns) - 2) + [pkl_filename]
+
+        df.to_csv(csv_file, index=False, encoding='utf-8-sig')
+
+        print(f"  - 详细结果: {results_file}")
+        print(f"  - 汇总结果: {csv_file}")
+
+    # 保存论文专用精简结果 (每10轮)
+    if save_mode in ['all', 'paper']:
+        paper_csv_file = os.path.join(save_dir, f'{filename_prefix}_paper.csv')
+        save_paper_results(results, model_path, paper_csv_file, dataset_name)
+
+    # 输出最高ΔPCC
+    if save_mode in ['all', 'full']:
+        try:
+            delta_pcc_values = [
+                float(r.get('delta_pcc'))
+                for r in results
+                if r.get('delta_pcc') is not None
+            ]
+            if delta_pcc_values:
+                max_delta_pcc = max(delta_pcc_values)
+                print(f"  - 最高ΔPCC: {max_delta_pcc:.8f}")
+        except Exception:
+            pass
+
+
+def save_paper_results(results, model_path: str, save_path: str, dataset_name: str):
+    """
+    保存论文专用的精简结果（每10轮一条记录）
+
+    只保存第0, 10, 20, 30, 40, 50轮等的数据，格式简洁便于直接复制到论文表格
+
+    Args:
+        results: 实验结果列表
+        model_path: 模型路径
+        save_path: 保存路径
+        dataset_name: 数据集名称
+    """
     import pandas as pd
+
+    # 筛选每10轮的数据（第0, 10, 20, 30, 40, 50...轮）
+    paper_results = [r for r in results if r['epoch'] % 10 == 0]
+
+    if not paper_results:
+        print(f"  ⚠️  没有符合条件的数据（每10轮）")
+        return
+
+    # 构建精简的DataFrame
     df_data = []
-    for result in results:
-        df_data.append({
-            'epoch': result['epoch'],
-            'train_loss': result['train_loss'],
-            'test_loss': result['test_loss'],
-            'test_auc': result['test_auc'],
-            'test_accuracy': result['test_accuracy'],
-            'learning_rate': result['learning_rate'],
-            'perf_fail': result.get('perf_fail', None),
-            'tau': result.get('tau', None),
-            'delta_perf': result.get('delta_perf', None),
-            'delta_pcc': result.get('delta_pcc', None),
-            'is_infringement': result.get('is_infringement', None),
-            'result_text': result.get('result_text', 'N/A')
-        })
+    for r in paper_results:
+        row = {
+            'epoch': r['epoch'],
+            'train_loss': f"{r['train_loss']:.4f}",
+            'test_loss': f"{r['test_loss']:.4f}",
+            'test_auc': f"{r['test_auc']:.4f}",
+            'test_acc': f"{r['test_accuracy']:.4f}",
+            'delta_pcc': f"{r['delta_pcc']:.6f}" if r['delta_pcc'] is not None else 'N/A',
+            'infringement': 'Yes' if r['is_infringement'] else 'No' if r['is_infringement'] is not None else 'N/A',
+        }
+        df_data.append(row)
 
     df = pd.DataFrame(df_data)
-    
-    # 格式化数值列：默认保留6位小数，ΔPCC保留8位小数（便于精细对比）
-    numeric_columns = ['train_loss', 'test_loss', 'test_auc', 'test_accuracy', 'learning_rate', 
-                      'perf_fail', 'tau', 'delta_perf', 'delta_pcc']
-    precision_map = {
-        'delta_pcc': 8,
-    }
-    for col in numeric_columns:
-        if col in df.columns:
-            prec = precision_map.get(col, 6)
-            df[col] = df[col].apply(
-                lambda x, p=prec: f"{float(x):.{p}f}"
-                if pd.notna(x) and isinstance(x, (int, float, np.floating)) else x
-            )
-    
-    # 在CSV文件最后一行添加PKL文件名信息（保存原始模型路径）
-    pkl_filename = os.path.basename(model_path)
-    df.loc[len(df)] = ['PKL_FILE'] + [''] * (len(df.columns) - 2) + [pkl_filename]
-    
-    df.to_csv(csv_file, index=False, encoding='utf-8-sig')
 
-    print(f"  - 详细结果: {results_file}")
-    print(f"  - 汇总结果: {csv_file}")
+    # 写入文件，带头注释
+    with open(save_path, 'w', encoding='utf-8-sig') as f:
+        f.write(f"# Finetune Attack Results - {dataset_name.upper()}\n")
+        f.write(f"# Model: {os.path.basename(model_path)}\n")
+        f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("#\n")
+        f.write("# Columns: epoch, train_loss, test_loss, test_auc, test_acc, delta_pcc, infringement\n")
+        f.write("#\n")
 
-    # 保存CSV时额外输出最高ΔPCC（8位小数），便于快速核对
-    try:
-        delta_pcc_values = [
-            float(r.get('delta_pcc'))
-            for r in results
-            if r.get('delta_pcc') is not None
-        ]
-        if delta_pcc_values:
-            max_delta_pcc = max(delta_pcc_values)
-            print(f"  - 最高ΔPCC: {max_delta_pcc:.8f}")
-    except Exception:
-        pass
+    # 追加CSV数据
+    df.to_csv(save_path, mode='a', index=False, encoding='utf-8-sig')
+
+    print(f"  - 论文数据: {save_path}")
 
 
 def main():
@@ -751,8 +811,6 @@ def main():
     parser.add_argument('--dataset', type=str, default='cifar100',
                        choices=['cifar10', 'cifar100', 'chestmnist'],
                        help='数据集类型')
-    parser.add_argument('--key_matrix_dir', type=str, default='./save/key_matrix',
-                       help='密钥矩阵基础目录')
     parser.add_argument('--autoencoder_dir', type=str, default='./save/autoencoder',
                        help='自编码器目录')
     parser.add_argument('--optimizer', type=str, default='sgd', choices=['sgd', 'adam'],
@@ -763,6 +821,9 @@ def main():
                        help='学习率（默认使用args.py中的lr）')
     parser.add_argument('--batch_size', type=int, default=None,
                        help='批次大小（默认使用args.py中的batch_size）')
+    parser.add_argument('--save_mode', type=str, default='paper',
+                       choices=['all', 'paper', 'full'],
+                       help='保存模式: all(完整+论文数据), paper(仅论文数据,默认), full(仅完整结果)')
 
     # 解析命令行参数
     cmd_args = parser.parse_args()
@@ -772,15 +833,16 @@ def main():
     args.model_path = cmd_args.model_path
     args.model_type = cmd_args.model_type
     args.client_num = cmd_args.client_num
-    args.key_matrix_dir = cmd_args.key_matrix_dir
     args.autoencoder_dir = cmd_args.autoencoder_dir
     args.finetune_epochs = cmd_args.finetune_epochs
     args.learning_rate = cmd_args.learning_rate if cmd_args.learning_rate is not None else base_args.lr
     args.batch_size = cmd_args.batch_size if cmd_args.batch_size is not None else base_args.batch_size
     args.optimizer = cmd_args.optimizer if cmd_args.optimizer is not None else base_args.optim
     args.dataset = cmd_args.dataset
+    args.save_mode = cmd_args.save_mode
     
-    # 使用key_matrix_utils生成正确的密钥矩阵路径
+    # 固定密钥矩阵路径
+    KEY_MATRIX_BASE_DIR = './save/key_matrix'
     from utils.key_matrix_utils import get_key_matrix_path
     
     # 从模型路径自动推断正确的模型类型
@@ -790,8 +852,8 @@ def main():
     print(f"🔍 从模型路径推断的模型类型: {inferred_model_type}")
     print(f"   原指定的模型类型: {cmd_args.model_type}")
     
-    # 使用推断的模型类型
-    args.key_matrix_path = get_key_matrix_path(cmd_args.key_matrix_dir, inferred_model_type, cmd_args.client_num)
+    # 使用推断的模型类型生成密钥矩阵路径
+    args.key_matrix_path = get_key_matrix_path(KEY_MATRIX_BASE_DIR, inferred_model_type, cmd_args.client_num)
     
     # 从args.py获取其他必要参数
     args.data_root = base_args.data_root
@@ -999,7 +1061,8 @@ def main():
     # 保存结果
     print("\n" + "=" * 80)
     print("保存实验结果...")
-    save_results(results, args.model_path, save_dir='./save/finetune_attack', dataset_name=dataset)
+    save_results(results, args.model_path, save_dir='./save/finetune_attack',
+                dataset_name=dataset, save_mode=args.save_mode)
 
     # 输出总结
     print("\n" + "=" * 80)

@@ -534,8 +534,6 @@ def main():
     parser.add_argument('--model_path', type=str, 
                        default='./save/alexnet/cifar10/202511031151_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_acc_0.9028_enhanced.pkl',
                        help='模型文件路径')
-    parser.add_argument('--key_matrix_dir', type=str, default='./save/key_matrix',
-                       help='密钥矩阵基础目录')
     parser.add_argument('--autoencoder_dir', type=str, default='./save/autoencoder',
                        help='自编码器目录')
     parser.add_argument('--model_type', type=str, default='alexnet',
@@ -545,9 +543,10 @@ def main():
                        help='客户端数量')
     args = parser.parse_args()
     
-    # 生成密钥矩阵路径
+    # 固定密钥矩阵路径
+    KEY_MATRIX_BASE_DIR = './save/key_matrix'
     from utils.key_matrix_utils import get_key_matrix_path
-    args.key_matrix_path = get_key_matrix_path(args.key_matrix_dir, args.model_type, args.client_num)
+    args.key_matrix_path = get_key_matrix_path(KEY_MATRIX_BASE_DIR, args.model_type, args.client_num)
     
     # 设置设备
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
