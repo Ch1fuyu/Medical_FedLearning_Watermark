@@ -29,7 +29,7 @@ def parser_args():
     parser.add_argument('--optim', type=str, default='sgd', choices=['sgd', 'adam'], help='optimizer type')
     parser.add_argument('--lr', type=float, default=0.03, help='learning rate for local updates (reduced from 0.01 to 0.001 for better convergence)')
     parser.add_argument('--wd', type=float, default=0.0005, help='weight decay (L2 regularization, increased from 0.0001 to 0.0005)')
-    parser.add_argument('--use_lr_scheduler', action='store_true', default=True, help='use cosine annealing learning rate scheduler')
+    parser.add_argument('--use_lr_scheduler', action='store_true', default=False, help='use cosine annealing learning rate scheduler')
     parser.add_argument('--dropout_rate', type=float, default=0.5, help='dropout rate for AlexNet classifier (default: 0.5)')
     
     # ========================= 训练控制参数 ========================
@@ -55,6 +55,13 @@ def parser_args():
     parser.add_argument('--multiloss_alpha_late', type=float, default=0.0001,
                         help='alpha value for late training phase (last 70% of epochs), increased for better watermark robustness')
     
+    # ========================= 正则项消融实验参数 ========================
+    parser.add_argument('--use_reg1', action='store_true', default=True,
+                        help='enable reg_term1 (gradient balance regularization term)')
+    parser.add_argument('--use_reg2', action='store_true', default=False,
+                        help='enable reg_term2 (variance ratio regularization term)')
+    parser.add_argument('--use_reg3', action='store_true', default=False,
+                        help='enable reg_term3 (adaptive weight regularization term)')
     # ========================= Focal Loss 参数 ========================
     parser.add_argument('--use_focal_loss', action='store_true', default=False,
                         help='enable FocalLoss for imbalanced multi-label classification')
