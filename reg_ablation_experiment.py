@@ -55,18 +55,10 @@ logging.basicConfig(
 
 class RegAblationExperiment(Experiment):
     """
-    正则项消融实验：仅使用 reg3 (自适应权重正则项)
+    正则项消融实验：可以选择性启用/禁用三个正则项
     保持水印嵌入逻辑不变（使用KeyMatrixManager进行参数替换）
     同时包含模型泄漏追踪功能
-    
-    注意：reg1 (梯度平衡) 和 reg2 (方差比例) 已移除
     """
-    
-    # ========== 正则项配置区域 ==========
-    REG_CONFIG = {
-        'reg3': True,  # 自适应权重正则项
-    }
-    # ===========================================
     
     def __init__(self, args):
         super().__init__(args)
@@ -76,20 +68,27 @@ class RegAblationExperiment(Experiment):
         self.sigma = args.sigma
         self.key_matrix_dir = getattr(args, 'key_matrix_dir', './save/key_matrix')
         
-        # 仅使用 reg3
-        self.use_reg3 = self.REG_CONFIG['reg3']
-        
-        # 将配置添加到args中，供TrainerRegAblation读取
-        self.args.use_reg3 = self.use_reg3
+        # 获取正则项配置
+        self.use_reg1 = getattr(args, 'use_reg1', True)
+        self.use_reg2 = getattr(args, 'use_reg2', True)
+        self.use_reg3 = getattr(args, 'use_reg3', True)
         
         # 构建正则项配置字符串
-        self.reg_config_str = 'reg3' if self.use_reg3 else 'none'
+        reg_config = []
+        if self.use_reg1:
+            reg_config.append('reg1')
+        if self.use_reg2:
+            reg_config.append('reg2')
+        if self.use_reg3:
+            reg_config.append('reg3')
+        self.reg_config_str = '+'.join(reg_config) if reg_config else 'none'
         
         logging.info('='*60)
-        logging.info('正则项配置')
+        logging.info('正则项消融实验')
         logging.info(f'正则项配置: {self.reg_config_str}')
+        logging.info(f'  reg1 (梯度平衡): {"启用" if self.use_reg1 else "禁用"}')
+        logging.info(f'  reg2 (方差比例): {"启用" if self.use_reg2 else "禁用"}')
         logging.info(f'  reg3 (自适应权重): {"启用" if self.use_reg3 else "禁用"}')
-        logging.info('  reg1, reg2 已移除（仅使用 reg3）')
         logging.info('水印嵌入逻辑保持不变（使用KeyMatrixManager进行参数替换）')
         logging.info('='*60)
         logging.info('--------------------------------Start--------------------------------------')
@@ -1224,6 +1223,8 @@ def main(args):
                 'epochs': args.epochs,
                 'client_num': args.client_num,
                 'console_log': os.path.basename(log_file_name),
+                'use_reg1': getattr(args, 'use_reg1', True),
+                'use_reg2': getattr(args, 'use_reg2', True),
                 'use_reg3': getattr(args, 'use_reg3', True),
             }
             }
@@ -1244,8 +1245,15 @@ def main(args):
     # 构建文件名
     enhanced = "_enhanced" if args.watermark_mode == 'enhanced' else ""
     
-    # 构建正则项配置字符串用于文件名（仅 reg3）
-    reg_suffix = 'r3' if getattr(args, 'use_reg3', True) else 'none'
+    # 构建正则项配置字符串用于文件名
+    reg_config = []
+    if getattr(args, 'use_reg1', True):
+        reg_config.append('r1')
+    if getattr(args, 'use_reg2', True):
+        reg_config.append('r2')
+    if getattr(args, 'use_reg3', True):
+        reg_config.append('r3')
+    reg_suffix = '_'.join(reg_config) if reg_config else 'none'
 
     # 根据选择指标命名文件
     watermark_suffix = f"wm_{args.watermark_mode}" if hasattr(args, 'watermark_mode') and args.watermark_mode else "wm_basic"
