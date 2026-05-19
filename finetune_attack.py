@@ -759,6 +759,10 @@ def main():
                        help='优化器类型（默认使用args.py中的optim）')
     parser.add_argument('--finetune_epochs', type=int, default=50,
                        help='微调轮数')
+    parser.add_argument('--eval_interval', type=int, default=10,
+                       help='评估间隔（每多少轮评估一次）')
+    parser.add_argument('--pcc_interval', type=int, default=10,
+                       help='PCC计算间隔（每多少轮计算一次）')
     parser.add_argument('--learning_rate', type=float, default=0.001,
                        help='学习率（默认使用args.py中的lr）')
     parser.add_argument('--batch_size', type=int, default=None,
@@ -775,6 +779,8 @@ def main():
     args.key_matrix_dir = cmd_args.key_matrix_dir
     args.autoencoder_dir = cmd_args.autoencoder_dir
     args.finetune_epochs = cmd_args.finetune_epochs
+    args.eval_interval = cmd_args.eval_interval
+    args.pcc_interval = cmd_args.pcc_interval
     args.learning_rate = cmd_args.learning_rate if cmd_args.learning_rate is not None else base_args.lr
     args.batch_size = cmd_args.batch_size if cmd_args.batch_size is not None else base_args.batch_size
     args.optimizer = cmd_args.optimizer if cmd_args.optimizer is not None else base_args.optim
