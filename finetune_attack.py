@@ -395,7 +395,7 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
         lr: 学习率
         device: 设备
         eval_interval: 基本评估间隔（每轮显示训练/测试指标）
-        pcc_interval: PCC计算间隔（每几轮计算一次ΔPCC和侵权检测）
+        pcc_interval: ΔPCC计算间隔（设为1时每轮都计算，设为N时每N轮计算一次）
         reconstructor: 水印重建器
         original_model_state: 原始模型状态
         mnist_test_loader: MNIST测试数据加载器
@@ -507,9 +507,13 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
                   f"AUC: {mean_auc:.4f} [参考] | 准确率: {accuracy:.2%} [主要]")
 
         # 根据pcc_interval参数计算ΔPCC和侵权检测（计算量大的操作）
+        # 当pcc_interval=1时，每轮都计算
         delta_pcc_result = None
-        if ((epoch + 1) == 1) or ((epoch + 1) % pcc_interval == 0):
-            print("🔍 进行ΔPCC和侵权检测评估...")
+        should_compute_pcc = (pcc_interval == 1) or ((epoch + 1) == 1) or ((epoch + 1) % pcc_interval == 0)
+        
+        if should_compute_pcc:
+            pcc_prefix = "🔍" if pcc_interval > 1 else "  "
+            print(f"{pcc_prefix}Epoch {epoch+1}: 进行ΔPCC和侵权检测评估...")
             # 保存状态
             model_states.append(copy.deepcopy(model.state_dict()))
             
@@ -762,7 +766,7 @@ def main():
     parser.add_argument('--eval_interval', type=int, default=10,
                        help='评估间隔（每多少轮评估一次）')
     parser.add_argument('--pcc_interval', type=int, default=10,
-                       help='PCC计算间隔（每多少轮计算一次）')
+                       help='ΔPCC计算间隔（设为1时每轮都计算，设为N时每N轮计算一次）')
     parser.add_argument('--learning_rate', type=float, default=0.001,
                        help='学习率（默认使用args.py中的lr）')
     parser.add_argument('--batch_size', type=int, default=None,
@@ -813,15 +817,18 @@ def main():
     
     # 微调参数
     finetune_epochs = args.finetune_epochs
-    eval_interval = 1  # 每轮都进行基本评估
-    pcc_interval = 5  # PCC计算间隔，可以调整（建议5-20之间，值越大计算越少但监控越粗糙）
+    eval_interval = args.eval_interval
+    pcc_interval = args.pcc_interval
     learning_rate = args.learning_rate
     batch_size = args.batch_size
     optimizer_type = args.optimizer
 
     print(f"微调攻击实验参数:")
     print(f"  - 微调轮数: {finetune_epochs}")
-    print(f"  - 基本评估: 每轮 | ΔPCC评估: 每{pcc_interval}轮")
+    if pcc_interval == 1:
+        print(f"  - 基本评估: 每轮 | ΔPCC评估: 每轮")
+    else:
+        print(f"  - 基本评估: 每{eval_interval}轮 | ΔPCC评估: 每{pcc_interval}轮")
     print(f"  - 学习率: {learning_rate}")
     print(f"  - 批次大小: {batch_size}")
     print(f"  - 优化器: {optimizer_type}")
