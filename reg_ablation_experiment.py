@@ -1262,8 +1262,15 @@ def main(args):
     # 构建文件名
     enhanced = "_enhanced" if args.watermark_mode == 'enhanced' else ""
     
-    # 构建正则项配置字符串用于文件名（仅 reg3）
-    reg_suffix = 'r3' if getattr(args, 'use_reg3', True) else 'none'
+    # 构建正则项配置字符串用于文件名
+    reg_parts = []
+    if getattr(args, 'use_reg1', True):
+        reg_parts.append('r1')
+    if getattr(args, 'use_reg2', True):
+        reg_parts.append('r2')
+    if getattr(args, 'use_reg3', True):
+        reg_parts.append('r3')
+    reg_suffix = '+'.join(reg_parts) if reg_parts else 'none'
 
     # 根据选择指标命名文件
     watermark_suffix = f"wm_{args.watermark_mode}" if hasattr(args, 'watermark_mode') and args.watermark_mode else "wm_basic"
