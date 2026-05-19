@@ -69,8 +69,8 @@ class RegAblationExperiment(Experiment):
     # 修改此处的值来启用/禁用不同的正则项
     REG_CONFIG = {
         'reg1': True,  # 梯度平衡正则项
-        'reg2': True,  # 方差比例正则项
-        'reg3': True,  # 自适应权重正则项
+        'reg2': False,  # 方差比例正则项
+        'reg3': False,  # 自适应权重正则项
     }
     # ===========================================
     
@@ -93,7 +93,14 @@ class RegAblationExperiment(Experiment):
         self.args.use_reg3 = self.use_reg3
         
         # 构建正则项配置字符串
-        self.reg_config_str = self._build_reg_config_str()
+        reg_parts = []
+        if self.use_reg1:
+            reg_parts.append('reg1')
+        if self.use_reg2:
+            reg_parts.append('reg2')
+        if self.use_reg3:
+            reg_parts.append('reg3')
+        self.reg_config_str = '+'.join(reg_parts) if reg_parts else 'none'
         
         logging.info('='*60)
         logging.info('正则项配置')
