@@ -62,8 +62,15 @@ BASE_ARGS = {
 
 def run_experiment(exp_config, exp_index):
     """运行单个实验"""
-    from utils.args import Args
+    # 先设置模拟的命令行参数，避免 reg_ablation_experiment.py 在导入时解析真实参数
+    import sys
+    original_argv = sys.argv.copy()
+    sys.argv = ['reg_ablation_experiment.py']  # 模拟最小参数
+    
+    from utils.args import parser_args
     from reg_ablation_experiment import RegAblationExperiment
+    
+    sys.argv = original_argv  # 恢复原始参数
     
     exp_name = exp_config['name']
     reg_config = exp_config['reg_config']
@@ -90,7 +97,9 @@ def run_experiment(exp_config, exp_index):
     )
     
     # 创建参数对象
-    args = Args()
+    args = parser_args()
+    
+    # 设置基础参数
     for key, value in BASE_ARGS.items():
         setattr(args, key, value)
     
@@ -100,7 +109,7 @@ def run_experiment(exp_config, exp_index):
     # 运行实验
     try:
         exp = RegAblationExperiment(args)
-        results = exp.run()
+        results = exp.training()
         logging.info(f"实验 {exp_name} 完成!")
         return True, results
     except Exception as e:
