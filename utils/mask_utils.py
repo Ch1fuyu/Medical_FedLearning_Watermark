@@ -176,6 +176,42 @@ class MaskManager:
             'effective_params': effective_count,
             'encoder_ratio': encoder_count / target_count if target_count > 0 else 0
         }
+    
+    def get_watermark_masks(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        获取水印区域和非水印区域的掩码
+        
+        Returns:
+            (wm_mask, nonwm_mask): 水印区域掩码和非水印区域掩码
+        """
+        wm_mask = self.encoder_mask * self.target_mask  # 水印区域
+        nonwm_mask = self.target_mask - wm_mask  # 非水印区域
+        return wm_mask, nonwm_mask
+    
+    def get_param_masks_by_name(self) -> Tuple[Dict[str, Optional[torch.Tensor]], Dict[str, Optional[torch.Tensor]]]:
+        """
+        按参数名称获取水印和非水印区域的掩码
+        
+        Returns:
+            (wm_masks_by_name, nonwm_masks_by_name): 
+            水印和非水印区域掩码的字典，键为参数名称
+        """
+        wm_masks = {}
+        nonwm_masks = {}
+        
+        current_idx = 0
+        for name, param in self.model.named_parameters():
+            if 'conv' in name and 'weight' in name:
+                param_size = param.numel()
+                param_mask = self.target_mask[current_idx:current_idx + param_size]
+                
+                # 计算该参数的水印和非水印掩码
+                wm_masks[name] = param_mask * self.encoder_mask[current_idx:current_idx + param_size]
+                nonwm_masks[name] = param_mask - wm_masks[name]
+                
+                current_idx += param_size
+        
+        return wm_masks, nonwm_masks
 
 def create_mask_manager(model, key_matrix_path: str, args=None) -> MaskManager:
     """

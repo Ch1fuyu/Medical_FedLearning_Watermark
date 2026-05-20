@@ -275,6 +275,19 @@ class TrainerRegAblation(TrainerPrivateEnhanced):
         # 每5个epoch进行水印融合（放在梯度统计更新之后）
         if (current_epoch + 1) % 5 == 0:
             self._embed_watermark(client_id, current_epoch)
+        
+        # 更新参数变化量统计（用于水印保护的正则项）
+        # 这应该在每轮训练结束后调用，记录本轮参数变化
+        if self.mask_manager and hasattr(self.multi_loss, 'update_param_change_stats'):
+            try:
+                wm_masks, nonwm_masks = self.mask_manager.get_param_masks_by_name()
+                self.multi_loss.update_param_change_stats(
+                    self.model.state_dict(),
+                    wm_masks,
+                    nonwm_masks
+                )
+            except Exception as e:
+                pass  # 静默处理
 
         # 定期清理内存
         if current_epoch > 0 and current_epoch % 10 == 0:

@@ -67,6 +67,11 @@ class MultiLoss:
     """
     多重损失函数，用于联邦水印的鲁棒性训练
     包含主任务损失和三个正则化项
+    
+    正则项作用：
+    - reg1: 基于上一轮参数变化量，惩罚水印区域的过度变化
+    - reg2: 基于上一轮参数变化方差，保持水印区域的稳定更新
+    - reg3: 自适应权重调节
     """
     
     def __init__(self, init_a=0.6523, init_b=0.0000800375825259, device='cpu'):
@@ -82,7 +87,7 @@ class MultiLoss:
         self.init_b = init_b
         self.device = device
         
-        # 统计量初始化
+        # 梯度统计量初始化
         self.prevGM = 0.0  # 目标模型梯度量级
         self.prevGH = 0.0  # 编码器梯度量级
         self.prevRatio = 1.0  # 方差比例
@@ -92,6 +97,16 @@ class MultiLoss:
         self.current_grad_H = 0.0
         self.current_var_M = 0.0
         self.current_var_H = 0.0
+        
+        # ========== 参数变化量跟踪（用于水印保护）==========
+        # 上一轮结束时的模型参数（用于计算参数变化量）
+        self.prev_model_params = None
+        # 上一轮水印区域的参数变化量
+        self.prev_wm_param_change = 0.0
+        # 上一轮非水印区域的参数变化量
+        self.prev_nonwm_param_change = 0.0
+        # 上一轮参数变化方差
+        self.prev_param_change_variance = 0.0
         
     def get_alpha(self, current_epoch, total_epochs, alpha_early=None, alpha_late=None):
         """
@@ -260,12 +275,12 @@ class MultiLoss:
         # 确保禁用时的0张量在正确的设备上，并连接到计算图
         device = main_loss.device
         if use_reg1:
-            reg_term1 = self._compute_gradient_balance_term(alpha)
+            reg_term1 = self._compute_gradient_balance_term(alpha, main_loss)
         else:
             reg_term1 = main_loss * 0.0  # 连接到计算图
         
         if use_reg2:
-            reg_term2 = self._compute_variance_ratio_term(alpha)
+            reg_term2 = self._compute_variance_ratio_term(alpha, main_loss)
         else:
             reg_term2 = main_loss * 0.0  # 连接到计算图
         
@@ -279,28 +294,48 @@ class MultiLoss:
         
         return total_loss
     
-    def _compute_gradient_balance_term(self, alpha):
-        """计算梯度平衡正则项"""
-        # 使用一个假的输入来构建计算图，确保返回值连接到计算图
-        # grad_M 和 grad_H 用于计算
-        grad_M = max(self.prevGM, 1e-10)
-        grad_H = max(self.prevGH, 1e-10)
+    def _compute_gradient_balance_term(self, alpha, main_loss):
+        """计算参数变化平衡正则项（保护水印区域）
         
-        # 使用 main_loss 作为锚点来构建计算图
-        # alpha * (3 - beta1) * (3 - beta1) 需要连接到计算图
-        # 这里使用 alpha 本身来构建，因为 alpha 会被用于计算
-        beta1 = grad_M / grad_H
-        reg_term1 = alpha * (3 - beta1) * (3 - beta1)
+        惩罚逻辑：如果上一轮水印区域参数变化 > 非水印区域，则在当前轮增加惩罚
+        这会让模型在当前轮倾向于减少水印区域的参数变化
+        
+        通过 main_loss 构建计算图连接
+        """
+        wm_change = self.prev_wm_param_change
+        nonwm_change = self.prev_nonwm_param_change
+        
+        # 不平衡度：只在水印区域变化大于非水印区域时惩罚
+        # 使用 max(0, ...) 确保只有负向不平衡（wm变化更大）才被惩罚
+        imbalance = max(0, wm_change - nonwm_change)
+        
+        # 归一化：除以非水印区域变化量，避免数值不稳定
+        if nonwm_change > 1e-10:
+            imbalance_normalized = imbalance / (nonwm_change + 1e-10)
+        else:
+            imbalance_normalized = imbalance
+        
+        # 构建计算图连接，确保梯度回传
+        reg_term1 = alpha * imbalance_normalized * main_loss
         return reg_term1
     
-    def _compute_variance_ratio_term(self, alpha):
-        """计算方差比例正则项"""
-        # 使用容差判断是否为初始值
-        # 避免 prevRatio 恰好为 1.0 时正则项失效
-        if abs(self.prevRatio - 1.0) < 1e-6 and self.current_var_H < 1e-10:
-            return alpha * 0.0  # 返回连接到计算图的0
-            
-        reg_term2 = alpha * (1.5 - self.prevRatio) * (1.5 - self.prevRatio)
+    def _compute_variance_ratio_term(self, alpha, main_loss):
+        """计算参数变化方差正则项（保持稳定更新）
+        
+        惩罚逻辑：如果上一轮参数变化方差过大，则增加惩罚
+        这会让模型倾向于更均匀地更新所有参数
+        
+        通过 main_loss 构建计算图连接
+        """
+        # 上一轮参数变化的方差
+        variance = self.prev_param_change_variance
+        
+        # 方差阈值：超过这个值就惩罚
+        variance_threshold = 1e-6
+        variance_penalty = max(0, variance - variance_threshold)
+        
+        # 通过 main_loss 构建计算图连接
+        reg_term2 = alpha * variance_penalty * main_loss
         return reg_term2
     
     def _compute_adaptive_weight_term(self, main_loss):
@@ -326,6 +361,62 @@ class MultiLoss:
         self.current_var_M = 0.0
         self.current_var_H = 0.0
     
+    def update_param_change_stats(self, current_params, wm_mask, nonwm_mask):
+        """
+        更新参数变化量统计
+        
+        在每轮训练结束后调用，计算并保存参数变化量
+        
+        Args:
+            current_params: 当前模型参数字典 (OrderedDict)
+            wm_mask: 水印区域参数掩码
+            nonwm_mask: 非水印区域参数掩码
+        """
+        if self.prev_model_params is None:
+            # 第一轮，保存当前参数
+            self.prev_model_params = {k: v.clone() for k, v in current_params.items()}
+            self.prev_wm_param_change = 0.0
+            self.prev_nonwm_param_change = 0.0
+            self.prev_param_change_variance = 0.0
+            return
+        
+        # 计算参数变化量
+        wm_changes = []
+        nonwm_changes = []
+        all_changes = []
+        
+        for name, param in current_params.items():
+            if name not in self.prev_model_params:
+                continue
+            
+            prev_param = self.prev_model_params[name]
+            change = torch.abs(param - prev_param)
+            
+            # 根据掩码分类
+            if name in wm_mask and wm_mask[name] is not None:
+                wm_changes.append(change[wm_mask[name]].sum().item())
+            else:
+                wm_changes.append(change.sum().item())
+                
+            if name in nonwm_mask and nonwm_mask[name] is not None:
+                nonwm_changes.append(change[nonwm_mask[name]].sum().item())
+            else:
+                nonwm_changes.append(change.sum().item())
+            
+            all_changes.extend(change.flatten().tolist())
+        
+        # 计算统计量
+        self.prev_wm_param_change = sum(wm_changes) / max(len(wm_changes), 1)
+        self.prev_nonwm_param_change = sum(nonwm_changes) / max(len(nonwm_changes), 1)
+        
+        if len(all_changes) > 0:
+            mean_change = sum(all_changes) / len(all_changes)
+            variance = sum((x - mean_change) ** 2 for x in all_changes) / len(all_changes)
+            self.prev_param_change_variance = variance
+        
+        # 更新保存的参数
+        self.prev_model_params = {k: v.clone() for k, v in current_params.items()}
+    
     def get_stats(self):
         """获取当前统计量"""
         return {
@@ -335,5 +426,9 @@ class MultiLoss:
             'current_grad_M': self.current_grad_M,
             'current_grad_H': self.current_grad_H,
             'current_var_M': self.current_var_M,
-            'current_var_H': self.current_var_H
+            'current_var_H': self.current_var_H,
+            # 参数变化量统计
+            'prev_wm_param_change': self.prev_wm_param_change,
+            'prev_nonwm_param_change': self.prev_nonwm_param_change,
+            'prev_param_change_variance': self.prev_param_change_variance
         }
