@@ -89,39 +89,10 @@ class TrainerRegAblation(TrainerPrivateEnhanced):
                 x, y = x.to(self.device), y.to(self.device)
                 self.optimizer.zero_grad()
 
-                # ========== 修复：先计算当前batch的梯度统计量 ==========
-                # 在前一个batch训练结束后，收集梯度并更新统计量
-                # 这样当前batch的正则项就能使用前一个batch的统计量
-                if self.mask_manager and batch_idx > 0 and (batch_idx - 1) % 5 == 0:
-                    try:
-                        conv_gradients = []
-                        for name, param in self.model.named_parameters():
-                            if 'conv' in name and 'weight' in name and param.grad is not None:
-                                conv_gradients.append(param.grad.view(-1))
-                        
-                        if conv_gradients:
-                            gradients = torch.cat(conv_gradients)
-                            target_mask, encoder_mask, effective_mask = self.mask_manager.get_masks(self.device)
-                            encoder_gradients = torch.mul(gradients, effective_mask)
-                            
-                            # 使用前一个batch的梯度更新统计量
-                            self.multi_loss.update_gradient_stats(
-                                gradients.detach(),
-                                encoder_gradients.detach(),
-                                target_mask,
-                                encoder_mask,
-                                effective_mask
-                            )
-                            
-                            del gradients, encoder_gradients, target_mask, encoder_mask, effective_mask
-                    except Exception as e:
-                        pass  # 静默处理，避免干扰训练
-                # =====================================================
-
                 pred = self.model(x)
                 main_loss = self.get_loss_function(pred, y)
 
-                # 计算最终损失（使用正则项选择参数）
+                # 计算最终损失（使用当前已有的统计量）
                 if current_epoch == 0:
                     total_loss = main_loss
                 else:
@@ -154,6 +125,36 @@ class TrainerRegAblation(TrainerPrivateEnhanced):
                               f"prevRatio={stats['prevRatio']:.6f}")
 
                 total_loss.backward()
+                
+                # 在clip和step之前，更新当前batch的梯度统计量
+                # 这样下一个batch的正则项会使用当前batch的统计量
+                if self.mask_manager and batch_idx % 5 == 0:
+                    try:
+                        conv_gradients = []
+                        for name, param in self.model.named_parameters():
+                            if 'conv' in name and 'weight' in name and param.grad is not None:
+                                conv_gradients.append(param.grad.view(-1))
+                        
+                        if conv_gradients:
+                            gradients = torch.cat(conv_gradients)
+                            target_mask, encoder_mask, effective_mask = self.mask_manager.get_masks(self.device)
+                            encoder_gradients = torch.mul(gradients, effective_mask)
+                            
+                            # 更新统计量为当前batch的梯度
+                            self.multi_loss.update_gradient_stats(
+                                gradients.detach(),
+                                encoder_gradients.detach(),
+                                target_mask,
+                                encoder_mask,
+                                effective_mask
+                            )
+                            
+                            del gradients, encoder_gradients, target_mask, encoder_mask, effective_mask
+                    except Exception as e:
+                        pass  # 静默处理，避免干扰训练
+
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.optimizer.step()
 
                 # 梯度统计收集：训练开始前，先用前一轮的统计量
                 # 第一个batch使用trainer的初始统计量（如果有）

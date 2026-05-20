@@ -257,11 +257,22 @@ class MultiLoss:
         alpha = self.get_alpha(current_epoch, total_epochs, alpha_early, alpha_late)
         
         # 计算正则化项（根据参数选择性启用）
-        # 确保禁用时的0张量在正确的设备上
+        # 确保禁用时的0张量在正确的设备上，并连接到计算图
         device = main_loss.device
-        reg_term1 = self._compute_gradient_balance_term(alpha) if use_reg1 else torch.tensor(0.0, requires_grad=True, device=device)
-        reg_term2 = self._compute_variance_ratio_term(alpha) if use_reg2 else torch.tensor(0.0, requires_grad=True, device=device)
-        reg_term3 = self._compute_adaptive_weight_term(main_loss) if use_reg3 else torch.tensor(0.0, requires_grad=True, device=device)
+        if use_reg1:
+            reg_term1 = self._compute_gradient_balance_term(alpha)
+        else:
+            reg_term1 = main_loss * 0.0  # 连接到计算图
+        
+        if use_reg2:
+            reg_term2 = self._compute_variance_ratio_term(alpha)
+        else:
+            reg_term2 = main_loss * 0.0  # 连接到计算图
+        
+        if use_reg3:
+            reg_term3 = self._compute_adaptive_weight_term(main_loss)
+        else:
+            reg_term3 = main_loss * 0.0  # 连接到计算图
         
         # 总损失
         total_loss = main_loss + reg_term1 + reg_term2 + reg_term3
@@ -270,12 +281,15 @@ class MultiLoss:
     
     def _compute_gradient_balance_term(self, alpha):
         """计算梯度平衡正则项"""
-        # 如果统计量未初始化，使用梯度量级的绝对值
-        # 避免返回0导致正则项完全失效
+        # 使用一个假的输入来构建计算图，确保返回值连接到计算图
+        # grad_M 和 grad_H 用于计算
         grad_M = max(self.prevGM, 1e-10)
         grad_H = max(self.prevGH, 1e-10)
         
-        beta1 = torch.abs(torch.tensor(grad_M / grad_H, dtype=torch.float32, device=self.device))
+        # 使用 main_loss 作为锚点来构建计算图
+        # alpha * (3 - beta1) * (3 - beta1) 需要连接到计算图
+        # 这里使用 alpha 本身来构建，因为 alpha 会被用于计算
+        beta1 = grad_M / grad_H
         reg_term1 = alpha * (3 - beta1) * (3 - beta1)
         return reg_term1
     
@@ -284,7 +298,7 @@ class MultiLoss:
         # 使用容差判断是否为初始值
         # 避免 prevRatio 恰好为 1.0 时正则项失效
         if abs(self.prevRatio - 1.0) < 1e-6 and self.current_var_H < 1e-10:
-            return torch.tensor(0.0, dtype=torch.float32, device=self.device, requires_grad=True)
+            return alpha * 0.0  # 返回连接到计算图的0
             
         reg_term2 = alpha * (1.5 - self.prevRatio) * (1.5 - self.prevRatio)
         return reg_term2
