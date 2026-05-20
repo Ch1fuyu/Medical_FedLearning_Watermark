@@ -132,6 +132,10 @@ class TrainerRegAblation(TrainerPrivateEnhanced):
                         alpha_early = self.args.multiloss_alpha_early
                     if self.args and hasattr(self.args, 'multiloss_alpha_late'):
                         alpha_late = self.args.multiloss_alpha_late
+                    
+                    # 获取当前梯度统计量用于调试
+                    stats = self.multi_loss.get_stats()
+                    
                     # 传入正则项选择参数
                     total_loss = self.multi_loss.compute_loss(
                         main_loss, current_epoch, total_epochs, 
@@ -140,6 +144,14 @@ class TrainerRegAblation(TrainerPrivateEnhanced):
                         use_reg2=self.use_reg2,
                         use_reg3=self.use_reg3
                     )
+                    
+                    # 每50个batch打印一次正则项统计（调试用）
+                    if batch_idx % 50 == 0 and batch_idx > 0:
+                        print(f"[Debug] Epoch {current_epoch} Batch {batch_idx}: "
+                              f"main_loss={main_loss.item():.6f}, "
+                              f"prevGM={stats['prevGM']:.8f}, "
+                              f"prevGH={stats['prevGH']:.8f}, "
+                              f"prevRatio={stats['prevRatio']:.6f}")
 
                 total_loss.backward()
 

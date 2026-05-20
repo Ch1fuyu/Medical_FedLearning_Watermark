@@ -127,8 +127,10 @@ class MultiLoss:
             encoder_mask: 编码器区域掩码
             effective_mask: 编码器有效梯度掩码 (encoder_mask × target_mask)
         """
-        # 添加非零梯度过滤（阈值：0.00001）
-        target_nonzero_mask = torch.where(torch.abs(target_gradients) <= 0.00001, 
+        # 降低非零梯度阈值，允许更小的梯度参与统计
+        # 使用 1e-10 作为阈值，避免因梯度过小导致统计失效
+        nonzero_threshold = 1e-10
+        target_nonzero_mask = torch.where(torch.abs(target_gradients) <= nonzero_threshold, 
                                         torch.zeros_like(target_gradients), 
                                         torch.ones_like(target_gradients))
         
@@ -137,7 +139,7 @@ class MultiLoss:
         self.current_grad_M = torch.sum(target_grad_filtered).item()
         
         # 计算编码器非零梯度量级
-        encoder_nonzero_mask = torch.where(torch.abs(encoder_gradients) <= 0.00001, 
+        encoder_nonzero_mask = torch.where(torch.abs(encoder_gradients) <= nonzero_threshold, 
                                          torch.zeros_like(encoder_gradients), 
                                          torch.ones_like(encoder_gradients))
         encoder_grad_filtered = torch.mul(torch.abs(encoder_gradients), encoder_nonzero_mask)
@@ -267,18 +269,20 @@ class MultiLoss:
     
     def _compute_gradient_balance_term(self, alpha):
         """计算梯度平衡正则项"""
-        # 如果统计量未初始化，返回0
-        if self.prevGM == 0 or self.prevGH == 0:
-            return torch.tensor(0.0, requires_grad=True)
-            
-        beta1 = torch.abs(torch.tensor(self.prevGM / self.prevGH))
+        # 如果统计量未初始化，使用梯度量级的绝对值
+        # 避免返回0导致正则项完全失效
+        grad_M = max(self.prevGM, 1e-10)
+        grad_H = max(self.prevGH, 1e-10)
+        
+        beta1 = torch.abs(torch.tensor(grad_M / grad_H))
         reg_term1 = alpha * (3 - beta1) * (3 - beta1)
         return reg_term1
     
     def _compute_variance_ratio_term(self, alpha):
         """计算方差比例正则项"""
-        # 如果方差比例未初始化，返回0
-        if self.prevRatio == 1.0:  # 初始值
+        # 使用容差判断是否为初始值
+        # 避免 prevRatio 恰好为 1.0 时正则项失效
+        if abs(self.prevRatio - 1.0) < 1e-6 and self.current_var_H < 1e-10:
             return torch.tensor(0.0, requires_grad=True)
             
         reg_term2 = alpha * (1.5 - self.prevRatio) * (1.5 - self.prevRatio)
@@ -286,12 +290,12 @@ class MultiLoss:
     
     def _compute_adaptive_weight_term(self, main_loss):
         """计算自适应权重正则项"""
-        if self.prevGM == 0:
-            return torch.tensor(0.0, requires_grad=True)
+        # 使用最小的非零值代替0，避免返回0
+        grad_M = max(self.prevGM, 1e-10)
         
         # 防止main_loss过大导致计算不稳定
         main_loss_clamped = torch.clamp(main_loss, max=self.init_a - 1e-6)
-        beta2 = self.prevGM * torch.abs(1 / (self.init_a - main_loss_clamped)) / self.init_b
+        beta2 = grad_M * torch.abs(1 / (self.init_a - main_loss_clamped)) / self.init_b
         reg_term3 = torch.exp(-1 * beta2) * beta2
         return reg_term3
     
