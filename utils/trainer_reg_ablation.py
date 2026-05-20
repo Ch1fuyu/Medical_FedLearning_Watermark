@@ -84,6 +84,19 @@ class TrainerRegAblation(TrainerPrivateEnhanced):
             loss_meter = 0.0
             acc_meter = 0.0
             run_count = 0
+            
+            # 每个 epoch 开始时，保存训练前的参数
+            # 注意：这里不判断 is_first_epoch，确保每个 epoch 都有正确的基准
+            if self.mask_manager and hasattr(self.multi_loss, 'save_params_before_training'):
+                try:
+                    wm_masks, nonwm_masks = self.mask_manager.get_param_masks_by_name()
+                    self.multi_loss.save_params_before_training(
+                        self.model.state_dict(),
+                        wm_masks,
+                        nonwm_masks
+                    )
+                except Exception as e:
+                    pass
 
             for batch_idx, (x, y) in enumerate(dataloader):
                 x, y = x.to(self.device), y.to(self.device)
@@ -278,14 +291,9 @@ class TrainerRegAblation(TrainerPrivateEnhanced):
         
         # 更新参数变化量统计（用于水印保护的正则项）
         # 这应该在每轮训练结束后调用，记录本轮参数变化
-        if self.mask_manager and hasattr(self.multi_loss, 'update_param_change_stats'):
+        if hasattr(self.multi_loss, 'update_param_change_stats'):
             try:
-                wm_masks, nonwm_masks = self.mask_manager.get_param_masks_by_name()
-                self.multi_loss.update_param_change_stats(
-                    self.model.state_dict(),
-                    wm_masks,
-                    nonwm_masks
-                )
+                self.multi_loss.update_param_change_stats(self.model.state_dict())
             except Exception as e:
                 pass  # 静默处理
 

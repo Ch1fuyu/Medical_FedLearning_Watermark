@@ -99,14 +99,18 @@ class MultiLoss:
         self.current_var_H = 0.0
         
         # ========== 参数变化量跟踪（用于水印保护）==========
-        # 上一轮结束时的模型参数（用于计算参数变化量）
-        self.prev_model_params = None
+        # 训练前的模型参数（用于计算参数变化量）
+        self.params_before_training = None
         # 上一轮水印区域的参数变化量
         self.prev_wm_param_change = 0.0
         # 上一轮非水印区域的参数变化量
         self.prev_nonwm_param_change = 0.0
         # 上一轮参数变化方差
         self.prev_param_change_variance = 0.0
+        
+        # 训练开始前调用的方法，保存当前参数
+        self._wm_masks = None
+        self._nonwm_masks = None
         
     def get_alpha(self, current_epoch, total_epochs, alpha_early=None, alpha_late=None):
         """
@@ -295,28 +299,33 @@ class MultiLoss:
         return total_loss
     
     def _compute_gradient_balance_term(self, alpha, main_loss):
-        """计算参数变化平衡正则项（保护水印区域）
+        """计算水印区域变化惩罚正则项（保护水印）
         
-        惩罚逻辑：如果上一轮水印区域参数变化 > 非水印区域，则在当前轮增加惩罚
-        这会让模型在当前轮倾向于减少水印区域的参数变化
+        惩罚逻辑：当水印区域的参数变化量超过阈值时施加惩罚
+        直接限制水印区域的变化，而不是只惩罚不平衡
         
         通过 main_loss 构建计算图连接
         """
         wm_change = self.prev_wm_param_change
         nonwm_change = self.prev_nonwm_param_change
         
-        # 不平衡度：只在水印区域变化大于非水印区域时惩罚
-        # 使用 max(0, ...) 确保只有负向不平衡（wm变化更大）才被惩罚
-        imbalance = max(0, wm_change - nonwm_change)
+        # 水印变化阈值：如果水印区域变化超过这个值，就惩罚
+        # 阈值基于非水印区域变化量来设定，确保水印变化 <= 非水印变化
+        wm_threshold = nonwm_change * 1.0  # 目标：水印变化不超过非水印
         
-        # 归一化：除以非水印区域变化量，避免数值不稳定
-        if nonwm_change > 1e-10:
-            imbalance_normalized = imbalance / (nonwm_change + 1e-10)
-        else:
-            imbalance_normalized = imbalance
+        # 计算惩罚项：水印变化超过阈值时惩罚
+        wm_penalty = max(0, wm_change - wm_threshold)
+        
+        # 同时惩罚绝对变化：如果水印变化本身过大，也惩罚
+        # 设定一个绝对阈值（比如 1e-5），超过就惩罚
+        abs_threshold = 1e-4
+        abs_penalty = max(0, wm_change - abs_threshold)
+        
+        # 合并两种惩罚
+        total_penalty = wm_penalty + 0.1 * abs_penalty
         
         # 构建计算图连接，确保梯度回传
-        reg_term1 = alpha * imbalance_normalized * main_loss
+        reg_term1 = alpha * total_penalty * main_loss
         return reg_term1
     
     def _compute_variance_ratio_term(self, alpha, main_loss):
@@ -361,45 +370,56 @@ class MultiLoss:
         self.current_var_M = 0.0
         self.current_var_H = 0.0
     
-    def update_param_change_stats(self, current_params, wm_mask, nonwm_mask):
+    def save_params_before_training(self, current_params, wm_masks, nonwm_masks):
         """
-        更新参数变化量统计
+        保存训练前的参数（用于计算训练后的参数变化）
         
-        在每轮训练结束后调用，计算并保存参数变化量
+        在每轮训练开始前调用
         
         Args:
             current_params: 当前模型参数字典 (OrderedDict)
-            wm_mask: 水印区域参数掩码
-            nonwm_mask: 非水印区域参数掩码
+            wm_masks: 水印区域掩码字典
+            nonwm_masks: 非水印区域掩码字典
         """
-        if self.prev_model_params is None:
-            # 第一轮，保存当前参数
-            self.prev_model_params = {k: v.clone() for k, v in current_params.items()}
-            self.prev_wm_param_change = 0.0
-            self.prev_nonwm_param_change = 0.0
-            self.prev_param_change_variance = 0.0
+        self.params_before_training = {k: v.clone() for k, v in current_params.items()}
+        self._wm_masks = wm_masks
+        self._nonwm_masks = nonwm_masks
+    
+    def update_param_change_stats(self, current_params):
+        """
+        计算并更新参数变化量统计
+        
+        在每轮训练结束后调用，计算训练前后的参数变化
+        
+        Args:
+            current_params: 训练后的模型参数字典 (OrderedDict)
+        """
+        if self.params_before_training is None:
+            # 第一轮，没有基准参数
             return
         
-        # 计算参数变化量
         wm_changes = []
         nonwm_changes = []
         all_changes = []
         
         for name, param in current_params.items():
-            if name not in self.prev_model_params:
+            if name not in self.params_before_training:
                 continue
             
-            prev_param = self.prev_model_params[name]
+            prev_param = self.params_before_training[name]
             change = torch.abs(param - prev_param)
             
             # 根据掩码分类
-            if name in wm_mask and wm_mask[name] is not None:
-                wm_changes.append(change[wm_mask[name]].sum().item())
+            wm_mask = self._wm_masks.get(name) if self._wm_masks else None
+            nonwm_mask = self._nonwm_masks.get(name) if self._nonwm_masks else None
+            
+            if wm_mask is not None:
+                wm_changes.append(change[wm_mask.bool()].sum().item())
             else:
                 wm_changes.append(change.sum().item())
                 
-            if name in nonwm_mask and nonwm_mask[name] is not None:
-                nonwm_changes.append(change[nonwm_mask[name]].sum().item())
+            if nonwm_mask is not None:
+                nonwm_changes.append(change[nonwm_mask.bool()].sum().item())
             else:
                 nonwm_changes.append(change.sum().item())
             
@@ -414,8 +434,8 @@ class MultiLoss:
             variance = sum((x - mean_change) ** 2 for x in all_changes) / len(all_changes)
             self.prev_param_change_variance = variance
         
-        # 更新保存的参数
-        self.prev_model_params = {k: v.clone() for k, v in current_params.items()}
+        # 清空训练前参数
+        self.params_before_training = None
     
     def get_stats(self):
         """获取当前统计量"""
