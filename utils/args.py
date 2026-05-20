@@ -8,7 +8,7 @@ def parser_args():
     parser.add_argument('--gpu', default='0', type=str, help='GPU device ID')
     
     # ========================= 数据集和模型参数 ========================
-    parser.add_argument('--dataset', type=str, default='cifar100', choices=['chestmnist', 'cifar10', 'cifar100'], help="name of dataset")
+    parser.add_argument('--dataset', type=str, default='chestmnist', choices=['chestmnist', 'cifar10', 'cifar100'], help="name of dataset")
     parser.add_argument('--model_name', type=str, default='alexnet', choices=['alexnet', 'resnet'],
                         help='model architecture name')
     parser.add_argument('--num_classes', default=None, type=int, help='number of classes')
@@ -18,17 +18,17 @@ def parser_args():
     parser.add_argument('--override', type=str, default=None, help='comma-separated key=value overrides')
     
     # ========================= 联邦学习核心参数 ========================
-    parser.add_argument('--epochs', type=int, default=150, help='total communication rounds')
+    parser.add_argument('--epochs', type=int, default=5, help='total communication rounds')
     parser.add_argument('--local_ep', type=int, default=2, help="local epochs per client: E")
     parser.add_argument('--batch_size', type=int, default=128, help="local batch size: B")
-    parser.add_argument('--client_num', type=int, default=20, help="number of clients: K")
+    parser.add_argument('--client_num', type=int, default=10, help="number of clients: K")
     parser.add_argument('--frac', type=float, default=1, help="fraction of participating clients: C")
     parser.add_argument('--iid', action='store_true', default=True, help='IID data distribution')
     
     # ========================= 优化器参数 ========================
-    parser.add_argument('--optim', type=str, default='sgd', choices=['sgd', 'adam'], help='optimizer type')
-    parser.add_argument('--lr', type=float, default=0.03, help='learning rate for local updates (reduced from 0.01 to 0.001 for better convergence)')
-    parser.add_argument('--wd', type=float, default=0.0005, help='weight decay (L2 regularization, increased from 0.0001 to 0.0005)')
+    parser.add_argument('--optim', type=str, default='adam', choices=['sgd', 'adam'], help='optimizer type')
+    parser.add_argument('--lr', type=float, default=0.001, help='learning rate for local updates (reduced from 0.01 to 0.001 for better convergence)')
+    parser.add_argument('--wd', type=float, default=0.00001, help='weight decay (L2 regularization, increased from 0.0001 to 0.0005)')
     parser.add_argument('--use_lr_scheduler', action='store_true', default=True, help='use cosine annealing learning rate scheduler')
     parser.add_argument('--dropout_rate', type=float, default=0.5, help='dropout rate for AlexNet classifier (default: 0.5)')
     
@@ -50,9 +50,9 @@ def parser_args():
                         help='initial alpha parameter for MultiLoss')
     parser.add_argument('--multiloss_init_b', type=float, default=0.0000800375825259,
                         help='initial beta parameter for MultiLoss')
-    parser.add_argument('--multiloss_alpha_early', type=float, default=0.00005,
+    parser.add_argument('--multiloss_alpha_early', type=float, default=0.005,
                         help='alpha value for early training phase (first 30% of epochs), increased for better watermark robustness')
-    parser.add_argument('--multiloss_alpha_late', type=float, default=0.0001,
+    parser.add_argument('--multiloss_alpha_late', type=float, default=0.001,
                         help='alpha value for late training phase (last 70% of epochs), increased for better watermark robustness')
     
     # ========================= Focal Loss 参数 ========================
