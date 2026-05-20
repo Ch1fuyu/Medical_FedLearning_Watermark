@@ -91,6 +91,12 @@ class MultiLoss:
         self.current_var_M = 0.0
         self.current_var_H = 0.0
         
+        # 缓存当前轮次的损失分量（用于保存到Excel）
+        self.cached_reg1_value = 0.0
+        self.cached_reg2_value = 0.0
+        self.cached_reg3_value = 0.0
+        self.cached_main_loss = 0.0
+        
     def get_alpha(self, current_epoch, total_epochs, alpha_early=None, alpha_late=None):
         """
         根据训练阶段返回alpha值
@@ -260,6 +266,13 @@ class MultiLoss:
         reg_term2 = self._compute_variance_ratio_term(alpha) if use_reg2 else torch.tensor(0.0, requires_grad=True, device=device)
         reg_term3 = self._compute_adaptive_weight_term(main_loss) if use_reg3 else torch.tensor(0.0, requires_grad=True, device=device)
         
+        # 缓存损失分量（用于记录到Excel）
+        # 处理张量和标量两种情况
+        self.cached_reg1_value = reg_term1.item() if torch.is_tensor(reg_term1) else float(reg_term1)
+        self.cached_reg2_value = reg_term2.item() if torch.is_tensor(reg_term2) else float(reg_term2)
+        self.cached_reg3_value = reg_term3.item() if torch.is_tensor(reg_term3) else float(reg_term3)
+        self.cached_main_loss = main_loss.item() if torch.is_tensor(main_loss) else float(main_loss)
+        
         # 总损失
         total_loss = main_loss + reg_term1 + reg_term2 + reg_term3
         
@@ -311,5 +324,10 @@ class MultiLoss:
             'current_grad_M': self.current_grad_M,
             'current_grad_H': self.current_grad_H,
             'current_var_M': self.current_var_M,
-            'current_var_H': self.current_var_H
+            'current_var_H': self.current_var_H,
+            # 损失分量
+            'reg1_value': self.cached_reg1_value,
+            'reg2_value': self.cached_reg2_value,
+            'reg3_value': self.cached_reg3_value,
+            'main_loss': self.cached_main_loss
         }

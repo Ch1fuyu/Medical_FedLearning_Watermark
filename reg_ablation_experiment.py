@@ -955,6 +955,11 @@ class RegAblationExperiment(Experiment):
                         'current_grad_H': float(multi_loss_stats['current_grad_H']),
                         'current_var_M': float(multi_loss_stats['current_var_M']),
                         'current_var_H': float(multi_loss_stats['current_var_H']),
+                        # 损失分量
+                        'main_loss': float(multi_loss_stats['main_loss']),
+                        'reg1_value': float(multi_loss_stats['reg1_value']),
+                        'reg2_value': float(multi_loss_stats['reg2_value']),
+                        'reg3_value': float(multi_loss_stats['reg3_value']),
                     })
                 
                 stats_rows.append(stats_row)
@@ -1044,7 +1049,8 @@ class RegAblationExperiment(Experiment):
                      'val_acc_label', 'val_auc', 'best_val_acc_so_far', 'best_val_auc_so_far', 
                      'train_acc_sample', 'val_acc_sample', 'autoencoder_performance', 'reg_config',
                      'prevGM', 'prevGH', 'prevRatio', 
-                     'current_grad_M', 'current_grad_H', 'current_var_M', 'current_var_H']
+                     'current_grad_M', 'current_grad_H', 'current_var_M', 'current_var_H',
+                     'main_loss', 'reg1_value', 'reg2_value', 'reg3_value']
             df = pd.DataFrame(stats_rows, columns=columns)
             now = datetime.now().strftime('%Y%m%d%H%M%S')
             excel_path = f'{self.args.save_excel_dir}/metrics_reg_ablation_{self.model_name}_{self.dataset}_{self.reg_config_str}_{now}.xlsx'
