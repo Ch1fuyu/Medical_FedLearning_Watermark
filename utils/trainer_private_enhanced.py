@@ -174,7 +174,7 @@ class TrainerPrivateEnhanced:
             init_a = args.multiloss_init_a
         if args and hasattr(args, 'multiloss_init_b'):
             init_b = args.multiloss_init_b
-        self.multi_loss = MultiLoss(init_a=init_a, init_b=init_b)
+        self.multi_loss = MultiLoss(init_a=init_a, init_b=init_b, device=device)
         self.mask_manager = None
         self.autoencoder = None
 

@@ -50,10 +50,10 @@ def parser_args():
                         help='initial alpha parameter for MultiLoss')
     parser.add_argument('--multiloss_init_b', type=float, default=0.0000800375825259,
                         help='initial beta parameter for MultiLoss')
-    parser.add_argument('--multiloss_alpha_early', type=float, default=0.00005,
-                        help='alpha value for early training phase (first 30% of epochs), increased for better watermark robustness')
-    parser.add_argument('--multiloss_alpha_late', type=float, default=0.0001,
-                        help='alpha value for late training phase (last 70% of epochs), increased for better watermark robustness')
+    parser.add_argument('--multiloss_alpha_early', type=float, default=0.01,
+                        help='alpha value for early training phase (first 30% of epochs)')
+    parser.add_argument('--multiloss_alpha_late', type=float, default=0.02,
+                        help='alpha value for late training phase (last 70% of epochs)')
     
     # ========================= Focal Loss 参数 ========================
     parser.add_argument('--use_focal_loss', action='store_true', default=False,

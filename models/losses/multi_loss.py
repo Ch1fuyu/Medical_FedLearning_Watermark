@@ -69,16 +69,18 @@ class MultiLoss:
     包含主任务损失和三个正则化项
     """
     
-    def __init__(self, init_a=0.6523, init_b=0.0000800375825259):
+    def __init__(self, init_a=0.6523, init_b=0.0000800375825259, device='cpu'):
         """
         初始化MultiLoss
         
         Args:
             init_a: 超参数，调节损失函数敏感性
             init_b: 超参数，调节损失函数敏感性
+            device: 计算设备
         """
         self.init_a = init_a
         self.init_b = init_b
+        self.device = device
         
         # 统计量初始化
         self.prevGM = 0.0  # 目标模型梯度量级
@@ -98,17 +100,16 @@ class MultiLoss:
         Args:
             current_epoch: 当前epoch
             total_epochs: 总epoch数
-            alpha_early: 早期训练的alpha值（已从0.000005提升到0.00005）
-            alpha_late: 晚期训练的alpha值（已从0.00001提升到0.0001）
             
         Returns:
             alpha值
         """
-        # 默认值已提升，增强水印鲁棒性
+        # 根据训练阶段返回alpha值
+        # 默认值与 args.py 保持一致
         if alpha_early is None:
-            alpha_early = 0.00005  # 从0.000005提升10倍
+            alpha_early = 0.01
         if alpha_late is None:
-            alpha_late = 0.0001  # 从0.00001提升10倍
+            alpha_late = 0.02
             
         if current_epoch <= 0.3 * total_epochs:
             return alpha_early
@@ -274,7 +275,7 @@ class MultiLoss:
         grad_M = max(self.prevGM, 1e-10)
         grad_H = max(self.prevGH, 1e-10)
         
-        beta1 = torch.abs(torch.tensor(grad_M / grad_H))
+        beta1 = torch.abs(torch.tensor(grad_M / grad_H, dtype=torch.float32, device=self.device))
         reg_term1 = alpha * (3 - beta1) * (3 - beta1)
         return reg_term1
     
@@ -283,7 +284,7 @@ class MultiLoss:
         # 使用容差判断是否为初始值
         # 避免 prevRatio 恰好为 1.0 时正则项失效
         if abs(self.prevRatio - 1.0) < 1e-6 and self.current_var_H < 1e-10:
-            return torch.tensor(0.0, requires_grad=True)
+            return torch.tensor(0.0, dtype=torch.float32, device=self.device, requires_grad=True)
             
         reg_term2 = alpha * (1.5 - self.prevRatio) * (1.5 - self.prevRatio)
         return reg_term2
@@ -295,7 +296,12 @@ class MultiLoss:
         
         # 防止main_loss过大导致计算不稳定
         main_loss_clamped = torch.clamp(main_loss, max=self.init_a - 1e-6)
-        beta2 = grad_M * torch.abs(1 / (self.init_a - main_loss_clamped)) / self.init_b
+        # 确保计算在正确的设备上，使用 tensor 进行计算
+        init_a_tensor = torch.tensor(self.init_a, dtype=torch.float32, device=main_loss.device)
+        init_b_tensor = torch.tensor(self.init_b, dtype=torch.float32, device=main_loss.device)
+        grad_M_tensor = torch.tensor(grad_M, dtype=torch.float32, device=main_loss.device)
+        
+        beta2 = grad_M_tensor * torch.abs(1 / (init_a_tensor - main_loss_clamped)) / init_b_tensor
         reg_term3 = torch.exp(-1 * beta2) * beta2
         return reg_term3
     
