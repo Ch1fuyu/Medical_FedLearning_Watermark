@@ -169,19 +169,6 @@ class TrainerRegAblation(TrainerPrivateEnhanced):
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
 
-                # 梯度统计收集：训练开始前，先用前一轮的统计量
-                # 第一个batch使用trainer的初始统计量（如果有）
-                if self.mask_manager and batch_idx == 0 and hasattr(self, '_prev_stats') and self._prev_stats:
-                    try:
-                        self.multi_loss.prevGM = self._prev_stats['prevGM']
-                        self.multi_loss.prevGH = self._prev_stats['prevGH']
-                        self.multi_loss.prevRatio = self._prev_stats['prevRatio']
-                    except:
-                        pass
-
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                self.optimizer.step()
-
                 batch_acc = self._compute_accuracy(pred, y)
                 acc_meter += batch_acc.item() * x.size(0) / 100.0
                 loss_meter += main_loss.item() * x.size(0)
