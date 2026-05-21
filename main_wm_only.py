@@ -495,7 +495,7 @@ def main(args):
     enhanced = "_enhanced" if args.watermark_mode == 'enhanced' else ""
     watermark_suffix = f"wm_{args.watermark_mode}" if hasattr(args, 'watermark_mode') and args.watermark_mode else "wm_basic"
     
-    file_name = '{}_simple_Dp_{}_iid_{}_{}_ep_{}_le_{}_cn_{}_fra_{:.4f}_{}{{.4f}}{}.pkl'.format(
+    file_name = '{}_simple_Dp_{}_iid_{}_{}_ep_{}_le_{}_cn_{}_fra_{:.4f}_{}_{{:.4f}}{}.pkl'.format(
         formatted_now, args.sigma, args.iid, watermark_suffix,
         args.epochs, args.local_ep, args.client_num, args.frac, best_metric_name, enhanced
     )
