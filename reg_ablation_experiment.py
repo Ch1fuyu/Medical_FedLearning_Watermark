@@ -1,17 +1,10 @@
 """
 正则项消融实验脚本
-用于测试三个正则项的不同组合对联邦水印训练的影响
-
-三个正则项：
-- reg_term1: 梯度平衡正则项 (gradient balance)
-- reg_term2: 方差比例正则项 (variance ratio)
-- reg_term3: 自适应权重正则项 (adaptive weight)
+用于测试 reg_term3 对联邦水印训练的影响
 
 使用方法：
-python reg_ablation_experiment.py --dataset chestmnist --model_name alexnet --use_reg1=False  # 禁用reg1
-python reg_ablation_experiment.py --dataset chestmnist --model_name alexnet --use_reg2=False  # 禁用reg2
+python reg_ablation_experiment.py --dataset chestmnist --model_name alexnet  # 默认只使用reg3
 python reg_ablation_experiment.py --dataset chestmnist --model_name alexnet --use_reg3=False  # 禁用reg3
-python reg_ablation_experiment.py --dataset chestmnist --model_name alexnet --use_reg1=False --use_reg2=False  # 只使用reg3
 """
 import copy
 import os
@@ -69,16 +62,10 @@ class RegAblationExperiment(Experiment):
         self.key_matrix_dir = getattr(args, 'key_matrix_dir', './save/key_matrix')
         
         # 获取正则项配置
-        self.use_reg1 = getattr(args, 'use_reg1', True)
-        self.use_reg2 = getattr(args, 'use_reg2', True)
         self.use_reg3 = getattr(args, 'use_reg3', True)
         
         # 构建正则项配置字符串
         reg_config = []
-        if self.use_reg1:
-            reg_config.append('reg1')
-        if self.use_reg2:
-            reg_config.append('reg2')
         if self.use_reg3:
             reg_config.append('reg3')
         self.reg_config_str = '+'.join(reg_config) if reg_config else 'none'
@@ -86,8 +73,6 @@ class RegAblationExperiment(Experiment):
         logging.info('='*60)
         logging.info('正则项消融实验')
         logging.info(f'正则项配置: {self.reg_config_str}')
-        logging.info(f'  reg1 (梯度平衡): {"启用" if self.use_reg1 else "禁用"}')
-        logging.info(f'  reg2 (方差比例): {"启用" if self.use_reg2 else "禁用"}')
         logging.info(f'  reg3 (自适应权重): {"启用" if self.use_reg3 else "禁用"}')
         logging.info('水印嵌入逻辑保持不变（使用KeyMatrixManager进行参数替换）')
         logging.info('='*60)
@@ -1223,8 +1208,6 @@ def main(args):
                 'epochs': args.epochs,
                 'client_num': args.client_num,
                 'console_log': os.path.basename(log_file_name),
-                'use_reg1': getattr(args, 'use_reg1', True),
-                'use_reg2': getattr(args, 'use_reg2', True),
                 'use_reg3': getattr(args, 'use_reg3', True),
             }
             }
@@ -1247,10 +1230,6 @@ def main(args):
     
     # 构建正则项配置字符串用于文件名
     reg_config = []
-    if getattr(args, 'use_reg1', True):
-        reg_config.append('r1')
-    if getattr(args, 'use_reg2', True):
-        reg_config.append('r2')
     if getattr(args, 'use_reg3', True):
         reg_config.append('r3')
     reg_suffix = '_'.join(reg_config) if reg_config else 'none'

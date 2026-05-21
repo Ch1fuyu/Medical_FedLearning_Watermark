@@ -8,7 +8,7 @@ def parser_args():
     parser.add_argument('--gpu', default='0', type=str, help='GPU device ID')
     
     # ========================= 数据集和模型参数 ========================
-    parser.add_argument('--dataset', type=str, default='cifar100', choices=['chestmnist', 'cifar10', 'cifar100'], help="name of dataset")
+    parser.add_argument('--dataset', type=str, default='chestmnist', choices=['chestmnist', 'cifar10', 'cifar100'], help="name of dataset")
     parser.add_argument('--model_name', type=str, default='alexnet', choices=['alexnet', 'resnet'],
                         help='model architecture name')
     parser.add_argument('--num_classes', default=None, type=int, help='number of classes')
@@ -21,14 +21,14 @@ def parser_args():
     parser.add_argument('--epochs', type=int, default=150, help='total communication rounds')
     parser.add_argument('--local_ep', type=int, default=2, help="local epochs per client: E")
     parser.add_argument('--batch_size', type=int, default=128, help="local batch size: B")
-    parser.add_argument('--client_num', type=int, default=20, help="number of clients: K")
+    parser.add_argument('--client_num', type=int, default=5, help="number of clients: K")
     parser.add_argument('--frac', type=float, default=1, help="fraction of participating clients: C")
     parser.add_argument('--iid', action='store_true', default=True, help='IID data distribution')
     
     # ========================= 优化器参数 ========================
-    parser.add_argument('--optim', type=str, default='sgd', choices=['sgd', 'adam'], help='optimizer type')
-    parser.add_argument('--lr', type=float, default=0.03, help='learning rate for local updates (reduced from 0.01 to 0.001 for better convergence)')
-    parser.add_argument('--wd', type=float, default=0.0005, help='weight decay (L2 regularization, increased from 0.0001 to 0.0005)')
+    parser.add_argument('--optim', type=str, default='adam', choices=['sgd', 'adam'], help='optimizer type')
+    parser.add_argument('--lr', type=float, default=0.001, help='learning rate for local updates (reduced from 0.01 to 0.001 for better convergence)')
+    parser.add_argument('--wd', type=float, default=0.00001, help='weight decay (L2 regularization, increased from 0.0001 to 0.0005)')
     parser.add_argument('--use_lr_scheduler', action='store_true', default=False, help='use cosine annealing learning rate scheduler')
     parser.add_argument('--dropout_rate', type=float, default=0.5, help='dropout rate for AlexNet classifier (default: 0.5)')
     
@@ -55,13 +55,6 @@ def parser_args():
     parser.add_argument('--multiloss_alpha_late', type=float, default=0.0001,
                         help='alpha value for late training phase (last 70% of epochs), increased for better watermark robustness')
     
-    # ========================= 正则项消融实验参数 ========================
-    parser.add_argument('--use_reg1', action='store_true', default=True,
-                        help='enable reg_term1 (gradient balance regularization term)')
-    parser.add_argument('--use_reg2', action='store_true', default=False,
-                        help='enable reg_term2 (variance ratio regularization term)')
-    parser.add_argument('--use_reg3', action='store_true', default=False,
-                        help='enable reg_term3 (adaptive weight regularization term)')
     # ========================= Focal Loss 参数 ========================
     parser.add_argument('--use_focal_loss', action='store_true', default=False,
                         help='enable FocalLoss for imbalanced multi-label classification')

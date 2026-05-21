@@ -458,46 +458,6 @@ class MultiLoss:
         total_loss = main_loss + reg_term3
         return total_loss
     
-    def _compute_gradient_balance_term(self, alpha):
-        """
-        计算梯度平衡正则项（重新设计方案）
-        
-        核心：使用可学习的 _learnable_ratio[0] 作为目标 GM/GH 比例
-        正则项 = α × (learnable_ratio[0] - 3.0)²
-        
-        这会驱动模型参数向使 GM/GH 趋向 3.0 的方向更新
-        """
-        # 如果未初始化，返回0
-        if not self._is_initialized:
-            return torch.tensor(0.0, device=self.device or 'cpu')
-        
-        # 可学习的目标 GM/GH 比例
-        target_ratio = self._learnable_ratio[0]
-        
-        # 平方损失，驱动目标比例趋向 3.0
-        reg_term1 = alpha * (target_ratio - self.target_gm_gh_ratio) ** 2
-        return reg_term1
-    
-    def _compute_variance_ratio_term(self, alpha):
-        """
-        计算方差比例正则项（重新设计方案）
-        
-        核心：使用可学习的 _learnable_ratio[1] 作为目标方差比例
-        正则项 = α × (learnable_ratio[1] - 1.5)²
-        
-        这会驱动模型参数向使方差比例趋向 1.5 的方向更新
-        """
-        # 如果方差比例未初始化，返回0
-        if not self._is_initialized:
-            return torch.tensor(0.0, device=self.device or 'cpu')
-        
-        # 可学习的目标方差比例
-        target_var_ratio = self._learnable_ratio[1]
-        
-        # 平方损失，驱动目标比例趋向 1.5
-        reg_term2 = alpha * (target_var_ratio - self.target_var_ratio) ** 2
-        return reg_term2
-    
     def _compute_adaptive_weight_term(self, main_loss):
         """计算自适应权重正则项（可微分版本）"""
         if not self._is_initialized or self._ema_gm == 0:
