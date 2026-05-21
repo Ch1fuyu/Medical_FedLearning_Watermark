@@ -27,6 +27,22 @@ set_seed()
 # 配置 logging
 args = parser_args()
 log_file_name = args.log_file
+
+# 检查日志文件行数，如果超过阈值则备份并创建新的
+MAX_LOG_LINES = 10000
+if os.path.exists(log_file_name):
+    with open(log_file_name, 'r', encoding='utf-8') as f:
+        line_count = sum(1 for _ in f)
+    if line_count > MAX_LOG_LINES:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup_name = log_file_name.replace('.logs', f'_{timestamp}.logs')
+        os.rename(log_file_name, backup_name)
+        backup_done = True
+    else:
+        backup_done = False
+else:
+    backup_done = False
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -36,6 +52,13 @@ logging.basicConfig(
         logging.FileHandler(log_file_name, mode='a', encoding='utf-8')  # 追加模式
     ]
 )
+
+# 备份后立即记录信息
+if backup_done:
+    logging.info(f"日志文件过大 ({line_count}行)，已备份至 {backup_name}")
+    # 立即刷新缓冲区，确保备份信息写入文件
+    for h in logging.root.handlers:
+        h.flush()
 
 
 class FederatedLearningOnChestMNIST(Experiment):
