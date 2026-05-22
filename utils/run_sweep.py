@@ -20,162 +20,114 @@ MAIN_PY_PATH = PROJECT_ROOT / 'main.py'
 # ========================= 在这里定义你的实验配置 =========================
 # 每个字典代表一次实验，按顺序执行
 # 只需填写需要变化的参数，其他自动使用 args.py 的默认值
+#
+# 优化器和学习率建议:
+# - CIFAR-10/100 + AlexNet: Adam, lr=0.003 (小学习率适合复杂模型)
+# - CIFAR-10/100 + ResNet: SGD, lr=0.01 (SGD在大数据集上泛化更好)
 EXPERIMENTS = [
-    # 实验配置：3数据集 × 2网络 × 3客户端数 = 18个实验
-
-    # chestmnist + alexnet
-    {
-        'name': 'chestmnist_alexnet_adam_5clients',
-        '--dataset': 'chestmnist',
-        '--model_name': 'alexnet',
-        '--optim': 'adam',
-        '--lr': '0.001',
-        '--client_num': '5',
-    },
-    {
-        'name': 'chestmnist_alexnet_adam_10clients',
-        '--dataset': 'chestmnist',
-        '--model_name': 'alexnet',
-        '--optim': 'adam',
-        '--lr': '0.001',
-        '--client_num': '10',
-    },
-    {
-        'name': 'chestmnist_alexnet_adam_20clients',
-        '--dataset': 'chestmnist',
-        '--model_name': 'alexnet',
-        '--optim': 'adam',
-        '--lr': '0.001',
-        '--client_num': '20',
-    },
-
-    # chestmnist + resnet
-    {
-        'name': 'chestmnist_resnet_adam_5clients',
-        '--dataset': 'chestmnist',
-        '--model_name': 'resnet',
-        '--optim': 'adam',
-        '--lr': '0.001',
-        '--client_num': '5',
-    },
-    {
-        'name': 'chestmnist_resnet_adam_10clients',
-        '--dataset': 'chestmnist',
-        '--model_name': 'resnet',
-        '--optim': 'adam',
-        '--lr': '0.001',
-        '--client_num': '10',
-    },
-    {
-        'name': 'chestmnist_resnet_adam_20clients',
-        '--dataset': 'chestmnist',
-        '--model_name': 'resnet',
-        '--optim': 'adam',
-        '--lr': '0.001',
-        '--client_num': '20',
-    },
+    # 实验配置：CIFAR × 2网络 × 3客户端数 = 12个实验
 
     # cifar10 + alexnet
     {
-        'name': 'cifar10_alexnet_adam_5clients',
+        'name': 'cifar10_alexnet_5clients',
         '--dataset': 'cifar10',
         '--model_name': 'alexnet',
         '--optim': 'adam',
-        '--lr': '0.001',
+        '--lr': '0.003',
         '--client_num': '5',
     },
     {
-        'name': 'cifar10_alexnet_adam_10clients',
+        'name': 'cifar10_alexnet_10clients',
         '--dataset': 'cifar10',
         '--model_name': 'alexnet',
         '--optim': 'adam',
-        '--lr': '0.001',
+        '--lr': '0.003',
         '--client_num': '10',
     },
     {
-        'name': 'cifar10_alexnet_adam_20clients',
+        'name': 'cifar10_alexnet_20clients',
         '--dataset': 'cifar10',
         '--model_name': 'alexnet',
         '--optim': 'adam',
-        '--lr': '0.001',
+        '--lr': '0.003',
         '--client_num': '20',
     },
 
     # cifar10 + resnet
     {
-        'name': 'cifar10_resnet_adam_5clients',
+        'name': 'cifar10_resnet_5clients',
         '--dataset': 'cifar10',
         '--model_name': 'resnet',
-        '--optim': 'adam',
-        '--lr': '0.001',
+        '--optim': 'sgd',
+        '--lr': '0.01',
         '--client_num': '5',
     },
     {
-        'name': 'cifar10_resnet_adam_10clients',
+        'name': 'cifar10_resnet_10clients',
         '--dataset': 'cifar10',
         '--model_name': 'resnet',
-        '--optim': 'adam',
-        '--lr': '0.001',
+        '--optim': 'sgd',
+        '--lr': '0.01',
         '--client_num': '10',
     },
     {
-        'name': 'cifar10_resnet_adam_20clients',
+        'name': 'cifar10_resnet_20clients',
         '--dataset': 'cifar10',
         '--model_name': 'resnet',
-        '--optim': 'adam',
-        '--lr': '0.001',
+        '--optim': 'sgd',
+        '--lr': '0.01',
         '--client_num': '20',
     },
 
     # cifar100 + alexnet
     {
-        'name': 'cifar100_alexnet_adam_5clients',
+        'name': 'cifar100_alexnet_5clients',
         '--dataset': 'cifar100',
         '--model_name': 'alexnet',
         '--optim': 'adam',
-        '--lr': '0.001',
+        '--lr': '0.003',
         '--client_num': '5',
     },
     {
-        'name': 'cifar100_alexnet_adam_10clients',
+        'name': 'cifar100_alexnet_10clients',
         '--dataset': 'cifar100',
         '--model_name': 'alexnet',
         '--optim': 'adam',
-        '--lr': '0.001',
+        '--lr': '0.003',
         '--client_num': '10',
     },
     {
-        'name': 'cifar100_alexnet_adam_20clients',
+        'name': 'cifar100_alexnet_20clients',
         '--dataset': 'cifar100',
         '--model_name': 'alexnet',
         '--optim': 'adam',
-        '--lr': '0.001',
+        '--lr': '0.003',
         '--client_num': '20',
     },
 
     # cifar100 + resnet
     {
-        'name': 'cifar100_resnet_adam_5clients',
+        'name': 'cifar100_resnet_5clients',
         '--dataset': 'cifar100',
         '--model_name': 'resnet',
-        '--optim': 'adam',
-        '--lr': '0.001',
+        '--optim': 'sgd',
+        '--lr': '0.01',
         '--client_num': '5',
     },
     {
-        'name': 'cifar100_resnet_adam_10clients',
+        'name': 'cifar100_resnet_10clients',
         '--dataset': 'cifar100',
         '--model_name': 'resnet',
-        '--optim': 'adam',
-        '--lr': '0.001',
+        '--optim': 'sgd',
+        '--lr': '0.01',
         '--client_num': '10',
     },
     {
-        'name': 'cifar100_resnet_adam_20clients',
+        'name': 'cifar100_resnet_20clients',
         '--dataset': 'cifar100',
         '--model_name': 'resnet',
-        '--optim': 'adam',
-        '--lr': '0.001',
+        '--optim': 'sgd',
+        '--lr': '0.01',
         '--client_num': '20',
     },
 ]
