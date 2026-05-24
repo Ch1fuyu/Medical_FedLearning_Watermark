@@ -113,6 +113,8 @@ class FederatedLearningOnChestMNIST(Experiment):
         # ========== 模型追踪功能初始化 ==========
         # 用于存储每轮下发给各客户端的"定制模型"
         self.customized_models = {}  # {client_id: model_state_dict}
+        # 用于存储每个客户端下发的扰动值（用于联邦聚合前消除）
+        self.client_perturbations = {}  # {client_id: {param_name: {local_idx: perturbation_value}}}
         # 用于记录每次泄漏事件
         self.leakage_records = []  # [{round, leaked_client, model_params}]
         # 用于记录追踪结果
@@ -287,6 +289,11 @@ class FederatedLearningOnChestMNIST(Experiment):
                     current_epoch=epoch,
                     total_epochs=self.epochs
                 )
+
+                # 消除下发时添加的扰动，恢复到"纯净"状态后再加入聚合
+                if idx in self.client_perturbations:
+                    local_w = self._remove_perturbation(local_w, self.client_perturbations[idx])
+                    logging.debug(f"轮次{epoch+1}：已消除客户端 {idx} 的扰动")
 
                 local_ws.append(copy.deepcopy(local_w))
                 local_losses.append(local_loss)
@@ -622,15 +629,18 @@ class FederatedLearningOnChestMNIST(Experiment):
             customized_models: 字典 {client_id: model_state_dict}
         """
         customized_models = {}
+        self.client_perturbations = {}  # 重置扰动记录
         
         # 为每个客户端生成独特的基准偏移量
         torch.manual_seed(42 + epoch)  # 保证每轮的可重复性
         base_offset = torch.randn(1).item() * 0.01  # 基础偏移量
         
         for client_id in idxs_users:
-            customized_models[client_id] = self._generate_customized_model(
+            customized_model, perturbation = self._generate_customized_model(
                 client_id, global_model, base_offset, epoch
             )
+            customized_models[client_id] = customized_model
+            self.client_perturbations[client_id] = perturbation
         return customized_models
 
     def _generate_customized_model(self, client_id, global_model, base_offset, epoch):
@@ -649,8 +659,10 @@ class FederatedLearningOnChestMNIST(Experiment):
 
         Returns:
             customized_model: 定制模型参数字典
+            perturbation: 扰动值字典 {param_name: {local_idx: perturbation_value}}
         """
         customized_model = {}
+        perturbation = {}  # 记录扰动值，用于后续消除
 
         try:
             from utils.key_matrix_utils import KeyMatrixManager
@@ -665,6 +677,7 @@ class FederatedLearningOnChestMNIST(Experiment):
             for param_name in global_model.keys():
                 param_tensor = global_model[param_name].clone()
                 param_flat = param_tensor.view(-1)
+                perturbation[param_name] = {}  # 初始化该参数的扰动记录
 
                 # 在该客户端的水印位置嵌入独特指纹
                 for param_name_w, global_idx in client_positions:
@@ -690,14 +703,51 @@ class FederatedLearningOnChestMNIST(Experiment):
                         # 将指纹值添加到原有参数上（产生独特但微小的差异）
                         original_value = param_flat[local_idx].item()
                         param_flat[local_idx] = original_value + fingerprint
+                        
+                        # 记录扰动值（注意：扰动是相对于原始全局模型的偏移量）
+                        perturbation[param_name][int(local_idx)] = fingerprint
 
                 customized_model[param_name] = param_tensor
 
         except Exception as e:
             logging.warning(f"Failed to generate customized model for client {client_id}: {e}")
-            return global_model.copy()
+            return global_model.copy(), {}
 
-        return customized_model
+        return customized_model, perturbation
+
+    def _remove_perturbation(self, model_state, perturbation):
+        """
+        消除模型中的扰动值，恢复到下发前的"纯净"状态
+
+        这个方法在本地训练完成后、聚合之前调用，确保联邦聚合时
+        各客户端的扰动不会累积到全局模型中。
+
+        Args:
+            model_state: 本地训练后的模型参数字典
+            perturbation: 下发时记录的扰动字典 {param_name: {local_idx: perturbation_value}}
+
+        Returns:
+            消除扰动后的模型参数字典
+        """
+        cleaned_model = {}
+        
+        for param_name, param_tensor in model_state.items():
+            if param_name not in perturbation:
+                # 该参数没有扰动，直接复制
+                cleaned_model[param_name] = param_tensor.clone()
+                continue
+            
+            # 复制参数并消除扰动
+            param_clean = param_tensor.clone()
+            param_flat = param_clean.view(-1)
+            
+            for local_idx, perturb_value in perturbation[param_name].items():
+                if 0 <= local_idx < param_flat.numel():
+                    param_flat[local_idx] -= perturb_value
+            
+            cleaned_model[param_name] = param_clean
+        
+        return cleaned_model
 
     def _cosine_similarity(self, vec1, vec2):
         """
