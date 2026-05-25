@@ -72,7 +72,9 @@ def evaluate_delta_pcc(original_model_state, current_model_state, reconstructor,
     """
     try:
         # 1. 从原始模型重建自编码器作为基准
-        original_reconstructed_autoencoder = reconstructor.reconstruct_autoencoder_from_all_clients(original_model_state)
+        original_reconstructed_autoencoder = reconstructor.reconstruct_autoencoder_from_all_clients(
+            original_model_state, model=model
+        )
         
         if original_reconstructed_autoencoder is None:
             print("❌ 无法从原始模型重建自编码器")
@@ -93,7 +95,9 @@ def evaluate_delta_pcc(original_model_state, current_model_state, reconstructor,
             tau = perf_fail - perf_before
         
         # 4. 从当前模型重建自编码器
-        current_reconstructed_autoencoder = reconstructor.reconstruct_autoencoder_from_all_clients(current_model_state)
+        current_reconstructed_autoencoder = reconstructor.reconstruct_autoencoder_from_all_clients(
+            current_model_state, model=model
+        )
         
         if current_reconstructed_autoencoder is None:
             print("❌ 自编码器重建失败")
@@ -153,7 +157,9 @@ def calculate_fixed_tau(original_model_state, reconstructor, test_loader,
     """
     try:
         # 从原始模型重建自编码器
-        original_reconstructed_autoencoder = reconstructor.reconstruct_autoencoder_from_all_clients(original_model_state)
+        original_reconstructed_autoencoder = reconstructor.reconstruct_autoencoder_from_all_clients(
+            original_model_state, model=model
+        )
         
         if original_reconstructed_autoencoder is None:
             print("❌ 无法从原始模型重建自编码器")

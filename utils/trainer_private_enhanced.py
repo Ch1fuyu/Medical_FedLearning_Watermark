@@ -340,9 +340,10 @@ class TrainerPrivateEnhanced:
                     return
             
             with torch.no_grad():
+                # 必须传递 self.model 以确保参数顺序与密钥矩阵生成时一致
                 model_params = dict(self.model.named_parameters())
                 watermarked_params = self._key_manager.embed_watermark(
-                    model_params, client_id, encoder_params
+                    model_params, client_id, encoder_params, model=self.model
                 )
                 
                 for name, param in self.model.named_parameters():

@@ -284,9 +284,10 @@ class TrainerPrivate(object):
                     watermark_mean_abs = encoder_flat.abs().mean().item()
                     
                     # 使用KeyMatrixManager的embed_watermark方法，自动处理缩放
+                    # 必须传递 self.model 以确保参数顺序与密钥矩阵生成时一致
                     model_params = dict(self.model.named_parameters())
                     watermarked_params = self._key_manager.embed_watermark(
-                        model_params, client_id, encoder_flat
+                        model_params, client_id, encoder_flat, model=self.model
                     )
                     
                     # 将水印参数更新到模型中

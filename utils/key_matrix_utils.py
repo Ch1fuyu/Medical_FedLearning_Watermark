@@ -148,27 +148,28 @@ class KeyMatrixManager:
         # 检查是否需要构建全局偏移映射（用于转换全局索引）
         needs_conversion = False
         param_offset_map = {}
-        
-        # 先检查是否需要转换
+
+        # 先检查是否需要转换（检测是否有索引超出对应参数范围）
         for param_name, idx in positions:
             if param_name in model_params:
                 param_size = model_params[param_name].numel()
                 if idx >= param_size:
                     needs_conversion = True
                     break
-        
+
         # 如果需要转换，构建参数偏移映射
         if needs_conversion:
             current_offset = 0
             # 只处理卷积层参数（与 train_key_matrix.py 保持一致）
-            # 如果提供了模型对象，使用 named_parameters() 确保顺序一致
-            # 否则使用参数名排序（可能不完全准确，但兼容性更好）
-            if model is not None:
-                # 使用模型对象的 named_parameters() 确保顺序与 train_key_matrix.py 一致
-                param_iter = model.named_parameters()
-            else:
-                # 回退到字典顺序（按名称排序）
-                param_iter = sorted(model_params.items(), key=lambda x: x[0])
+            # 必须传递 model 对象以确保参数顺序与密钥矩阵生成时一致
+            if model is None:
+                raise ValueError(
+                    "[embed_watermark] 错误: 检测到需要全局索引转换（索引值超出参数范围），"
+                    "但未提供 model 参数。必须传递 model 对象以确保参数顺序与密钥矩阵生成时一致。"
+                    "请使用 model.named_parameters() 来获取正确的参数顺序。"
+                )
+            # 使用模型对象的 named_parameters() 确保顺序与 train_key_matrix.py 一致
+            param_iter = model.named_parameters()
             
             for name, param in param_iter:
                 # 确保参数存在于 model_params 中
@@ -390,14 +391,15 @@ class KeyMatrixManager:
         if needs_conversion:
             current_offset = 0
             # 只处理卷积层参数（与 train_key_matrix.py 保持一致）
-            # 如果提供了模型对象，使用 named_parameters() 确保顺序一致
-            # 否则使用参数名排序（可能不完全准确，但兼容性更好）
-            if model is not None:
-                # 使用模型对象的 named_parameters() 确保顺序与 train_key_matrix.py 一致
-                param_iter = model.named_parameters()
-            else:
-                # 回退到字典顺序（按名称排序）
-                param_iter = sorted(model_params.items(), key=lambda x: x[0])
+            # 必须传递 model 对象以确保参数顺序与密钥矩阵生成时一致
+            if model is None:
+                raise ValueError(
+                    "[extract_watermark] 错误: 检测到需要全局索引转换（索引值超出参数范围），"
+                    "但未提供 model 参数。必须传递 model 对象以确保参数顺序与密钥矩阵生成时一致。"
+                    "请使用 model.named_parameters() 来获取正确的参数顺序。"
+                )
+            # 使用模型对象的 named_parameters() 确保顺序与 train_key_matrix.py 一致
+            param_iter = model.named_parameters()
             
             for name, param in param_iter:
                 # 确保参数存在于 model_params 中

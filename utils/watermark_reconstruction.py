@@ -54,19 +54,40 @@ class WatermarkReconstructor:
         
         return autoencoder
     
-    def extract_watermark_parameters(self, model_state_dict: Dict[str, torch.Tensor], 
-                                   client_id: int, check_pruning: bool = False) -> torch.Tensor:
-        """从模型状态字典中提取水印参数"""
+    def extract_watermark_parameters(self, model_state_dict: Dict[str, torch.Tensor],
+                                   client_id: int, check_pruning: bool = False,
+                                   model: Optional[torch.nn.Module] = None) -> torch.Tensor:
+        """
+        从模型状态字典中提取水印参数
+
+        Args:
+            model_state_dict: 模型状态字典
+            client_id: 客户端ID
+            check_pruning: 是否检查剪枝影响
+            model: 模型对象（推荐传递以确保参数顺序正确）
+        """
         try:
-            return self.key_manager.extract_watermark(model_state_dict, client_id, check_pruning)
+            # 必须传递 model 参数以确保参数顺序与密钥矩阵生成时一致
+            return self.key_manager.extract_watermark(model_state_dict, client_id, check_pruning, model=model)
+        except ValueError as e:
+            # 重新抛出 ValueError（包含明确的错误信息）
+            raise
         except Exception as e:
             print(f"❌ 提取客户端 {client_id} 的水印参数失败: {e}")
             return torch.tensor([])
     
-    def reconstruct_autoencoder_from_watermark(self, model_state_dict: Dict[str, torch.Tensor], 
-                                             client_id: int) -> LightAutoencoder:
-        """从水印参数重建自编码器"""
-        watermark_values = self.extract_watermark_parameters(model_state_dict, client_id)
+    def reconstruct_autoencoder_from_watermark(self, model_state_dict: Dict[str, torch.Tensor],
+                                             client_id: int,
+                                             model: Optional[torch.nn.Module] = None) -> LightAutoencoder:
+        """
+        从水印参数重建自编码器
+
+        Args:
+            model_state_dict: 模型状态字典
+            client_id: 客户端ID
+            model: 模型对象（推荐传递以确保参数顺序正确）
+        """
+        watermark_values = self.extract_watermark_parameters(model_state_dict, client_id, model=model)
         
         if len(watermark_values) == 0:
             print(f"❌ 无法从客户端 {client_id} 提取水印参数")
@@ -87,26 +108,28 @@ class WatermarkReconstructor:
         
         return reconstructed_autoencoder
     
-    def reconstruct_autoencoder_from_all_clients(self, model_state_dict: Dict[str, torch.Tensor]) -> LightAutoencoder:
+    def reconstruct_autoencoder_from_all_clients(self, model_state_dict: Dict[str, torch.Tensor],
+                                                model: Optional[torch.nn.Module] = None) -> LightAutoencoder:
         """
         从所有客户端的水印参数重建自编码器（用于侵权判断）
-        
+
         Args:
             model_state_dict: 模型状态字典
-            
+            model: 模型对象（推荐传递以确保参数顺序正确）
+
         Returns:
             重建的自编码器
         """
         # 获取所有客户端ID
         all_client_ids = self.key_manager.list_clients()
-        
+
         # 从所有客户端提取水印参数
         all_watermark_values = []
         successful_clients = []
-        
+
         for client_id in all_client_ids:
             try:
-                watermark_values = self.extract_watermark_parameters(model_state_dict, client_id)
+                watermark_values = self.extract_watermark_parameters(model_state_dict, client_id, model=model)
                 if len(watermark_values) > 0:
                     all_watermark_values.append(watermark_values)
                     successful_clients.append(client_id)

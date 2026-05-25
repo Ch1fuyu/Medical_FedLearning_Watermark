@@ -404,14 +404,15 @@ def threshold_pruning(model, pruning_ratio: float):
     
     return pruned_model
 
-def evaluate_watermark_after_pruning(model, reconstructor):
+def evaluate_watermark_after_pruning(model, reconstructor, watermark_model=None):
     """
     评估剪枝后模型的水印完整性
-    
+
     Args:
         model: 剪枝后的模型
         reconstructor: 水印重建器实例
-        
+        watermark_model: 用于水印提取的模型对象（推荐传递以确保参数顺序正确）
+
     Returns:
         水印重建结果
     """
@@ -421,7 +422,8 @@ def evaluate_watermark_after_pruning(model, reconstructor):
         model_state_dict = model.state_dict()
         
         # 从所有客户端重建自编码器
-        reconstructed_autoencoder = reconstructor.reconstruct_autoencoder_from_all_clients(model_state_dict)
+        # 必须传递 watermark_model 对象以确保参数顺序与密钥矩阵生成时一致
+        reconstructed_autoencoder = reconstructor.reconstruct_autoencoder_from_all_clients(model_state_dict, model=watermark_model)
         
         if reconstructed_autoencoder is None:
             print("❌ 水印重建失败")
@@ -437,7 +439,8 @@ def evaluate_watermark_after_pruning(model, reconstructor):
         for client_id in all_client_ids:
             try:
                 # 提取水印参数并检查剪枝影响
-                watermark_values = key_manager.extract_watermark(model_state_dict, client_id, check_pruning=True)
+                # 必须传递 watermark_model 对象以确保参数顺序与密钥矩阵生成时一致
+                watermark_values = key_manager.extract_watermark(model_state_dict, client_id, check_pruning=True, model=watermark_model)
                 total_watermark_params += len(watermark_values)
                 
                 # 检查被剪枝的水印参数（完全等于0的参数）
@@ -609,13 +612,15 @@ def main():
             print(f"剪枝后模型AUC: {pruned_auc:.4f}, 准确率: {pruned_accuracy:.4f}")
             
             # 评估水印完整性
-            watermark_result = evaluate_watermark_after_pruning(pruned_model, reconstructor)
+            # 必须传递 model 对象以确保参数顺序与密钥矩阵生成时一致
+            watermark_result = evaluate_watermark_after_pruning(pruned_model, reconstructor, watermark_model=pruned_model)
             
             # 评估ΔPCC
             # 使用原始模型作为基准，比较剪枝前后的性能
+            # 必须传递 model 对象以确保参数顺序与密钥矩阵生成时一致
             delta_pcc_result = evaluate_delta_pcc(
-                model.state_dict(), pruned_model.state_dict(), reconstructor, test_loader, device, 
-                perf_fail_ratio=PERF_FAIL_RATIO, fixed_tau=fixed_tau
+                model.state_dict(), pruned_model.state_dict(), reconstructor, test_loader, device,
+                perf_fail_ratio=PERF_FAIL_RATIO, fixed_tau=fixed_tau, model=pruned_model
             )
             
             # 记录结果

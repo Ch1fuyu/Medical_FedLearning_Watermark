@@ -593,8 +593,8 @@ def evaluate_watermark_integrity(model_state_dict, reconstructor, model=None):
         水印完整性评估结果
     """
     try:
-        # 从模型状态字典重建自编码器
-        reconstructed_autoencoder = reconstructor.reconstruct_autoencoder_from_all_clients(model_state_dict)
+        # 从模型状态字典重建自编码器，必须传递 model 对象以确保参数顺序与密钥矩阵生成时一致
+        reconstructed_autoencoder = reconstructor.reconstruct_autoencoder_from_all_clients(model_state_dict, model=model)
 
         if reconstructed_autoencoder is None:
             return {
@@ -1022,9 +1022,10 @@ def main():
     print(f"水印检测容忍度设置: {PERF_FAIL_RATIO}")
     
     # 进行ΔPCC评估
+    # 必须传递 model 对象以确保参数顺序与密钥矩阵生成时一致
     delta_pcc_result_0 = evaluate_delta_pcc(
         original_model_state, original_model_state, reconstructor,
-        mnist_test_loader, device, perf_fail_ratio=PERF_FAIL_RATIO, fixed_tau=fixed_tau
+        mnist_test_loader, device, perf_fail_ratio=PERF_FAIL_RATIO, fixed_tau=fixed_tau, model=model
     )
     
     # 创建第0轮的结果记录
