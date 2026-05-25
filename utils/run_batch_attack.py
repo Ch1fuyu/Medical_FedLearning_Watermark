@@ -17,6 +17,10 @@ import subprocess
 import argparse
 from datetime import datetime
 
+# 获取脚本所在目录
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+
 # 实验配置列表 (根据 trace_results_*.json 对应的训练结果)
 EXPERIMENTS = [
     # chestmnist + alexnet
@@ -74,7 +78,7 @@ def get_model_path(exp_config):
     pkl = exp_config["pkl"]
     model_type = exp_config["model"]
     dataset = exp_config["dataset"]
-    return f"./save/{model_type}/{dataset}/{pkl}"
+    return os.path.join(PROJECT_ROOT, "save", model_type, dataset, pkl)
 
 
 def run_pruning_attack(model_path, model_type, client_num, autoencoder_dir):
@@ -127,8 +131,10 @@ def run_finetune_attack(model_path, model_type, client_num, dataset,
         return False, f"失败 (退出码: {e.returncode})"
 
 
-def run_all_pruning_experiments(autoencoder_dir="./save/autoencoder", start_idx=0, end_idx=None):
+def run_all_pruning_experiments(autoencoder_dir=None, start_idx=0, end_idx=None):
     """运行所有剪枝攻击实验"""
+    if autoencoder_dir is None:
+        autoencoder_dir = os.path.join(PROJECT_ROOT, 'save', 'autoencoder')
 
     if end_idx is None:
         end_idx = len(EXPERIMENTS)
@@ -171,10 +177,12 @@ def run_all_pruning_experiments(autoencoder_dir="./save/autoencoder", start_idx=
     return results
 
 
-def run_all_finetune_experiments(autoencoder_dir="./save/autoencoder",
+def run_all_finetune_experiments(autoencoder_dir=None,
                                   finetune_epochs=50, learning_rate=0.001, batch_size=128,
                                   save_mode='paper', start_idx=0, end_idx=None):
     """运行所有微调攻击实验"""
+    if autoencoder_dir is None:
+        autoencoder_dir = os.path.join(PROJECT_ROOT, 'save', 'autoencoder')
 
     if end_idx is None:
         end_idx = len(EXPERIMENTS)
@@ -245,8 +253,10 @@ def print_summary(results, attack_type):
     return results
 
 
-def save_results_to_file(results, attack_type, save_dir="./save/batch_results"):
+def save_results_to_file(results, attack_type, save_dir=None):
     """保存实验结果到文件"""
+    if save_dir is None:
+        save_dir = os.path.join(PROJECT_ROOT, 'save', 'batch_results')
     os.makedirs(save_dir, exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     filepath = os.path.join(save_dir, f"batch_{attack_type}_{timestamp}.txt")
@@ -267,8 +277,10 @@ def save_results_to_file(results, attack_type, save_dir="./save/batch_results"):
     return filepath
 
 
-def collect_paper_results(data_dir="./save/finetune_attack"):
+def collect_paper_results(data_dir=None):
     """收集所有论文数据，生成汇总CSV"""
+    if data_dir is None:
+        data_dir = os.path.join(PROJECT_ROOT, 'save', 'finetune_attack')
     import pandas as pd
     import glob
     import re
@@ -365,7 +377,8 @@ if __name__ == '__main__':
     parser.add_argument('--attack_type', type=str, required=True,
                        choices=['pruning', 'finetune', 'both', 'collect'],
                        help='pruning(剪枝)/finetune(微调)/both(两者)/collect(收集论文数据)')
-    parser.add_argument('--autoencoder_dir', type=str, default='./save/autoencoder',
+    parser.add_argument('--autoencoder_dir', type=str,
+                       default=os.path.join(PROJECT_ROOT, 'save', 'autoencoder'),
                        help='自编码器目录')
     parser.add_argument('--finetune_epochs', type=int, default=50,
                        help='微调轮数')
