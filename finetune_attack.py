@@ -796,7 +796,7 @@ def main():
     
     # 首先加载args.py中的参数配置
     from utils.args import parser_args
-    base_args = parser_args()
+    base_args = parser_args() if '--' in sys.argv else None
     
     # 解析微调攻击特定的命令行参数
     parser = argparse.ArgumentParser(description='微调攻击实验')
@@ -835,9 +835,9 @@ def main():
     args.client_num = cmd_args.client_num
     args.autoencoder_dir = cmd_args.autoencoder_dir
     args.finetune_epochs = cmd_args.finetune_epochs
-    args.learning_rate = cmd_args.learning_rate if cmd_args.learning_rate is not None else base_args.lr
-    args.batch_size = cmd_args.batch_size if cmd_args.batch_size is not None else base_args.batch_size
-    args.optimizer = cmd_args.optimizer if cmd_args.optimizer is not None else base_args.optim
+    args.learning_rate = cmd_args.learning_rate if cmd_args.learning_rate is not None else (base_args.lr if base_args else 0.001)
+    args.batch_size = cmd_args.batch_size if cmd_args.batch_size is not None else (base_args.batch_size if base_args else 128)
+    args.optimizer = cmd_args.optimizer if cmd_args.optimizer is not None else (base_args.optim if base_args else 'adam')
     args.dataset = cmd_args.dataset
     args.save_mode = cmd_args.save_mode
     
@@ -856,7 +856,7 @@ def main():
     args.key_matrix_path = get_key_matrix_path(KEY_MATRIX_BASE_DIR, inferred_model_type, cmd_args.client_num)
     
     # 从args.py获取其他必要参数
-    args.data_root = base_args.data_root
+    args.data_root = base_args.data_root if base_args else './data'
     
     # 设置设备
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
