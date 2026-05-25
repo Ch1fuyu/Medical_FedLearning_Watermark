@@ -97,7 +97,7 @@ def run_pruning_attack(model_path, model_type, client_num, autoencoder_dir):
     ]
 
     try:
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, cwd=PROJECT_ROOT)
         return True, "成功"
     except subprocess.CalledProcessError as e:
         return False, f"失败 (退出码: {e.returncode})"
@@ -125,7 +125,7 @@ def run_finetune_attack(model_path, model_type, client_num, dataset,
     ]
 
     try:
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, cwd=PROJECT_ROOT)
         return True, "成功"
     except subprocess.CalledProcessError as e:
         return False, f"失败 (退出码: {e.returncode})"
