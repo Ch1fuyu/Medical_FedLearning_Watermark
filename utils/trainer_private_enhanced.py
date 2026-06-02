@@ -381,14 +381,6 @@ class TrainerPrivateEnhanced:
             self.optimizer = torch.optim.SGD(self.model.parameters(), lr=adjusted_lr, momentum=0.9)
 
         epoch_loss, epoch_acc = [], []
-        
-        # 初始化梯度统计变量（实时计算，不累积存储）
-        total_gradients = None
-        total_encoder_gradients = None
-        total_target_mask = None
-        total_encoder_mask = None
-        total_effective_mask = None
-        batch_count = 0
 
         for epoch in range(local_ep):
             loss_meter = 0.0
@@ -402,58 +394,29 @@ class TrainerPrivateEnhanced:
                 pred = self.model(x)
                 main_loss = self.get_loss_function(pred, y)
 
-                # 计算最终损失
+                # 计算最终损失并反向传播（包含对比正则项）
                 if current_epoch == 0:
+                    # 第一轮只使用主任务损失
                     total_loss = main_loss
+                    total_loss.backward()
                 else:
-                    # 从args读取alpha参数
-                    alpha_early = None
-                    alpha_late = None
-                    if self.args and hasattr(self.args, 'multiloss_alpha_early'):
-                        alpha_early = self.args.multiloss_alpha_early
-                    if self.args and hasattr(self.args, 'multiloss_alpha_late'):
-                        alpha_late = self.args.multiloss_alpha_late
-                    total_loss = self.multi_loss.compute_loss(main_loss, current_epoch, total_epochs, 
-                                                              alpha_early, alpha_late)
-
-                total_loss.backward()
-
-                # 梯度统计收集：在训练过程中收集梯度信息（用于统计，不影响训练）
-                if (self.mask_manager and current_epoch >= 0 and batch_idx % 5 == 0):  # 每5个batch收集一次
-                    try:
-                        # 只收集卷积层参数的梯度
-                        conv_gradients = []
-                        for name, param in self.model.named_parameters():
-                            if 'conv' in name and 'weight' in name and param.grad is not None:
-                                conv_gradients.append(param.grad.view(-1))
-                        
-                        if conv_gradients:
-                            gradients = torch.cat(conv_gradients)
-                            target_mask, encoder_mask, effective_mask = self.mask_manager.get_masks(self.device)
-                            
-                            # 计算编码器区域的梯度（用于prevGH）
-                            encoder_gradients = torch.mul(gradients, effective_mask)
-                            
-                            # 累积梯度数据用于统计
-                            if total_gradients is None:
-                                total_gradients = gradients.detach()
-                                total_encoder_gradients = encoder_gradients.detach()
-
-                                total_target_mask = target_mask.detach()
-                                total_encoder_mask = encoder_mask.detach()
-                                total_effective_mask = effective_mask.detach()
-                            else:
-                                total_gradients += gradients.detach()
-                                total_encoder_gradients += encoder_gradients.detach()
-                            
-                            batch_count += 1
-                            
-                            # 清理临时变量
-                            del gradients, encoder_gradients, target_mask, encoder_mask, effective_mask
-                        
-                    except Exception as e:
-                        print(f"更新梯度统计失败: {e}")
-
+                    # 获取掩码用于对比正则项
+                    if self.mask_manager:
+                        target_mask, encoder_mask, effective_mask = self.mask_manager.get_masks(self.device)
+                    else:
+                        target_mask, encoder_mask, effective_mask = None, None, None
+                    
+                    # 使用 compute_loss_and_backward 正确应用对比正则项
+                    total_loss = self.multi_loss.compute_loss_and_backward(
+                        main_loss,
+                        target_mask,
+                        encoder_mask,
+                        effective_mask,
+                        current_epoch,
+                        total_epochs
+                    )
+                
+                # 梯度裁剪
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
 
@@ -484,54 +447,13 @@ class TrainerPrivateEnhanced:
                 from tqdm import tqdm
                 tqdm.write(f"C{client_id} E{epoch+1}/{local_ep}: L={loss_meter:.4f} A={acc_meter:.4f} LR={adjusted_lr:.6f}")
 
-        # 本地训练结束后，先更新梯度统计量，然后再进行水印嵌入（避免梯度数据被清理导致统计量为0）
-        if (self.mask_manager and current_epoch >= 0 and batch_count > 0):
-            try:
-                # 计算平均梯度数据
-                avg_gradients = total_gradients / batch_count
-                avg_encoder_gradients = total_encoder_gradients / batch_count
-                
-                # 更新梯度统计量
-                self.multi_loss.update_gradient_stats(
-                    avg_gradients,
-                    avg_encoder_gradients,
-                    total_target_mask,
-                    total_encoder_mask,
-                    total_effective_mask
-                )
-                
-            except Exception as e:
-                print(f"⚠️ C{client_id} 梯度统计更新失败: {e}")
-                raise RuntimeError(f"梯度统计更新失败: {e}")
-            finally:
-                # 确保清理梯度数据，防止内存泄漏
-                if 'total_gradients' in locals():
-                    del total_gradients
-                if 'total_encoder_gradients' in locals():
-                    del total_encoder_gradients
-                if 'total_target_mask' in locals():
-                    del total_target_mask
-                if 'total_encoder_mask' in locals():
-                    del total_encoder_mask
-                if 'total_effective_mask' in locals():
-                    del total_effective_mask
-                if 'avg_gradients' in locals():
-                    del avg_gradients
-                if 'avg_encoder_gradients' in locals():
-                    del avg_encoder_gradients
-                
-                # 强制垃圾回收
-                torch.cuda.empty_cache() if torch.cuda.is_available() else None
-
-        return self.model.state_dict(), np.mean(epoch_loss), np.mean(epoch_acc)
-
         # 差分隐私噪声
         if self.dp:
             for param in self.model.parameters():
                 param.data = param.data + torch.normal(torch.zeros(param.size()), self.sigma).to(self.device)
 
         return self.model.state_dict(), np.mean(epoch_loss), np.mean(epoch_acc)
-    
+
     def get_gradient_stats(self):
         """获取梯度统计量"""
         if hasattr(self, 'multi_loss'):
