@@ -1,10 +1,11 @@
 """
 正则项消融实验脚本
-用于测试 reg_term3 对联邦水印训练的影响
+用于测试新正则项（漂移 + 裕量）对联邦水印训练的影响
 
 使用方法：
-python reg_ablation_experiment.py --dataset chestmnist --model_name alexnet  # 默认只使用reg3
-python reg_ablation_experiment.py --dataset chestmnist --model_name alexnet --use_reg3=False  # 禁用reg3
+python reg_ablation_experiment.py --dataset chestmnist --model_name alexnet  # 默认启用漂移+裕量
+python reg_ablation_experiment.py --dataset chestmnist --model_name alexnet --use_drift_reg=False  # 禁用漂移项
+python reg_ablation_experiment.py --dataset chestmnist --model_name alexnet --use_margin_reg=False  # 禁用裕量项
 """
 import copy
 import os
@@ -48,7 +49,11 @@ logging.basicConfig(
 
 class RegAblationExperiment(Experiment):
     """
-    正则项消融实验：可以选择性启用/禁用三个正则项
+    正则项消融实验：支持四种模式
+    - drift + margin
+    - drift only
+    - margin only
+    - none
     保持水印嵌入逻辑不变（使用KeyMatrixManager进行参数替换）
     同时包含模型泄漏追踪功能
     """
@@ -62,18 +67,22 @@ class RegAblationExperiment(Experiment):
         self.key_matrix_dir = getattr(args, 'key_matrix_dir', './save/key_matrix')
         
         # 获取正则项配置
-        self.use_reg3 = getattr(args, 'use_reg3', True)
-        
-        # 构建正则项配置字符串
+        self.use_drift_reg = getattr(args, 'use_drift_reg', True)
+        self.use_margin_reg = getattr(args, 'use_margin_reg', True)
+
+        # 构建正则项配置字符串（用于文件名与日志）
         reg_config = []
-        if self.use_reg3:
-            reg_config.append('reg3')
+        if self.use_drift_reg:
+            reg_config.append('drift')
+        if self.use_margin_reg:
+            reg_config.append('margin')
         self.reg_config_str = '+'.join(reg_config) if reg_config else 'none'
         
         logging.info('='*60)
         logging.info('正则项消融实验')
         logging.info(f'正则项配置: {self.reg_config_str}')
-        logging.info(f'  reg3 (自适应权重): {"启用" if self.use_reg3 else "禁用"}')
+        logging.info(f'  drift (漂移惩罚): {"启用" if self.use_drift_reg else "禁用"}')
+        logging.info(f'  margin (裕量惩罚): {"启用" if self.use_margin_reg else "禁用"}')
         logging.info('水印嵌入逻辑保持不变（使用KeyMatrixManager进行参数替换）')
         logging.info('='*60)
         logging.info('--------------------------------Start--------------------------------------')
@@ -1208,7 +1217,8 @@ def main(args):
                 'epochs': args.epochs,
                 'client_num': args.client_num,
                 'console_log': os.path.basename(log_file_name),
-                'use_reg3': getattr(args, 'use_reg3', True),
+                'use_drift_reg': getattr(args, 'use_drift_reg', True),
+                'use_margin_reg': getattr(args, 'use_margin_reg', True),
             }
             }
     fl = RegAblationExperiment(args)
@@ -1230,8 +1240,10 @@ def main(args):
     
     # 构建正则项配置字符串用于文件名
     reg_config = []
-    if getattr(args, 'use_reg3', True):
-        reg_config.append('r3')
+    if getattr(args, 'use_drift_reg', True):
+        reg_config.append('drift')
+    if getattr(args, 'use_margin_reg', True):
+        reg_config.append('margin')
     reg_suffix = '_'.join(reg_config) if reg_config else 'none'
 
     # 根据选择指标命名文件

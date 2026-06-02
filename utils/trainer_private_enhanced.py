@@ -168,13 +168,7 @@ class TrainerPrivateEnhanced:
         self._key_manager = None
         
         # MultiLoss和掩码管理器
-        init_a = 0.6523
-        init_b = 0.0000800375825259
-        if args and hasattr(args, 'multiloss_init_a'):
-            init_a = args.multiloss_init_a
-        if args and hasattr(args, 'multiloss_init_b'):
-            init_b = args.multiloss_init_b
-        self.multi_loss = MultiLoss(init_a=init_a, init_b=init_b, model=self.model)
+        self.multi_loss = MultiLoss(model=self.model)
         self.mask_manager = None
         self.autoencoder = None
 

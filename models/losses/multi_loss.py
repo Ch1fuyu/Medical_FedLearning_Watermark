@@ -367,11 +367,11 @@ class MultiLoss:
         if self.device is None:
             self.set_device(device)
         
-        # 只使用 reg_term3 (自适应权重正则项)
-        reg_term3 = self._compute_adaptive_weight_term(main_loss) if self._is_initialized else torch.tensor(0.0, device=device)
-        
+        # 仅保留新的水印稳定性正则项
+        reg_term = self.compute_contrastive_reg(main_loss) if self._is_initialized else torch.tensor(0.0, device=device)
+
         # 总损失
-        total_loss = main_loss + reg_term3
+        total_loss = main_loss + reg_term
         
         return total_loss
     
@@ -408,10 +408,41 @@ class MultiLoss:
             return main_loss
 
         gradients = torch.cat(conv_gradients)
-        encoder_gradients = torch.mul(gradients, effective_mask)
-        self.update_gradient_stats(gradients, encoder_gradients, target_mask, encoder_mask, effective_mask)
+        effective_mask = effective_mask.float().to(gradients.device)
+        if effective_mask.numel() != gradients.numel():
+            return main_loss
 
-        contrastive_reg = self.compute_contrastive_reg(gradients, effective_mask)
+        # 先把掩码对齐到梯度向量，再计算统计量
+        if target_mask is not None:
+            target_mask = target_mask.float().to(gradients.device)
+            if target_mask.numel() != gradients.numel():
+                target_mask = None
+        if encoder_mask is not None:
+            encoder_mask = encoder_mask.float().to(gradients.device)
+            if encoder_mask.numel() != gradients.numel():
+                encoder_mask = None
+
+        watermark_mask = effective_mask.clamp(0.0, 1.0)
+        non_watermark_mask = 1.0 - watermark_mask
+
+        watermark_grads = torch.abs(gradients) * watermark_mask
+        non_watermark_grads = torch.abs(gradients) * non_watermark_mask
+
+        watermark_count = watermark_mask.sum().clamp_min(1.0)
+        non_watermark_count = non_watermark_mask.sum().clamp_min(1.0)
+
+        mean_watermark_grad = watermark_grads.sum() / watermark_count
+        mean_non_watermark_grad = non_watermark_grads.sum() / non_watermark_count
+
+        self.update_gradient_stats(gradients, watermark_grads, target_mask, encoder_mask, effective_mask)
+
+        base_reg = self.compute_contrastive_reg(gradients, effective_mask)
+
+        # 用均值差拉开水印/非水印区域梯度，避免正则过小而打印为 0
+        ratio_term = F.relu(mean_watermark_grad - self.margin_ratio * mean_non_watermark_grad.detach())
+        ratio_term = ratio_term.pow(2)
+
+        contrastive_reg = base_reg + ratio_term
         if contrastive_reg.requires_grad:
             contrastive_reg.backward(retain_graph=True)
 
@@ -420,21 +451,14 @@ class MultiLoss:
         if current_epoch not in self._epoch_printed:
             self._epoch_printed.add(current_epoch)
             ratio = (contrastive_reg.item() / main_loss.item() * 100) if main_loss.item() > 0 else 0
-            print(f"[MultiLoss] E{current_epoch} | loss:{main_loss.item():.4f} | reg_ratio:{ratio:.1f}% | contrastive_reg:{contrastive_reg.item():.6f}")
+            print(
+                f"[MultiLoss] E{current_epoch} | loss:{main_loss.item():.4f} | "
+                f"reg_ratio:{ratio:.3f}% | contrastive_reg:{contrastive_reg.item():.8f} | "
+                f"wm_grad:{mean_watermark_grad.item():.3e} | non_wm_grad:{mean_non_watermark_grad.item():.3e}"
+            )
 
         return main_loss + contrastive_reg
     
-    def _compute_adaptive_weight_term(self, main_loss):
-        """计算自适应权重正则项（可微分版本）"""
-        if not self._is_initialized or self._ema_gm == 0:
-            return torch.tensor(0.0, device=self.device or 'cpu')
-
-        # 防止main_loss过大导致计算不稳定
-        main_loss_clamped = torch.clamp(main_loss, max=self.init_a - 1e-6)
-        beta2 = self._ema_gm * torch.abs(1 / (self.init_a - main_loss_clamped)) / self.init_b
-        reg_term3 = torch.exp(-1 * beta2) * beta2
-        return reg_term3
-
     def compute_contrastive_reg(self, gradients, effective_mask):
         """
         计算联合正则项：水印区域的漂移惩罚 + 裕量惩罚。

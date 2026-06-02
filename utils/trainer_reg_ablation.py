@@ -1,7 +1,8 @@
 """
 正则项消融实验训练器
-支持选择性启用 reg_term3:
-- reg_term3: 自适应权重正则项
+支持选择性启用新的水印稳定性正则项:
+- 漂移惩罚
+- 裕量惩罚
 """
 import os
 
@@ -17,19 +18,21 @@ from utils.trainer_private_enhanced import TrainerPrivateEnhanced, TesterPrivate
 
 
 class TrainerRegAblation(TrainerPrivateEnhanced):
-    """正则项消融实验训练器，仅使用 reg3 (自适应权重正则项)"""
+    """正则项消融实验训练器，仅使用新的水印稳定性正则项"""
     
     def __init__(self, model, device, dp, sigma, args=None):
         super().__init__(model, device, dp, sigma, args)
         
-        # 只使用 reg3
-        self.use_reg3 = getattr(args, 'use_reg3', True) if args else True
+        # 仅使用新的水印稳定性正则项
+        self.use_drift_reg = getattr(args, 'use_drift_reg', True) if args else True
+        self.use_margin_reg = getattr(args, 'use_margin_reg', True) if args else True
         
-        print(f"正则项配置: 仅使用 reg3 (自适应权重正则项)")
-        print(f"  reg3 (自适应权重): {'启用' if self.use_reg3 else '禁用'}")
+        print(f"正则项配置: 仅使用新的水印稳定性正则项")
+        print(f"  drift (漂移惩罚): {'启用' if self.use_drift_reg else '禁用'}")
+        print(f"  margin (裕量惩罚): {'启用' if self.use_margin_reg else '禁用'}")
 
     def local_update(self, dataloader, local_ep, lr, client_id, current_epoch=0, total_epochs=100):
-        """本地更新，仅使用 reg3 正则项"""
+        """本地更新，仅使用新的水印稳定性正则项"""
         self.model.to(self.device)
         self.model.train()
         

@@ -375,7 +375,7 @@ class FederatedLearningSimple(Experiment):
                        'train_acc_sample', 'val_acc_sample', 'autoencoder_performance',
                        'prevGM', 'prevGH', 'prevRatio',
                        'current_grad_M', 'current_grad_H', 'current_var_M', 'current_var_H',
-                       'main_loss', 'reg1_value', 'reg2_value', 'reg3_value']
+                       'main_loss', 'drift_value', 'margin_value', 'reg_total_value']
             df = pd.DataFrame(stats_rows, columns=columns)
             now = datetime.now().strftime('%Y%m%d%H%M%S')
             excel_path = f'{self.args.save_excel_dir}/metrics_simple_{self.model_name}_{self.dataset}_{now}.xlsx'
