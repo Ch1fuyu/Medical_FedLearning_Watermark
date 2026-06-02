@@ -523,13 +523,7 @@ class TrainerPrivateEnhanced:
                 # 强制垃圾回收
                 torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-        # 每5个epoch进行水印融合（放在梯度统计更新之后）
-        if (current_epoch + 1) % 5 == 0:
-            self._embed_watermark(client_id, current_epoch)
-
-        # 定期清理内存
-        if current_epoch > 0 and current_epoch % 10 == 0:
-            self._cleanup_memory()
+        return self.model.state_dict(), np.mean(epoch_loss), np.mean(epoch_acc)
 
         # 差分隐私噪声
         if self.dp:
