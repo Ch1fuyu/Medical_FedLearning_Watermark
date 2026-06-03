@@ -4,388 +4,137 @@ import torch.nn.functional as F
 
 
 class FocalLoss(nn.Module):
-    """
-    Focal Loss for addressing class imbalance in multi-label classification
-    Paper: Focal Loss for Dense Object Detection (https://arxiv.org/abs/1708.02002)
-    """
-    
+    """Focal Loss for addressing class imbalance in multi-label classification"""
+
     def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
-        """
-        Initialize Focal Loss
-        
-        Args:
-            alpha: Weighting factor for rare class (float or list/array)
-                   If None, no class weighting
-            gamma: Focusing parameter (default: 2.0, typical range: 0-5)
-                   Higher gamma gives more attention to hard examples
-            reduction: Specifies the reduction to apply to the output
-                      'none' | 'mean' | 'sum'
-        """
         super(FocalLoss, self).__init__()
         self.alpha = alpha
-        # 降低gamma以减轻FocalLoss对困难样本的过度关注
-        self.gamma = 1.0  # 降低到1.0，更接近BCE
+        self.gamma = 1.0
         self.reduction = reduction
-        
+
     def forward(self, inputs, targets):
-        """
-        Forward pass
-        
-        Args:
-            inputs: Model predictions (logits) of shape (N, C) or (N, C, H, W)
-            targets: Ground truth labels of shape (N, C) for multi-label or (N,) for single-label
-        
-        Returns:
-            Focal loss value
-        """
-        # Apply sigmoid to get probabilities for binary/multi-label classification
         probs = torch.sigmoid(inputs)
-        
-        # Compute BCE loss
-        bce_loss = F.binary_cross_entropy_with_logits(inputs, targets.float(), 
-                                                       reduction='none', 
-                                                       weight=self.alpha)
-        
-        # Compute pt (probability of true class)
+        bce_loss = F.binary_cross_entropy_with_logits(
+            inputs, targets.float(), reduction='none', weight=self.alpha
+        )
         pt = torch.where(targets == 1, probs, 1 - probs)
-        
-        # Compute focal weight: (1 - pt)^gamma
         focal_weight = (1 - pt) ** self.gamma
-        
-        # Compute focal loss
         focal_loss = focal_weight * bce_loss
-        
+
         if self.reduction == 'mean':
             return focal_loss.mean()
-        elif self.reduction == 'sum':
+        if self.reduction == 'sum':
             return focal_loss.sum()
-        else:
-            return focal_loss
+        return focal_loss
 
 
 class MultiLoss:
-    """
-    多重损失函数，用于联邦水印的鲁棒性训练
-    包含主任务损失和三个正则化项
-    """
-    
-    def __init__(self, init_a=0.6523, init_b=0.0000800375825259, model=None):
-        """
-        初始化MultiLoss
-        
-        Args:
-            init_a: 超参数，调节损失函数敏感性
-            init_b: 超参数，调节损失函数敏感性
-        """
-        self.init_a = init_a
-        self.init_b = init_b
-        self.device = None
+    """Minimal wrapper for watermark-gradient diagnostics and param-drift tracking."""
+
+    def __init__(self, model=None):
         self.model = model
-        
-        # 统计量初始化为可学习的 nn.Parameter（重新设计方案）
-        # 这些参数需要被加入模型的优化器才能生效
-        self._learnable_ratio = nn.Parameter(torch.tensor([1.0, 1.0]))  # [target_ratio, var_ratio]
-        
-        # 保留旧的 EMA 统计量用于显示
+        self.device = None
+
         self._ema_gm = 0.0
         self._ema_gh = 0.0
         self._ema_ratio = 0.0
-        
-        # 当前batch的统计量
+        self.smoothing = 0.9
+        self._is_initialized = False
+
         self.current_grad_M = 0.0
         self.current_grad_H = 0.0
         self.current_var_M = 0.0
         self.current_var_H = 0.0
-        
-        # 调试打印标志
-        self._debug_printed = False
-        
-        # 指数移动平均的平滑系数
-        self.smoothing = 0.9
-        
-        # 标记是否已初始化（用于判断是否使用正则项）
-        self._is_initialized = False
-        
-        # 目标值（可调整）
-        self.target_gm_gh_ratio = 3.0  # GM/GH 目标值
-        self.target_var_ratio = 1.5     # 方差比例目标值
-        
-        # 对比正则项参数（简化为：漂移 + 裕量）
-        self.drift_lambda = 1.0
-        self.margin_lambda = 1.0
-        self.margin_ratio = 0.001
-    
+
+        self.current_wm_grad = 0.0
+        self.current_non_wm_grad = 0.0
+        self.current_wm_ratio = 1.0
+
+        self._param_snapshot = None
+        self._total_param_drift = 0.0
+        self._wm_param_drift = 0.0
+
     @property
     def prevGM(self):
         return self._ema_gm
-    
+
     @property
     def prevGH(self):
         return self._ema_gh
-    
+
     @property
     def prevRatio(self):
         return self._ema_ratio
-    
+
     def set_device(self, device):
-        """设置设备"""
         self.device = device
-        # 注意：_learnable_ratio 不再使用，不再移动到设备
-        
-    def get_alpha(self, current_epoch, total_epochs, alpha_early=None, alpha_late=None):
-        """
-        根据训练阶段返回alpha值
-        
-        Args:
-            current_epoch: 当前epoch
-            total_epochs: 总epoch数
-            alpha_early: 早期训练的alpha值（已从0.000005提升到0.00005）
-            alpha_late: 晚期训练的alpha值（已从0.00001提升到0.0001）
-            
-        Returns:
-            alpha值
-        """
-        # 默认值已提升，增强水印鲁棒性
-        if alpha_early is None:
-            alpha_early = 0.00005  # 从0.000005提升10倍
-        if alpha_late is None:
-            alpha_late = 0.0001  # 从0.00001提升10倍
-            
-        if current_epoch <= 0.3 * total_epochs:
-            return alpha_early
-        else:
-            return alpha_late
-    
-    def update_gradient_stats(self, target_gradients, encoder_gradients, 
-                            target_mask, encoder_mask, effective_mask):
-        """
-        更新梯度统计量（可微分版本 - 方案A核心）
-        
-        这个方法在 backward 过程中调用，使用指数移动平均更新统计量，
-        使得 prevGM、prevGH、prevRatio 成为计算图的一部分
-        
-        Args:
-            target_gradients: 目标模型梯度（卷积层）
-            encoder_gradients: 编码器梯度
-            target_mask: 目标模型梯度掩码
-            encoder_mask: 编码器区域掩码
-            effective_mask: 编码器有效梯度掩码 (encoder_mask × target_mask)
-        
-        Returns:
-            current_gm, current_gh, current_ratio: 当前batch的统计量
-        """
-        # 确保在正确的设备上
+
+    def update_gradient_stats(self, target_gradients, encoder_gradients,
+                              target_mask, encoder_mask, effective_mask):
         if self.device is None:
             self.device = target_gradients.device
-        
-        # 计算当前batch的梯度统计量（非零过滤）
+
         nonzero_threshold = 0.00001
-        
-        # 目标模型梯度过滤
+
         target_nonzero_mask = torch.where(
-            torch.abs(target_gradients) <= nonzero_threshold, 
-            torch.zeros_like(target_gradients), 
-            torch.ones_like(target_gradients)
+            torch.abs(target_gradients) <= nonzero_threshold,
+            torch.zeros_like(target_gradients),
+            torch.ones_like(target_gradients),
         )
         target_grad_filtered = torch.abs(target_gradients) * target_nonzero_mask
         target_nonzero_count = torch.sum(target_nonzero_mask)
-        
-        # 编码器梯度过滤
+
         encoder_nonzero_mask = torch.where(
-            torch.abs(encoder_gradients) <= nonzero_threshold, 
-            torch.zeros_like(encoder_gradients), 
-            torch.ones_like(encoder_gradients)
+            torch.abs(encoder_gradients) <= nonzero_threshold,
+            torch.zeros_like(encoder_gradients),
+            torch.ones_like(encoder_gradients),
         )
         encoder_grad_filtered = torch.abs(encoder_gradients) * encoder_nonzero_mask
         encoder_nonzero_count = torch.sum(encoder_nonzero_mask)
-        
-        # 计算平均梯度量级
-        if target_nonzero_count > 0:
-            current_gm = torch.sum(target_grad_filtered) / target_nonzero_count
-        else:
-            current_gm = torch.tensor(0.0, device=self.device)
-            
-        if encoder_nonzero_count > 0:
-            current_gh = torch.sum(encoder_grad_filtered) / encoder_nonzero_count
-        else:
-            current_gh = torch.tensor(0.0, device=self.device)
-        
-        # 存储当前batch统计量（用于后续调试）
+
+        current_gm = (
+            torch.sum(target_grad_filtered) / target_nonzero_count
+            if target_nonzero_count > 0
+            else torch.tensor(0.0, device=self.device)
+        )
+        current_gh = (
+            torch.sum(encoder_grad_filtered) / encoder_nonzero_count
+            if encoder_nonzero_count > 0
+            else torch.tensor(0.0, device=self.device)
+        )
+
         self.current_grad_M = current_gm.detach().item()
         self.current_grad_H = current_gh.detach().item()
-        
-        # 计算方差
-        if target_nonzero_count > 0:
-            target_mean = torch.sum(target_grad_filtered) / target_nonzero_count
-            target_var = torch.sum(torch.pow(target_grad_filtered - target_mean, 2)) / target_nonzero_count
-            self.current_var_M = target_var.detach().item()
-        else:
-            self.current_var_M = 0.0
-            target_var = torch.tensor(0.0, device=self.device)
-            
-        if encoder_nonzero_count > 0:
-            encoder_mean = torch.sum(encoder_grad_filtered) / encoder_nonzero_count
-            encoder_var = torch.sum(torch.pow(encoder_grad_filtered - encoder_mean, 2)) / encoder_nonzero_count
-            self.current_var_H = encoder_var.detach().item()
-        else:
-            self.current_var_H = 0.0
-            encoder_var = torch.tensor(0.0, device=self.device)
-        
-        # 计算方差比例
-        if encoder_var > 0:
-            current_ratio = target_var / encoder_var
-        else:
-            current_ratio = torch.tensor(1.0, device=self.device)
-        
-        # EMA 更新用于显示的统计量（不参与优化）
+
+        target_mean = torch.sum(target_grad_filtered) / target_nonzero_count if target_nonzero_count > 0 else None
+        encoder_mean = torch.sum(encoder_grad_filtered) / encoder_nonzero_count if encoder_nonzero_count > 0 else None
+
+        self.current_var_M = (
+            torch.sum(torch.pow(target_grad_filtered - target_mean, 2)) / target_nonzero_count
+        ).detach().item() if target_mean is not None else 0.0
+        self.current_var_H = (
+            torch.sum(torch.pow(encoder_grad_filtered - encoder_mean, 2)) / encoder_nonzero_count
+        ).detach().item() if encoder_mean is not None else 0.0
+
+        current_ratio = (
+            (torch.sum(target_grad_filtered) / target_nonzero_count)
+            / (torch.sum(encoder_grad_filtered) / encoder_nonzero_count)
+            if target_nonzero_count > 0 and encoder_nonzero_count > 0
+            else torch.tensor(1.0, device=self.device)
+        )
+
         self._ema_gm = self.smoothing * self._ema_gm + (1 - self.smoothing) * current_gm.detach().item()
         self._ema_gh = self.smoothing * self._ema_gh + (1 - self.smoothing) * current_gh.detach().item()
         self._ema_ratio = self.smoothing * self._ema_ratio + (1 - self.smoothing) * current_ratio.detach().item()
-        
-        # 标记已初始化
-        self._is_initialized = True
-        
-        return current_gm.detach(), current_gh.detach(), current_ratio.detach()
-    
-    def update_gradient_stats_simple(self, target_gradients, encoder_gradients, 
-                                     target_mask, encoder_mask, effective_mask):
-        """
-        简化版本的梯度统计更新（非可微分，用于离线统计）
-        
-        这个方法用于在训练循环外部更新统计量，不需要梯度追踪
-        """
-        nonzero_threshold = 0.00001
-        
-        target_nonzero_mask = torch.where(
-            torch.abs(target_gradients) <= nonzero_threshold, 
-            torch.zeros_like(target_gradients), 
-            torch.ones_like(target_gradients)
-        )
-        target_grad_filtered = torch.abs(target_gradients) * target_nonzero_mask
-        target_nonzero_count = torch.sum(target_nonzero_mask).item()
-        
-        encoder_nonzero_mask = torch.where(
-            torch.abs(encoder_gradients) <= nonzero_threshold, 
-            torch.zeros_like(encoder_gradients), 
-            torch.ones_like(encoder_gradients)
-        )
-        encoder_grad_filtered = torch.abs(encoder_gradients) * encoder_nonzero_mask
-        encoder_nonzero_count = torch.sum(encoder_nonzero_mask).item()
-        
-        if target_nonzero_count > 0:
-            self.current_grad_M = torch.sum(target_grad_filtered).item() / target_nonzero_count
-        else:
-            self.current_grad_M = 0.0
-            
-        if encoder_nonzero_count > 0:
-            self.current_grad_H = torch.sum(encoder_grad_filtered).item() / encoder_nonzero_count
-        else:
-            self.current_grad_H = 0.0
-        
-        # 计算方差
-        if target_nonzero_count > 0:
-            target_mean = torch.sum(target_grad_filtered) / target_nonzero_count
-            target_var = torch.sum(torch.pow(target_grad_filtered - target_mean, 2)) / target_nonzero_count
-            self.current_var_M = target_var.item()
-        else:
-            self.current_var_M = 0.0
-            
-        if encoder_nonzero_count > 0:
-            encoder_mean = torch.sum(encoder_grad_filtered) / encoder_nonzero_count
-            encoder_var = torch.sum(torch.pow(encoder_grad_filtered - encoder_mean, 2)) / encoder_nonzero_count
-            self.current_var_H = encoder_var.item()
-        else:
-            self.current_var_H = 0.0
-        
-        if self.current_var_H > 0:
-            self._ema_ratio = self.current_var_M / self.current_var_H
-        else:
-            self._ema_ratio = 1.0
-        
-        self._is_initialized = True
-    
-    def update_gradient_stats_batch(self, gradient_batch_list):
-        """
-        批量更新梯度统计量（用于每轮联邦训练结束后）
-        
-        Args:
-            gradient_batch_list: 包含多个batch梯度数据的列表
-        """
-        if not gradient_batch_list:
-            return
-            
-        # 合并所有batch的梯度数据
-        all_gradients = []
-        all_encoder_gradients = []
-        all_target_masks = []
-        all_encoder_masks = []
-        all_effective_masks = []
-        
-        for batch_data in gradient_batch_list:
-            all_gradients.append(batch_data['gradients'])
-            all_encoder_gradients.append(batch_data['encoder_gradients'])
-            all_target_masks.append(batch_data['target_mask'])
-            all_encoder_masks.append(batch_data['encoder_mask'])
-            all_effective_masks.append(batch_data['effective_mask'])
-        
-        # 合并所有梯度
-        combined_gradients = torch.cat(all_gradients, dim=0)
-        combined_encoder_gradients = torch.cat(all_encoder_gradients, dim=0)
-        combined_target_mask = torch.cat(all_target_masks, dim=0)
-        combined_encoder_mask = torch.cat(all_encoder_masks, dim=0)
-        combined_effective_mask = torch.cat(all_effective_masks, dim=0)
-        
-        # 使用合并后的梯度更新统计量
-        self.update_gradient_stats(
-            combined_gradients, combined_encoder_gradients, 
-            combined_target_mask, combined_encoder_mask, combined_effective_mask
-        )
-    
-    def compute_loss(self, main_loss, current_epoch, total_epochs, alpha_early=None, alpha_late=None):
-        """
-        计算多重损失（方案A：在 backward 后更新统计量，使正则项可微分）
-        
-        Args:
-            main_loss: 主任务损失
-            current_epoch: 当前epoch
-            total_epochs: 总epoch数
-            alpha_early: 早期训练的alpha值（从args传入）
-            alpha_late: 晚期训练的alpha值（从args传入）
-            
-        Returns:
-            总损失值
-        """
-        # 第一轮只使用主任务损失
-        if current_epoch == 0:
-            return main_loss
-            
-        # 获取alpha值
-        alpha = self.get_alpha(current_epoch, total_epochs, alpha_early, alpha_late)
-        
-        # 确保设备一致
-        device = main_loss.device
-        if self.device is None:
-            self.set_device(device)
-        
-        # 仅保留新的水印稳定性正则项
-        reg_term = self.compute_contrastive_reg(main_loss) if self._is_initialized else torch.tensor(0.0, device=device)
 
-        # 总损失
-        total_loss = main_loss + reg_term
-        
-        return total_loss
-    
+        self._is_initialized = True
+
+        return current_gm.detach(), current_gh.detach(), current_ratio.detach()
+
     def compute_loss_and_backward(self, main_loss, target_mask, encoder_mask, effective_mask,
                                   current_epoch, total_epochs,
                                   alpha_early=None, alpha_late=None):
-        """
-        计算损失并进行反向传播。
-
-        逻辑：
-        1. 先对 main_loss 反传，得到当前 batch 的梯度
-        2. 基于梯度计算对比正则项：约束水印区域梯度小于非水印区域梯度
-        3. 对比正则项继续反传，影响模型参数
-        """
+        """Compute loss and perform backward pass with contrastive regularization."""
         device = main_loss.device
         if self.device is None:
             self.set_device(device)
@@ -400,27 +149,32 @@ class MultiLoss:
             return main_loss
 
         conv_gradients = []
+        conv_params = []
         for name, param in self.model.named_parameters():
             if 'conv' in name and 'weight' in name and param.grad is not None:
                 conv_gradients.append(param.grad.view(-1))
+                conv_params.append(param)
 
         if not conv_gradients:
             return main_loss
 
         gradients = torch.cat(conv_gradients)
         effective_mask = effective_mask.float().to(gradients.device)
-        if effective_mask.numel() != gradients.numel():
-            return main_loss
 
-        # 先把掩码对齐到梯度向量，再计算统计量
-        if target_mask is not None:
-            target_mask = target_mask.float().to(gradients.device)
-            if target_mask.numel() != gradients.numel():
-                target_mask = None
-        if encoder_mask is not None:
-            encoder_mask = encoder_mask.float().to(gradients.device)
-            if encoder_mask.numel() != gradients.numel():
-                encoder_mask = None
+        if not hasattr(self, '_debug_mask_shown'):
+            self._debug_mask_shown = True
+            print(
+                f"[MultiLoss DEBUG] gradients: {gradients.shape}, effective_mask: {effective_mask.shape}\n"
+                f"[MultiLoss DEBUG] effective_mask sum: {effective_mask.sum().item():.0f}, "
+                f"ratio: {effective_mask.mean().item():.4%}"
+            )
+
+        if effective_mask.numel() != gradients.numel():
+            print(
+                f"[MultiLoss ERROR] Mask size mismatch! gradients: {gradients.numel()}, "
+                f"mask: {effective_mask.numel()}"
+            )
+            return main_loss
 
         watermark_mask = effective_mask.clamp(0.0, 1.0)
         non_watermark_mask = 1.0 - watermark_mask
@@ -434,80 +188,106 @@ class MultiLoss:
         mean_watermark_grad = watermark_grads.sum() / watermark_count
         mean_non_watermark_grad = non_watermark_grads.sum() / non_watermark_count
 
+        wm_ratio = mean_watermark_grad / (mean_non_watermark_grad + 1e-8)
+
+        self.current_wm_grad = mean_watermark_grad.detach().item()
+        self.current_non_wm_grad = mean_non_watermark_grad.detach().item()
+        self.current_wm_ratio = wm_ratio.detach().item()
+
         self.update_gradient_stats(gradients, watermark_grads, target_mask, encoder_mask, effective_mask)
 
-        base_reg = self.compute_contrastive_reg(gradients, effective_mask)
+        target_ratio = 0.3
+        if wm_ratio > target_ratio:
+            target_wm_grad = mean_non_watermark_grad.detach() * target_ratio
+            current_wm_grad_val = mean_watermark_grad.detach()
 
-        # 用均值差拉开水印/非水印区域梯度，避免正则过小而打印为 0
-        ratio_term = F.relu(mean_watermark_grad - self.margin_ratio * mean_non_watermark_grad.detach())
-        ratio_term = ratio_term.pow(2)
+            if current_wm_grad_val > 1e-10:
+                scale_factor = (target_wm_grad / current_wm_grad_val).clamp(0.1, 1.0)
 
-        contrastive_reg = base_reg + ratio_term
-        if contrastive_reg.requires_grad:
-            contrastive_reg.backward(retain_graph=True)
+                wm_sign = torch.sign(gradients * watermark_mask).clamp_min(0.0)
+                wm_negative_sign = torch.sign(gradients * watermark_mask).clamp_max(0.0)
+
+                scaled_wm_grad = torch.abs(gradients * watermark_mask) * scale_factor
+
+                corrected_gradients = (
+                    gradients * non_watermark_mask
+                    + wm_sign * scaled_wm_grad
+                    - wm_negative_sign * scaled_wm_grad
+                )
+
+                start_idx = 0
+                for param in conv_params:
+                    numel = param.numel()
+                    param.grad.view(-1).copy_(corrected_gradients[start_idx:start_idx + numel])
+                    start_idx += numel
 
         if not hasattr(self, '_epoch_printed'):
             self._epoch_printed = set()
         if current_epoch not in self._epoch_printed:
             self._epoch_printed.add(current_epoch)
-            ratio = (contrastive_reg.item() / main_loss.item() * 100) if main_loss.item() > 0 else 0
+            ratio = (mean_watermark_grad.pow(2).item() / main_loss.item() * 100) if main_loss.item() > 0 else 0
             print(
                 f"[MultiLoss] E{current_epoch} | loss:{main_loss.item():.4f} | "
-                f"reg_ratio:{ratio:.3f}% | contrastive_reg:{contrastive_reg.item():.8f} | "
-                f"wm_grad:{mean_watermark_grad.item():.3e} | non_wm_grad:{mean_non_watermark_grad.item():.3e}"
+                f"reg_ratio:{ratio:.1f}% | wm/non_wm ratio:{self.current_wm_ratio:.3f} | "
+                f"wm_grad:{self.current_wm_grad:.3e} | non_wm_grad:{self.current_non_wm_grad:.3e}"
             )
 
-        return main_loss + contrastive_reg
-    
-    def compute_contrastive_reg(self, gradients, effective_mask):
-        """
-        计算联合正则项：水印区域的漂移惩罚 + 裕量惩罚。
+        return main_loss
 
-        正则形式：
-        R = lambda_drift * mean(|g_w|)^2 + lambda_margin * max(0, mean(|g_w|) - delta)^2
+    def update_param_snapshot(self, model):
+        if model is None:
+            return
 
-        其中：
-        - g_w 是水印区域梯度
-        - delta 是允许的漂移阈值，按非水印区域梯度的比例自适应设置
+        snapshot = {}
+        total_sq = 0.0
+        wm_sq = 0.0
 
-        Args:
-            gradients: 模型参数的梯度（拼接的一维向量）
-            effective_mask: 水印区域掩码（1表示水印区域）
+        for name, param in model.named_parameters():
+            if param is None:
+                continue
+            tensor = param.detach().cpu().clone()
+            snapshot[name] = tensor
+            total_sq += tensor.float().pow(2).sum().item()
+            if 'weight' in name:
+                wm_sq += tensor.float().pow(2).sum().item()
 
-        Returns:
-            reg_term: 联合正则项（标量，可微分）
-        """
-        if gradients is None or effective_mask is None:
-            return torch.tensor(0.0, device=self.device or 'cpu')
+        self._param_snapshot = snapshot
+        self._total_param_drift = total_sq ** 0.5
+        self._wm_param_drift = wm_sq ** 0.5
 
-        eps = 1e-8
-        watermark_mask = effective_mask.float()
-        non_watermark_mask = 1.0 - watermark_mask
+    def get_param_drift_stats(self, model):
+        if self._param_snapshot is None or model is None:
+            return {
+                'total_param_drift': 0.0,
+                'wm_param_drift': 0.0,
+                'drift_ratio': 0.0,
+            }
 
-        watermark_grads = torch.abs(gradients) * watermark_mask
-        watermark_count = torch.sum(watermark_mask) + eps
-        mean_watermark_grad = torch.sum(watermark_grads) / watermark_count
+        total_sq = 0.0
+        wm_sq = 0.0
 
-        non_watermark_grads = torch.abs(gradients) * non_watermark_mask
-        non_watermark_count = torch.sum(non_watermark_mask) + eps
-        mean_non_watermark_grad = torch.sum(non_watermark_grads) / non_watermark_count
+        for name, param in model.named_parameters():
+            if name not in self._param_snapshot:
+                continue
+            diff = (param.detach().cpu() - self._param_snapshot[name]).float()
+            diff_sq = diff.pow(2).sum().item()
+            total_sq += diff_sq
+            if 'weight' in name:
+                wm_sq += diff_sq
 
-        drift_penalty = mean_watermark_grad.pow(2)
-        delta = self.margin_ratio * mean_non_watermark_grad.detach() + eps
-        margin_penalty = torch.clamp(mean_watermark_grad - delta, min=0.0).pow(2)
+        total_drift = total_sq ** 0.5
+        wm_drift = wm_sq ** 0.5
+        drift_ratio = wm_drift / (total_drift + 1e-12)
 
-        reg_term = self.drift_lambda * drift_penalty + self.margin_lambda * margin_penalty
-        return reg_term
-    
-    def reset_batch_stats(self):
-        """重置当前batch的统计量"""
-        self.current_grad_M = 0.0
-        self.current_grad_H = 0.0
-        self.current_var_M = 0.0
-        self.current_var_H = 0.0
-    
+        self._total_param_drift = total_drift
+        self._wm_param_drift = wm_drift
+        return {
+            'total_param_drift': total_drift,
+            'wm_param_drift': wm_drift,
+            'drift_ratio': drift_ratio,
+        }
+
     def get_stats(self):
-        """获取当前统计量"""
         return {
             'prevGM': self._ema_gm,
             'prevGH': self._ema_gh,
@@ -517,12 +297,12 @@ class MultiLoss:
             'current_var_M': self.current_var_M,
             'current_var_H': self.current_var_H,
             'is_initialized': self._is_initialized,
-            'contrastive_ratio': self.drift_lambda,
-            'contrastive_lambda': self.margin_lambda,
+            'current_wm_grad': self.current_wm_grad,
+            'current_non_wm_grad': self.current_non_wm_grad,
+            'current_wm_ratio': self.current_wm_ratio,
         }
-    
+
     def reset_stats(self):
-        """重置统计量"""
         self._ema_gm = 0.0
         self._ema_gh = 0.0
         self._ema_ratio = 1.0
@@ -531,3 +311,9 @@ class MultiLoss:
         self.current_grad_H = 0.0
         self.current_var_M = 0.0
         self.current_var_H = 0.0
+        self.current_wm_grad = 0.0
+        self.current_non_wm_grad = 0.0
+        self.current_wm_ratio = 1.0
+        self._param_snapshot = None
+        self._total_param_drift = 0.0
+        self._wm_param_drift = 0.0

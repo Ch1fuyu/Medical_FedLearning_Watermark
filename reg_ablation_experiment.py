@@ -854,6 +854,10 @@ class RegAblationExperiment(Experiment):
                 if hasattr(self.trainer, 'multi_loss') and (epoch + 1) % 10 == 0:
                     stats = self.trainer.multi_loss.get_stats()
                     logging.info(f"MultiLoss - GM:{stats['prevGM']:.6f} GH:{stats['prevGH']:.6f} Ratio:{stats['prevRatio']:.6f}")
+
+                # 更新参数快照，供下一轮计算漂移
+                if hasattr(self.trainer, 'multi_loss') and hasattr(self.trainer.multi_loss, 'update_param_snapshot'):
+                    self.trainer.multi_loss.update_param_snapshot(self.model)
                 
                 # 记录本轮统计数据
                 stats_row = {

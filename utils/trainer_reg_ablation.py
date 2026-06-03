@@ -23,18 +23,19 @@ class TrainerRegAblation(TrainerPrivateEnhanced):
     def __init__(self, model, device, dp, sigma, args=None):
         super().__init__(model, device, dp, sigma, args)
         
-        # 仅使用新的水印稳定性正则项
         self.use_drift_reg = getattr(args, 'use_drift_reg', True) if args else True
         self.use_margin_reg = getattr(args, 'use_margin_reg', True) if args else True
-        
-        print(f"正则项配置: 仅使用新的水印稳定性正则项")
-        print(f"  drift (漂移惩罚): {'启用' if self.use_drift_reg else '禁用'}")
-        print(f"  margin (裕量惩罚): {'启用' if self.use_margin_reg else '禁用'}")
 
     def local_update(self, dataloader, local_ep, lr, client_id, current_epoch=0, total_epochs=100):
         """本地更新，仅使用新的水印稳定性正则项"""
         self.model.to(self.device)
         self.model.train()
+
+        if self.mask_manager:
+            try:
+                self.mask_manager.update_encoder_mask(client_id)
+            except Exception as e:
+                print(f"⚠️ 客户端{client_id}掩码更新失败: {e}")
         
         # 如果启用学习率调度器，根据全局轮次计算当前学习率
         if self.args and getattr(self.args, 'use_lr_scheduler', False):

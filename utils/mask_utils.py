@@ -56,50 +56,28 @@ class MaskManager:
                 self.param_positions[name] = (current_idx, current_idx + param_size)
                 current_idx += param_size
     
-    def update_encoder_mask(self, client_id: int = None):
+    def update_encoder_mask(self, client_id: int):
         """
-        更新编码器掩码，包含所有客户端的水印位置
+        仅更新指定客户端的水印位置到编码器掩码。
         
         Args:
-            client_id: 客户端ID（可选，如果为None则更新所有客户端）
+            client_id: 客户端ID
         """
         if self.key_matrix_manager is None:
-            # 静默跳过，减少日志
             return
-        
-        try:
-            # 重置编码器掩码
-            self.encoder_mask.zero_()
-            
-            # 获取所有客户端ID
-            if client_id is not None:
-                client_ids = [client_id]
-            else:
-                client_ids = self.key_matrix_manager.list_clients()
-            
-            # 加载所有客户端的位置信息并合并
-            all_positions = set()
-            for cid in client_ids:
-                try:
-                    positions = self.key_matrix_manager.load_positions(cid)
-                    all_positions.update(positions)
-                except Exception as e:
-                    # 静默处理错误
-                    continue
-            
-            # 更新编码器掩码（将局部索引转换为全局索引）
-            for param_name, local_idx in all_positions:
-                # 检查参数是否在位置映射中
-                if param_name in self.param_positions:
-                    start_idx, end_idx = self.param_positions[param_name]
-                    # 将局部索引转换为全局索引
-                    global_idx = start_idx + local_idx
-                    # 验证全局索引范围
-                    if global_idx >= 0 and global_idx < len(self.encoder_mask):
-                        self.encoder_mask[global_idx] = 1.0
 
+        try:
+            self.encoder_mask.zero_()
+
+            positions = self.key_matrix_manager.load_positions(client_id)
+            for param_name, local_idx in positions:
+                if param_name in self.param_positions:
+                    start_idx, _ = self.param_positions[param_name]
+                    global_idx = start_idx + local_idx
+                    if 0 <= global_idx < len(self.encoder_mask):
+                        self.encoder_mask[global_idx] = 1.0
         except Exception as e:
-            print(f"更新编码器掩码失败: {e}")
+            print(f"更新客户端{client_id}编码器掩码失败: {e}")
             self.encoder_mask.zero_()
     
     def get_masks(self, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

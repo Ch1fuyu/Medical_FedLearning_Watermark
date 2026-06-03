@@ -17,7 +17,7 @@ def parser_args():
     parser.add_argument('--override', type=str, default=None, help='comma-separated key=value overrides')
 
     # ========================= 联邦学习核心参数 ========================
-    parser.add_argument('--epochs', type=int, default=10, help='total communication rounds')
+    parser.add_argument('--epochs', type=int, default=150, help='total communication rounds')
     parser.add_argument('--local_ep', type=int, default=2, help='local epochs per client: E')
     parser.add_argument('--batch_size', type=int, default=128, help='local batch size: B')
     parser.add_argument('--client_num', type=int, default=5, help='number of clients: K')
@@ -45,8 +45,8 @@ def parser_args():
     parser.add_argument('--use_margin_reg', action='store_true', default=True, help='enable margin penalty in watermark regularization ablation')
     parser.add_argument('--no_margin_reg', action='store_false', dest='use_margin_reg', help='disable margin penalty in watermark regularization ablation')
     parser.add_argument('--margin_ratio', type=float, default=0.001, help='margin threshold ratio relative to non-watermark gradients')
-    parser.add_argument('--drift_lambda', type=float, default=5.0, help='weight for drift penalty term')
-    parser.add_argument('--margin_lambda', type=float, default=5.0, help='weight for margin penalty term')
+    parser.add_argument('--drift_lambda', type=float, default=1.0, help='weight for drift penalty term')
+    parser.add_argument('--margin_lambda', type=float, default=1.0, help='weight for margin penalty term')
     parser.add_argument('--multiloss_alpha_early', type=float, default=5e-5, help='alpha value for early training phase')
     parser.add_argument('--multiloss_alpha_late', type=float, default=1e-4, help='alpha value for late training phase')
 

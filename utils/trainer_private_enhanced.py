@@ -169,6 +169,9 @@ class TrainerPrivateEnhanced:
         
         # MultiLoss和掩码管理器
         self.multi_loss = MultiLoss(model=self.model)
+        # 初始化参数快照，便于后续观察漂移
+        if hasattr(self.multi_loss, 'update_param_snapshot'):
+            self.multi_loss.update_param_snapshot(self.model)
         self.mask_manager = None
         self.autoencoder = None
 
@@ -187,22 +190,11 @@ class TrainerPrivateEnhanced:
         # 初始化掩码管理器
         if args and getattr(args, 'use_key_matrix', False):
             from utils.mask_utils import create_mask_manager
-            # 在失败时会直接退出程序
             self.mask_manager = create_mask_manager(model, args.key_matrix_path, args)
-            # 初始化时更新所有客户端的编码器掩码
-            if self.mask_manager:
-                self.mask_manager.update_encoder_mask()
         
         # 初始化自编码器（如果使用增强水印模式）
         if args and getattr(args, 'watermark_mode', '') == 'enhanced':
-            try:
-                self._initialize_autoencoder()
-                print("自编码器已自动初始化")
-            except Exception as e:
-                print(f"错误: 初始化自编码器失败!")
-                print(f"  错误详情: {e}")
-                print(f"  请确保自编码器权重文件存在且格式正确")
-                raise RuntimeError(f"自编码器初始化失败: {e}")
+            self._initialize_autoencoder()
 
     def get_loss_function(self, pred, target):
         """计算损失函数，根据任务类型分支；
@@ -249,13 +241,8 @@ class TrainerPrivateEnhanced:
             decoder_path = os.path.join(weights_dir, 'decoder.pth')
             
             if os.path.exists(encoder_path) and os.path.exists(decoder_path):
-                print("自编码器权重已加载")
                 load_weights = True
             else:
-                print(f"错误: 自编码器权重文件不存在!")
-                print(f"  编码器权重路径: {encoder_path}")
-                print(f"  解码器权重路径: {decoder_path}")
-                print(f"  请先运行 train_autoencoder.py 训练自编码器")
                 raise FileNotFoundError(f"自编码器权重文件不存在: {encoder_path} 或 {decoder_path}")
             
             # 加载自编码器权重
@@ -266,20 +253,14 @@ class TrainerPrivateEnhanced:
                         self.autoencoder.encoder.load_state_dict(
                             torch.load(encoder_path, map_location=self.device, weights_only=False)
                         )
-                        print(f"✓ 编码器权重已加载: {encoder_path}")
                     
                     # 加载解码器
                     if os.path.exists(decoder_path):
                         self.autoencoder.decoder.load_state_dict(
                             torch.load(decoder_path, map_location=self.device, weights_only=False)
                         )
-                        print(f"✓ 解码器权重已加载: {decoder_path}")
                         
                 except Exception as e:
-                    print(f"错误: 加载自编码器权重失败!")
-                    print(f"  编码器路径: {encoder_path}")
-                    print(f"  解码器路径: {decoder_path}")
-                    print(f"  错误详情: {e}")
                     raise RuntimeError(f"自编码器权重加载失败: {e}")
             # 使用随机初始化的自编码器权重
     
@@ -351,8 +332,14 @@ class TrainerPrivateEnhanced:
 
     def local_update(self, dataloader, local_ep, lr, client_id, current_epoch=0, total_epochs=100):
         """本地更新，支持MultiLoss和自编码器训练"""
-        self.model.to(self.device)  # 确保模型在正确的设备上
+        self.model.to(self.device)
         self.model.train()
+
+        if self.mask_manager:
+            try:
+                self.mask_manager.update_encoder_mask(client_id)
+            except Exception as e:
+                print(f"⚠️ 客户端{client_id}掩码更新失败: {e}")
         
         # 如果启用学习率调度器，根据全局轮次计算当前学习率
         if self.args and getattr(self.args, 'use_lr_scheduler', False):
@@ -508,7 +495,7 @@ class TrainerPrivateEnhanced:
     def reset_gradient_stats(self):
         """重置梯度统计量"""
         if hasattr(self, 'multi_loss'):
-            self.multi_loss.reset_batch_stats()
+            self.multi_loss.reset_stats()
 
     def test(self, dataloader):
         """测试模型"""
