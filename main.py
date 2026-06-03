@@ -200,9 +200,9 @@ class FederatedLearningOnChestMNIST(Experiment):
             )
             
             # ========== 第二步：下发前泄漏模拟 ==========
-            # 只有启用泄漏追踪时才执行泄漏模拟
+            # 只有启用泄漏源追踪时才执行泄漏模拟
             leak_info = None
-            if getattr(self.args, 'enable_leakage_tracking', True):
+            if getattr(self.args, 'enable_source_tracing', True):
                 leak_info = self._simulate_pre_training_leakage(epoch, idxs_users)
 
             # ========== 第三步：模型泄漏追踪 ==========

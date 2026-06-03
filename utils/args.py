@@ -9,7 +9,7 @@ def parser_args():
     parser.add_argument('--gpu', default='0', type=str, help='GPU device ID')
 
     # ========================= 数据集和模型参数 ========================
-    parser.add_argument('--dataset', type=str, default='chestmnist', choices=['chestmnist', 'cifar10', 'cifar100'], help='name of dataset')
+    parser.add_argument('--dataset', type=str, default='cifar10', choices=['chestmnist', 'cifar10', 'cifar100'], help='name of dataset')
     parser.add_argument('--model_name', type=str, default='alexnet', choices=['alexnet', 'resnet'], help='model architecture name')
     parser.add_argument('--num_classes', default=None, type=int, help='number of classes')
     parser.add_argument('--in_channels', type=int, default=None, help='input channels')
@@ -57,7 +57,8 @@ def parser_args():
     parser.add_argument('--key_matrix_dir', type=str, default='save/key_matrix', help='directory containing generated key matrices')
 
     # ========================= 模型泄漏追踪配置 ========================
-    parser.add_argument('--enable_leakage_tracking', action='store_true', default=True, help='enable model leakage tracking simulation and detection')
+    parser.add_argument('--enable_leakage_tracking', action='store_true', default=False, help='enable model leakage tracking simulation and detection')
+    parser.add_argument('--no_source_tracing', action='store_false', dest='enable_source_tracing', help='disable leakage source tracing while keeping customized model distribution')
     parser.add_argument('--leak_interval', type=int, default=30, help='leak simulation interval (every N rounds), set to 0 to disable')
     parser.add_argument('--leak_attack_mode', type=str, default='gaussian_noise', choices=['none', 'gaussian_noise'], help='attack mode after model leakage')
     parser.add_argument('--leak_noise_weak', type=float, default=0.01, help='weak noise scale for level 1 (ratio of mean watermark value)')
