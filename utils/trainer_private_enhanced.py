@@ -168,7 +168,10 @@ class TrainerPrivateEnhanced:
         self._key_manager = None
         
         # MultiLoss和掩码管理器
-        self.multi_loss = MultiLoss(model=self.model)
+        self.multi_loss = MultiLoss(
+            model=self.model,
+            target_ratio=getattr(self.args, 'watermark_grad_target_ratio', 0.3)
+        )
         # 初始化参数快照，便于后续观察漂移
         if hasattr(self.multi_loss, 'update_param_snapshot'):
             self.multi_loss.update_param_snapshot(self.model)

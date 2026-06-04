@@ -801,14 +801,14 @@ def main():
     # 解析微调攻击特定的命令行参数
     parser = argparse.ArgumentParser(description='微调攻击实验')
     parser.add_argument('--model_path', type=str, 
-                       default='./save/alexnet/chestmnist/202606031738_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_auc_0.7684_drift_margin_enhanced.pkl',
+                       default='./save/alexnet/cifar10/202606032137_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_acc_0.9039_enhanced.pkl',
                        help='模型文件路径')
     parser.add_argument('--model_type', type=str, default='alexnet',
                        choices=['resnet', 'alexnet'],
                        help='模型类型')
     parser.add_argument('--client_num', type=int, default=5,
                        help='客户端数量')
-    parser.add_argument('--dataset', type=str, default='chestmnist',
+    parser.add_argument('--dataset', type=str, default='cifar10',
                        choices=['cifar10', 'cifar100', 'chestmnist'],
                        help='数据集类型')
     parser.add_argument('--autoencoder_dir', type=str, default='./save/autoencoder',

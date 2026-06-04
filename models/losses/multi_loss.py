@@ -31,8 +31,9 @@ class FocalLoss(nn.Module):
 class MultiLoss:
     """Minimal wrapper for watermark-gradient diagnostics and param-drift tracking."""
 
-    def __init__(self, model=None):
+    def __init__(self, model=None, target_ratio=0.3):
         self.model = model
+        self.target_ratio = target_ratio
         self.device = None
 
         self._ema_gm = 0.0
@@ -161,14 +162,6 @@ class MultiLoss:
         gradients = torch.cat(conv_gradients)
         effective_mask = effective_mask.float().to(gradients.device)
 
-        if not hasattr(self, '_debug_mask_shown'):
-            self._debug_mask_shown = True
-            print(
-                f"[MultiLoss DEBUG] gradients: {gradients.shape}, effective_mask: {effective_mask.shape}\n"
-                f"[MultiLoss DEBUG] effective_mask sum: {effective_mask.sum().item():.0f}, "
-                f"ratio: {effective_mask.mean().item():.4%}"
-            )
-
         if effective_mask.numel() != gradients.numel():
             print(
                 f"[MultiLoss ERROR] Mask size mismatch! gradients: {gradients.numel()}, "
@@ -196,9 +189,8 @@ class MultiLoss:
 
         self.update_gradient_stats(gradients, watermark_grads, target_mask, encoder_mask, effective_mask)
 
-        target_ratio = 0.3
-        if wm_ratio > target_ratio:
-            target_wm_grad = mean_non_watermark_grad.detach() * target_ratio
+        if getattr(self, 'target_ratio', 0.3) > 0 and wm_ratio > self.target_ratio:
+            target_wm_grad = mean_non_watermark_grad.detach() * self.target_ratio
             current_wm_grad_val = mean_watermark_grad.detach()
 
             if current_wm_grad_val > 1e-10:

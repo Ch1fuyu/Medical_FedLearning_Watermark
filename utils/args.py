@@ -9,7 +9,7 @@ def parser_args():
     parser.add_argument('--gpu', default='0', type=str, help='GPU device ID')
 
     # ========================= 数据集和模型参数 ========================
-    parser.add_argument('--dataset', type=str, default='cifar10', choices=['chestmnist', 'cifar10', 'cifar100'], help='name of dataset')
+    parser.add_argument('--dataset', type=str, default='chestmnist', choices=['chestmnist', 'cifar10', 'cifar100'], help='name of dataset')
     parser.add_argument('--model_name', type=str, default='alexnet', choices=['alexnet', 'resnet'], help='model architecture name')
     parser.add_argument('--num_classes', default=None, type=int, help='number of classes')
     parser.add_argument('--in_channels', type=int, default=None, help='input channels')
@@ -49,6 +49,7 @@ def parser_args():
     parser.add_argument('--margin_lambda', type=float, default=1.0, help='weight for margin penalty term')
     parser.add_argument('--multiloss_alpha_early', type=float, default=5e-5, help='alpha value for early training phase')
     parser.add_argument('--multiloss_alpha_late', type=float, default=1e-4, help='alpha value for late training phase')
+    parser.add_argument('--watermark_grad_target_ratio', type=float, default=0, help='target ratio of watermark gradient to non-watermark gradient; set to 0 to disable watermark gradient capping')
 
     # ========================= 水印与密钥矩阵配置 ========================
     parser.add_argument('--enable_watermark', action='store_true', default=True, help='enable watermark embedding')
