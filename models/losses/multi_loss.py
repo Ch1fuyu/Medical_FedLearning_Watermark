@@ -31,9 +31,10 @@ class FocalLoss(nn.Module):
 class MultiLoss:
     """Minimal wrapper for watermark-gradient diagnostics and param-drift tracking."""
 
-    def __init__(self, model=None, target_ratio=0.3):
+    def __init__(self, model=None, target_ratio=0.3, enable_grad_cap=True):
         self.model = model
         self.target_ratio = target_ratio
+        self.enable_grad_cap = enable_grad_cap
         self.device = None
 
         self._ema_gm = 0.0
@@ -134,7 +135,9 @@ class MultiLoss:
 
     def compute_loss_and_backward(self, main_loss, target_mask, encoder_mask, effective_mask,
                                   current_epoch, total_epochs,
-                                  alpha_early=None, alpha_late=None):
+                                  alpha_early=None, alpha_late=None,
+                                  use_drift_reg=False, use_margin_reg=False,
+                                  drift_lambda=1.0, margin_lambda=1.0, margin_ratio=0.001):
         """Compute loss and perform backward pass with contrastive regularization."""
         device = main_loss.device
         if self.device is None:
@@ -144,10 +147,16 @@ class MultiLoss:
             main_loss.backward()
             return main_loss
 
-        main_loss.backward(retain_graph=True)
+        total_loss = main_loss
 
         if self.model is None or effective_mask is None:
-            return main_loss
+            total_loss.backward()
+            return total_loss
+
+        if use_drift_reg and drift_lambda > 0 and self._param_snapshot is not None:
+            drift_stats = self.get_param_drift_stats(self.model)
+            drift_penalty = total_loss.new_tensor(drift_stats['wm_param_drift'])
+            total_loss = total_loss + drift_lambda * drift_penalty
 
         conv_gradients = []
         conv_params = []
@@ -183,48 +192,66 @@ class MultiLoss:
 
         wm_ratio = mean_watermark_grad / (mean_non_watermark_grad + 1e-8)
 
+        if use_margin_reg and margin_lambda > 0:
+            target_margin = mean_non_watermark_grad.detach() * margin_ratio
+            margin_penalty = torch.relu(mean_watermark_grad - target_margin)
+            total_loss = total_loss + margin_lambda * margin_penalty
+
+        total_loss.backward()
+
         self.current_wm_grad = mean_watermark_grad.detach().item()
         self.current_non_wm_grad = mean_non_watermark_grad.detach().item()
         self.current_wm_ratio = wm_ratio.detach().item()
 
         self.update_gradient_stats(gradients, watermark_grads, target_mask, encoder_mask, effective_mask)
 
-        if getattr(self, 'target_ratio', 0.3) > 0 and wm_ratio > self.target_ratio:
-            target_wm_grad = mean_non_watermark_grad.detach() * self.target_ratio
-            current_wm_grad_val = mean_watermark_grad.detach()
-
-            if current_wm_grad_val > 1e-10:
-                scale_factor = (target_wm_grad / current_wm_grad_val).clamp(0.1, 1.0)
-
-                wm_sign = torch.sign(gradients * watermark_mask).clamp_min(0.0)
-                wm_negative_sign = torch.sign(gradients * watermark_mask).clamp_max(0.0)
-
-                scaled_wm_grad = torch.abs(gradients * watermark_mask) * scale_factor
-
-                corrected_gradients = (
-                    gradients * non_watermark_mask
-                    + wm_sign * scaled_wm_grad
-                    - wm_negative_sign * scaled_wm_grad
-                )
-
+        # 如果启用了梯度缩放功能
+        if self.enable_grad_cap:
+            # target_ratio=0 表示完全清零水印区域梯度
+            if self.target_ratio == 0:
+                corrected_gradients = gradients * non_watermark_mask
                 start_idx = 0
                 for param in conv_params:
                     numel = param.numel()
                     param.grad.view(-1).copy_(corrected_gradients[start_idx:start_idx + numel])
                     start_idx += numel
+            # target_ratio>0 表示缩放水印梯度
+            elif wm_ratio > self.target_ratio:
+                target_wm_grad = mean_non_watermark_grad.detach() * self.target_ratio
+                current_wm_grad_val = mean_watermark_grad.detach()
+
+                if current_wm_grad_val > 1e-10:
+                    scale_factor = (target_wm_grad / current_wm_grad_val).clamp(0.1, 1.0)
+
+                    wm_sign = torch.sign(gradients * watermark_mask).clamp_min(0.0)
+                    wm_negative_sign = torch.sign(gradients * watermark_mask).clamp_max(0.0)
+
+                    scaled_wm_grad = torch.abs(gradients * watermark_mask) * scale_factor
+
+                    corrected_gradients = (
+                        gradients * non_watermark_mask
+                        + wm_sign * scaled_wm_grad
+                        - wm_negative_sign * scaled_wm_grad
+                    )
+
+                    start_idx = 0
+                    for param in conv_params:
+                        numel = param.numel()
+                        param.grad.view(-1).copy_(corrected_gradients[start_idx:start_idx + numel])
+                        start_idx += numel
 
         if not hasattr(self, '_epoch_printed'):
             self._epoch_printed = set()
         if current_epoch not in self._epoch_printed:
             self._epoch_printed.add(current_epoch)
-            ratio = (mean_watermark_grad.pow(2).item() / main_loss.item() * 100) if main_loss.item() > 0 else 0
+            ratio = (mean_watermark_grad.pow(2).item() / total_loss.item() * 100) if total_loss.item() > 0 else 0
             print(
-                f"[MultiLoss] E{current_epoch} | loss:{main_loss.item():.4f} | "
+                f"[MultiLoss] E{current_epoch} | loss:{total_loss.item():.4f} | "
                 f"reg_ratio:{ratio:.1f}% | wm/non_wm ratio:{self.current_wm_ratio:.3f} | "
                 f"wm_grad:{self.current_wm_grad:.3e} | non_wm_grad:{self.current_non_wm_grad:.3e}"
             )
 
-        return main_loss
+        return total_loss
 
     def update_param_snapshot(self, model):
         if model is None:

@@ -40,16 +40,17 @@ def parser_args():
     parser.add_argument('--class_weights', action='store_true', default=False, help='use class weights for imbalanced dataset')
 
     # ========================= 多重损失函数参数 (MultiLoss) ========================
-    parser.add_argument('--use_drift_reg', action='store_true', default=True, help='enable drift penalty in watermark regularization ablation')
+    parser.add_argument('--use_drift_reg', action='store_true', default=False, help='enable drift penalty in watermark regularization ablation')
     parser.add_argument('--no_drift_reg', action='store_false', dest='use_drift_reg', help='disable drift penalty in watermark regularization ablation')
-    parser.add_argument('--use_margin_reg', action='store_true', default=True, help='enable margin penalty in watermark regularization ablation')
+    parser.add_argument('--use_margin_reg', action='store_true', default=False, help='enable margin penalty in watermark regularization ablation')
     parser.add_argument('--no_margin_reg', action='store_false', dest='use_margin_reg', help='disable margin penalty in watermark regularization ablation')
     parser.add_argument('--margin_ratio', type=float, default=0.001, help='margin threshold ratio relative to non-watermark gradients')
     parser.add_argument('--drift_lambda', type=float, default=1.0, help='weight for drift penalty term')
     parser.add_argument('--margin_lambda', type=float, default=1.0, help='weight for margin penalty term')
     parser.add_argument('--multiloss_alpha_early', type=float, default=5e-5, help='alpha value for early training phase')
     parser.add_argument('--multiloss_alpha_late', type=float, default=1e-4, help='alpha value for late training phase')
-    parser.add_argument('--watermark_grad_target_ratio', type=float, default=0, help='target ratio of watermark gradient to non-watermark gradient; set to 0 to disable watermark gradient capping')
+    parser.add_argument('--watermark_grad_cap', action='store_true', default=True, help='enable watermark gradient capping/scaling')
+    parser.add_argument('--watermark_grad_target_ratio', type=float, default=0.3, help='target ratio of watermark gradient to non-watermark gradient; set to 0 to zero out watermark gradients')
 
     # ========================= 水印与密钥矩阵配置 ========================
     parser.add_argument('--enable_watermark', action='store_true', default=True, help='enable watermark embedding')

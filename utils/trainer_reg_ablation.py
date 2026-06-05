@@ -109,7 +109,12 @@ class TrainerRegAblation(TrainerPrivateEnhanced):
                         main_loss,
                         target_mask, encoder_mask, effective_mask,
                         current_epoch, total_epochs,
-                        alpha_early, alpha_late
+                        alpha_early, alpha_late,
+                        use_drift_reg=self.use_drift_reg,
+                        use_margin_reg=self.use_margin_reg,
+                        drift_lambda=getattr(self.args, 'drift_lambda', 1.0),
+                        margin_lambda=getattr(self.args, 'margin_lambda', 1.0),
+                        margin_ratio=getattr(self.args, 'margin_ratio', 0.001)
                     )
 
                 # 梯度裁剪
