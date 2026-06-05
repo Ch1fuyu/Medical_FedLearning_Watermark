@@ -232,6 +232,44 @@ class TrainerPrivateEnhanced:
         # multilabel/binary 使用原有accuracy()
         return accuracy(pred, target)[0]
 
+    def _get_frozen_params(self, client_id):
+        """
+        根据客户端密钥矩阵获取需要冻结的参数索引信息。
+
+        冻结规则：
+        - 如果没有使用密钥矩阵，返回空字典
+        - 返回每个参数层的冻结索引 {param_name: [idx1, idx2, ...]}
+
+        Returns:
+            dict: {参数名: [需要冻结的索引列表], ...}
+        """
+        if not self.mask_manager:
+            return {}
+
+        try:
+            key_manager = self.mask_manager.key_matrix_manager
+            if key_manager is None:
+                return {}
+
+            positions = key_manager.load_positions(client_id)
+
+            frozen_indices = {}
+            for param_name, idx in positions:
+                if param_name not in frozen_indices:
+                    frozen_indices[param_name] = set()
+                frozen_indices[param_name].add(idx)
+
+            total_frozen = sum(len(indices) for indices in frozen_indices.values())
+            num_layers = len(frozen_indices)
+
+            print(f"[冻结] 客户端{client_id}: 冻结{num_layers}层参数中的{total_frozen}个位置")
+
+            return frozen_indices
+
+        except Exception as e:
+            print(f"⚠️ 获取冻结参数失败: {e}")
+            return {}
+
     def _initialize_autoencoder(self):
         """初始化自编码器，分别加载编码器和解码器"""
         if self.autoencoder is None:
@@ -334,7 +372,7 @@ class TrainerPrivateEnhanced:
             print(f"⚠️ 水印嵌入失败: {e}")
 
     def local_update(self, dataloader, local_ep, lr, client_id, current_epoch=0, total_epochs=100):
-        """本地更新，支持MultiLoss和自编码器训练"""
+        """本地更新，支持MultiLoss和自编码器训练，使用参数冻结保护水印区域"""
         self.model.to(self.device)
         self.model.train()
 
@@ -343,7 +381,7 @@ class TrainerPrivateEnhanced:
                 self.mask_manager.update_encoder_mask(client_id)
             except Exception as e:
                 print(f"⚠️ 客户端{client_id}掩码更新失败: {e}")
-        
+
         # 如果启用学习率调度器，根据全局轮次计算当前学习率
         if self.args and getattr(self.args, 'use_lr_scheduler', False):
             import math
@@ -353,7 +391,10 @@ class TrainerPrivateEnhanced:
             adjusted_lr = lr_min + (lr - lr_min) * (1 + math.cos(math.pi * progress)) / 2
         else:
             adjusted_lr = lr
-        
+
+        # 根据客户端密钥矩阵获取需要冻结的参数索引
+        frozen_indices = self._get_frozen_params(client_id)
+
         # 根据args.optim参数选择优化器（使用调整后的学习率）
         if self.args and hasattr(self.args, 'optim'):
             if self.args.optim.lower() == 'adam':
@@ -378,28 +419,19 @@ class TrainerPrivateEnhanced:
                 pred = self.model(x)
                 main_loss = self.get_loss_function(pred, y)
 
-                # 计算最终损失并反向传播（包含对比正则项）
-                if current_epoch == 0:
-                    # 第一轮只使用主任务损失
-                    total_loss = main_loss
-                    total_loss.backward()
-                else:
-                    # 获取掩码用于对比正则项
-                    if self.mask_manager:
-                        target_mask, encoder_mask, effective_mask = self.mask_manager.get_masks(self.device)
-                    else:
-                        target_mask, encoder_mask, effective_mask = None, None, None
-                    
-                    # 使用 compute_loss_and_backward 正确应用对比正则项
-                    total_loss = self.multi_loss.compute_loss_and_backward(
-                        main_loss,
-                        target_mask,
-                        encoder_mask,
-                        effective_mask,
-                        current_epoch,
-                        total_epochs
-                    )
-                
+                # 反向传播
+                main_loss.backward()
+
+                # 清零冻结位置的梯度（只冻结水印区域）
+                if frozen_indices:
+                    for name, param in self.model.named_parameters():
+                        if name in frozen_indices:
+                            indices = frozen_indices[name]
+                            grad_view = param.grad.view(-1)
+                            for idx in indices:
+                                if idx < grad_view.numel():
+                                    grad_view[idx] = 0.0
+
                 # 梯度裁剪
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
