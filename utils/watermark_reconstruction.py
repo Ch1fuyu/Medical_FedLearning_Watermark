@@ -134,7 +134,7 @@ class WatermarkReconstructor:
                     all_watermark_values.append(watermark_values)
                     successful_clients.append(client_id)
             except Exception as e:
-                pass  # 静默处理错误
+                print(f"   ⚠️  客户端 {client_id} 提取水印失败: {e}")
         
         if not all_watermark_values:
             print("❌ 未能从任何客户端提取到水印参数")

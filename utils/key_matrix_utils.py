@@ -374,6 +374,10 @@ class KeyMatrixManager:
         """
         positions = self.load_positions(client_id)
         
+        # 调试输出：打印位置信息（前3个示例）
+        sample_positions = positions[:3] if len(positions) > 3 else positions
+        print(f"   [调试] 客户端 {client_id} 有 {len(positions)} 个水印位置，前3个: {sample_positions}")
+        
         # 检查是否需要构建全局偏移映射（用于转换全局索引）
         # 如果任何索引值大于对应参数的大小，说明是全局索引
         needs_conversion = False
@@ -492,6 +496,7 @@ class KeyMatrixManager:
                 
                 # 验证索引范围
                 if local_idx < 0 or local_idx >= param_size:
+                    print(f"   [调试] 索引越界: param={actual_param_name}, local_idx={local_idx}, param_size={param_size}, global_idx={idx}")
                     raise IndexError(
                         f"错误: 局部索引 {local_idx} 超出参数 {actual_param_name} 的范围 "
                         f"[0, {param_size})。全局索引: {idx}。"
@@ -509,8 +514,11 @@ class KeyMatrixManager:
                 watermark_values.append(watermark_value)
             else:
                 # 参数名不存在，直接抛出异常并退出
+                print(f"   [调试] 参数名 '{param_name_in_file}' 不在模型中。")
+                print(f"   [调试] 密钥矩阵生成时的模型参数名: {param_name_in_file}")
+                print(f"   [调试] 当前模型参数名列表: {list(model_params.keys())}")
                 raise KeyError(
-                    f"错误: 参数名 '{actual_param_name}' 不在模型参数中。这通常表示模型结构发生了变化，"
+                    f"错误: 参数名 '{param_name_in_file}' 不在模型参数中。这通常表示模型结构发生了变化，"
                     f"无法正确提取水印。请确保使用正确的模型结构。"
                 )
         
