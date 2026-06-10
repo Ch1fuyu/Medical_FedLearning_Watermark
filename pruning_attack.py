@@ -4,6 +4,9 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
+# 项目根目录（兼容从任意目录运行）
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
 import torch
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
@@ -467,7 +470,7 @@ def evaluate_watermark_after_pruning(model, reconstructor, watermark_model=None)
         print(f"❌ 水印评估失败: {e}")
         return None
 
-def save_pruning_results(results, model_info, save_dir='./save/pruning_results'):
+def save_pruning_results(results, model_info, save_dir=None):
     """
     保存剪枝攻击实验结果
     
@@ -476,6 +479,8 @@ def save_pruning_results(results, model_info, save_dir='./save/pruning_results')
         model_info: 模型信息字典
         save_dir: 保存目录
     """
+    if save_dir is None:
+        save_dir = os.path.join(PROJECT_ROOT, 'save', 'pruning_results')
     os.makedirs(save_dir, exist_ok=True)
     
     # 生成时间戳
@@ -537,7 +542,8 @@ def main():
     parser.add_argument('--model_path', type=str, 
                        default='./save/alexnet/cifar10/202511031151_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_acc_0.9028_enhanced.pkl',
                        help='模型文件路径')
-    parser.add_argument('--autoencoder_dir', type=str, default='./save/autoencoder',
+    parser.add_argument('--autoencoder_dir', type=str, 
+                       default=os.path.join(PROJECT_ROOT, 'save', 'autoencoder'),
                        help='自编码器目录')
     parser.add_argument('--model_type', type=str, default='alexnet',
                        choices=['resnet', 'alexnet'],
@@ -546,8 +552,8 @@ def main():
                        help='客户端数量')
     args = parser.parse_args()
     
-    # 固定密钥矩阵路径
-    KEY_MATRIX_BASE_DIR = './save/key_matrix'
+    # 固定密钥矩阵路径（基于项目根目录，兼容从任意目录运行）
+    KEY_MATRIX_BASE_DIR = os.path.join(PROJECT_ROOT, 'save', 'key_matrix')
     from utils.key_matrix_utils import get_key_matrix_path
     args.key_matrix_path = get_key_matrix_path(KEY_MATRIX_BASE_DIR, args.model_type, args.client_num)
     

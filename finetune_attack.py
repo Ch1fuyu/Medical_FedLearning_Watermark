@@ -10,6 +10,9 @@ import os
 import sys
 from datetime import datetime
 
+# 项目根目录（兼容从任意目录运行）
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -648,7 +651,7 @@ def evaluate_watermark_integrity(model_state_dict, reconstructor, model=None):
 
 
 
-def save_results(results, model_path: str, save_dir: str = './save/finetune_attack',
+def save_results(results, model_path: str, save_dir: str = None,
                  dataset_name: str = 'unknown', save_mode: str = 'paper'):
     """
     保存实验结果
@@ -660,6 +663,8 @@ def save_results(results, model_path: str, save_dir: str = './save/finetune_atta
         dataset_name: 数据集名称
         save_mode: 保存模式 - 'all'(完整+论文数据), 'paper'(仅论文数据,默认), 'full'(仅完整结果)
     """
+    if save_dir is None:
+        save_dir = os.path.join(PROJECT_ROOT, 'save', 'finetune_attack')
     os.makedirs(save_dir, exist_ok=True)
 
     # 生成时间戳
@@ -811,7 +816,8 @@ def main():
     parser.add_argument('--dataset', type=str, default='chestmnist',
                        choices=['cifar10', 'cifar100', 'chestmnist'],
                        help='数据集类型')
-    parser.add_argument('--autoencoder_dir', type=str, default='./save/autoencoder',
+    parser.add_argument('--autoencoder_dir', type=str, 
+                       default=os.path.join(PROJECT_ROOT, 'save', 'autoencoder'),
                        help='自编码器目录')
     parser.add_argument('--optimizer', type=str, default='sgd', choices=['sgd', 'adam'],
                        help='优化器类型（默认使用args.py中的optim）')
@@ -841,8 +847,8 @@ def main():
     args.dataset = cmd_args.dataset
     args.save_mode = cmd_args.save_mode
     
-    # 固定密钥矩阵路径
-    KEY_MATRIX_BASE_DIR = './save/key_matrix'
+    # 固定密钥矩阵路径（基于项目根目录，兼容从任意目录运行）
+    KEY_MATRIX_BASE_DIR = os.path.join(PROJECT_ROOT, 'save', 'key_matrix')
     from utils.key_matrix_utils import get_key_matrix_path
     
     # 从模型路径自动推断正确的模型类型
@@ -1062,7 +1068,7 @@ def main():
     # 保存结果
     print("\n" + "=" * 80)
     print("保存实验结果...")
-    save_results(results, args.model_path, save_dir='./save/finetune_attack',
+    save_results(results, args.model_path, save_dir=os.path.join(PROJECT_ROOT, 'save', 'finetune_attack'),
                 dataset_name=dataset, save_mode=args.save_mode)
 
     # 输出总结
