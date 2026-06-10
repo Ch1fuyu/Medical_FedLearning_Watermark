@@ -40,6 +40,11 @@ class WatermarkReconstructor:
         self.perf_fail = None    # 失效性能 (perf_fail)
         self.tau = None          # 阈值 τ = loss_fail - loss_before
         self.ds_loader = None    # 专用数据集加载器
+        self.model = None        # 缓存模型引用（用于水印提取时的参数顺序一致性）
+
+    def set_model(self, model: torch.nn.Module):
+        """设置模型引用，用于水印提取时的参数顺序一致性"""
+        self.model = model
         
     def _load_original_autoencoder(self) -> LightAutoencoder:
         """加载原始自编码器作为性能参考"""
@@ -64,8 +69,11 @@ class WatermarkReconstructor:
             model_state_dict: 模型状态字典
             client_id: 客户端ID
             check_pruning: 是否检查剪枝影响
-            model: 模型对象（推荐传递以确保参数顺序正确）
+            model: 模型对象（可选），如不提供则使用缓存的模型
         """
+        # 如果未提供 model，使用缓存的模型
+        if model is None:
+            model = self.model
         try:
             # 必须传递 model 参数以确保参数顺序与密钥矩阵生成时一致
             return self.key_manager.extract_watermark(model_state_dict, client_id, check_pruning, model=model)

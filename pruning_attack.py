@@ -583,6 +583,8 @@ def main():
             key_matrix_dir=args.key_matrix_path, 
             autoencoder_weights_dir=args.autoencoder_dir
         )
+        # 设置模型引用（用于水印提取时的参数顺序一致性）
+        reconstructor.set_model(model)
         
         # ==================== 水印检测容忍度设置 ====================
         PERF_FAIL_RATIO = 0.3
