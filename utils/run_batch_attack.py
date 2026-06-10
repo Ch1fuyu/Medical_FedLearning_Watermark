@@ -21,55 +21,55 @@ from datetime import datetime
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
-# 实验配置列表 (根据 trace_results_*.json 对应的训练结果)
+# 实验配置列表 (2026年6月 reg_ablation drift+margin 实验)
 EXPERIMENTS = [
     # chestmnist + alexnet
     {"model": "alexnet", "dataset": "chestmnist", "clients": 5,
-     "pkl": "202605141420_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_auc_0.7624_enhanced.pkl"},
+     "pkl": "202606081711_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_auc_0.7704_drift_margin_enhanced.pkl"},
     {"model": "alexnet", "dataset": "chestmnist", "clients": 10,
-     "pkl": "202605141530_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_auc_0.7609_enhanced.pkl"},
+     "pkl": "202606081817_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_auc_0.7704_drift_margin_enhanced.pkl"},
     {"model": "alexnet", "dataset": "chestmnist", "clients": 20,
-     "pkl": "202605141639_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_20_fra_1.0000_auc_0.7558_enhanced.pkl"},
+     "pkl": "202606081924_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_20_fra_1.0000_auc_0.7628_drift_margin_enhanced.pkl"},
 
     # chestmnist + resnet
     {"model": "resnet", "dataset": "chestmnist", "clients": 5,
-     "pkl": "202605141829_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_auc_0.7635_enhanced.pkl"},
+     "pkl": "202606082158_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_auc_0.7753_drift_margin_enhanced.pkl"},
     {"model": "resnet", "dataset": "chestmnist", "clients": 10,
-     "pkl": "202605142018_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_auc_0.7618_enhanced.pkl"},
+     "pkl": "202606090028_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_auc_0.7707_drift_margin_enhanced.pkl"},
     {"model": "resnet", "dataset": "chestmnist", "clients": 20,
-     "pkl": "202605142206_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_20_fra_1.0000_auc_0.7600_enhanced.pkl"},
+     "pkl": "202606090301_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_20_fra_1.0000_auc_0.7693_drift_margin_enhanced.pkl"},
 
     # cifar10 + alexnet
     {"model": "alexnet", "dataset": "cifar10", "clients": 5,
-     "pkl": "202605142301_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_acc_0.9006_enhanced.pkl"},
+     "pkl": "202606090359_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_acc_0.8998_drift_margin_enhanced.pkl"},
     {"model": "alexnet", "dataset": "cifar10", "clients": 10,
-     "pkl": "202605142356_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_acc_0.8984_enhanced.pkl"},
+     "pkl": "202606090459_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_acc_0.8986_drift_margin_enhanced.pkl"},
     {"model": "alexnet", "dataset": "cifar10", "clients": 20,
-     "pkl": "202605150049_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_20_fra_1.0000_acc_0.8907_enhanced.pkl"},
+     "pkl": "202606090559_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_20_fra_1.0000_acc_0.8932_drift_margin_enhanced.pkl"},
 
     # cifar10 + resnet
     {"model": "resnet", "dataset": "cifar10", "clients": 5,
-     "pkl": "202605150218_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_acc_0.9215_enhanced.pkl"},
+     "pkl": "202606090756_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_acc_0.9387_drift_margin_enhanced.pkl"},
     {"model": "resnet", "dataset": "cifar10", "clients": 10,
-     "pkl": "202605150349_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_acc_0.9230_enhanced.pkl"},
+     "pkl": "202606090954_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_acc_0.9349_drift_margin_enhanced.pkl"},
     {"model": "resnet", "dataset": "cifar10", "clients": 20,
-     "pkl": "202605150518_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_20_fra_1.0000_acc_0.9100_enhanced.pkl"},
+     "pkl": "202606091153_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_20_fra_1.0000_acc_0.9250_drift_margin_enhanced.pkl"},
 
     # cifar100 + alexnet
     {"model": "alexnet", "dataset": "cifar100", "clients": 5,
-     "pkl": "202605150614_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_acc_0.6698_enhanced.pkl"},
+     "pkl": "202606091253_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_acc_0.6716_drift_margin_enhanced.pkl"},
     {"model": "alexnet", "dataset": "cifar100", "clients": 10,
-     "pkl": "202605150710_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_acc_0.6661_enhanced.pkl"},
+     "pkl": "202606091354_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_acc_0.6573_drift_margin_enhanced.pkl"},
     {"model": "alexnet", "dataset": "cifar100", "clients": 20,
-     "pkl": "202605150804_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_20_fra_1.0000_acc_0.6324_enhanced.pkl"},
+     "pkl": "202606091455_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_20_fra_1.0000_acc_0.6304_drift_margin_enhanced.pkl"},
 
     # cifar100 + resnet
     {"model": "resnet", "dataset": "cifar100", "clients": 5,
-     "pkl": "202605150935_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_acc_0.7262_enhanced.pkl"},
+     "pkl": "202606091653_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_acc_0.7248_drift_margin_enhanced.pkl"},
     {"model": "resnet", "dataset": "cifar100", "clients": 10,
-     "pkl": "202605151106_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_acc_0.7186_enhanced.pkl"},
+     "pkl": "202606091853_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_acc_0.7108_drift_margin_enhanced.pkl"},
     {"model": "resnet", "dataset": "cifar100", "clients": 20,
-     "pkl": "202605151235_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_20_fra_1.0000_acc_0.6867_enhanced.pkl"},
+     "pkl": "202606092054_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_20_fra_1.0000_acc_0.7013_drift_margin_enhanced.pkl"},
 ]
 
 
@@ -253,7 +253,7 @@ def print_summary(results, attack_type):
     return results
 
 
-def save_results_to_file(results, attack_type, save_dir=None):
+def save_results_to_file(results, attack_type, save_dir=None, extra_config=None):
     """保存实验结果到文件"""
     if save_dir is None:
         save_dir = os.path.join(PROJECT_ROOT, 'save', 'batch_results')
@@ -266,11 +266,19 @@ def save_results_to_file(results, attack_type, save_dir=None):
         f.write(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"{'='*80}\n\n")
 
+        if extra_config:
+            f.write("实验配置:\n")
+            for key, value in extra_config.items():
+                f.write(f"  {key}: {value}\n")
+            f.write(f"\n{'='*80}\n\n")
+
         for r in results:
             status = "成功" if r["success"] else f"失败: {r['result']}"
             f.write(f"[{r['index']}] {r['name']}\n")
-            f.write(f"  模型: {r['model']}, 数据集: {r['dataset']}, 客户端: {r['clients']}\n")
-            f.write(f"  文件: {r['pkl']}\n")
+            f.write(f"  模型类型: {r['model']}\n")
+            f.write(f"  数据集: {r['dataset']}\n")
+            f.write(f"  客户端数: {r['clients']}\n")
+            f.write(f"  模型文件: {r['pkl']}\n")
             f.write(f"  状态: {status}\n\n")
 
     print(f"\n结果已保存到: {filepath}")
@@ -347,7 +355,12 @@ def run_batch(args):
             end_idx=args.end_idx
         )
         print_summary(pruning_results, "剪枝")
-        save_results_to_file(pruning_results, "pruning")
+        save_results_to_file(pruning_results, "pruning", extra_config={
+            "攻击类型": "剪枝攻击",
+            "模型路径模式": "save/{model}/{dataset}/{pkl}",
+            "自编码器目录": args.autoencoder_dir,
+            "其他参数": "默认",
+        })
 
     # 运行微调攻击
     if args.attack_type in ['finetune', 'both']:
@@ -361,7 +374,15 @@ def run_batch(args):
             end_idx=args.end_idx
         )
         print_summary(finetune_results, "微调")
-        save_results_to_file(finetune_results, "finetune")
+        save_results_to_file(finetune_results, "finetune", extra_config={
+            "攻击类型": "微调攻击",
+            "模型路径模式": "save/{model}/{dataset}/{pkl}",
+            "自编码器目录": args.autoencoder_dir,
+            "微调轮数": args.finetune_epochs,
+            "学习率": args.learning_rate,
+            "批次大小": args.batch_size,
+            "保存模式": args.save_mode,
+        })
 
     # 汇总论文数据
     if args.attack_type in ['finetune', 'both']:
