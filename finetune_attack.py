@@ -23,9 +23,64 @@ if sys.platform.startswith('win'):
     multiprocessing.set_start_method('spawn', force=True)
 
 from models.resnet import resnet18
-from utils.dataset import LocalChestMNISTDataset
+from utils.dataset import (
+    LocalChestMNISTDataset,
+    LocalPneumoniaMNISTDataset,
+    LocalPathMNISTDataset,
+)
 from utils.watermark_reconstruction import WatermarkReconstructor
 from utils.delta_pcc_utils import evaluate_delta_pcc, calculate_fixed_tau, format_delta_pcc_result, print_delta_pcc_summary
+
+
+DATASET_PRESETS = {
+    'chestmnist': {
+        'task_type': 'multilabel',
+        'num_classes': 14,
+        'in_channels': 1,
+        'input_size': 28,
+        'normalize_mean': [0.5],
+        'normalize_std': [0.5],
+    },
+    'pneumoniamnist': {
+        'task_type': 'binary',
+        'num_classes': 2,
+        'in_channels': 1,
+        'input_size': 28,
+        'normalize_mean': [0.5],
+        'normalize_std': [0.5],
+    },
+    'pathmnist': {
+        'task_type': 'multiclass',
+        'num_classes': 9,
+        'in_channels': 3,
+        'input_size': 28,
+        'normalize_mean': [0.5, 0.5, 0.5],
+        'normalize_std': [0.5, 0.5, 0.5],
+    },
+    'cifar10': {
+        'task_type': 'multiclass',
+        'num_classes': 10,
+        'in_channels': 3,
+        'input_size': 32,
+        'normalize_mean': [0.4914, 0.4822, 0.4464],
+        'normalize_std': [0.2023, 0.1994, 0.2010],
+    },
+    'cifar100': {
+        'task_type': 'multiclass',
+        'num_classes': 100,
+        'in_channels': 3,
+        'input_size': 32,
+        'normalize_mean': [0.5071, 0.4867, 0.4408],
+        'normalize_std': [0.2675, 0.2565, 0.2765],
+    },
+}
+
+
+def _get_dataset_config(dataset_name: str) -> dict:
+    key = (dataset_name or '').lower()
+    if key not in DATASET_PRESETS:
+        raise ValueError(f"finetune_attack 暂不支持数据集: {dataset_name}")
+    return DATASET_PRESETS[key]
 
 
 def extract_model_info_from_path(model_path):
@@ -51,7 +106,7 @@ def extract_model_info_from_path(model_path):
         
         # 从路径中提取信息
         for i, part in enumerate(path_parts):
-            if part in ['cifar10', 'cifar100', 'chestmnist']:
+            if part in ['cifar10', 'cifar100', 'chestmnist', 'pneumoniamnist', 'pathmnist']:
                 dataset = part
             elif part in ['resnet', 'alexnet', 'cnn', 'vgg', 'densenet']:
                 model_name = part
@@ -130,28 +185,120 @@ def create_safe_dataloader(dataset, batch_size, shuffle=False, num_workers=None)
             )
 
 
-def load_mnist_test_data(batch_size: int = 128, data_dir: str = './data'):
+def load_dataset_by_name(dataset_name: str, batch_size: int = 128, data_root: str = './data'):
     """
-    加载MNIST测试数据，用于自编码器性能评估
+    根据数据集名称加载训练/测试数据加载器
 
     Args:
+        dataset_name: 数据集名称
+        batch_size: 批次大小
+        data_root: 数据根目录
+
+    Returns:
+        tuple: (train_loader, test_loader)
+    """
+    dataset_key = (dataset_name or '').lower()
+    cfg = _get_dataset_config(dataset_key)
+    mean = cfg['normalize_mean']
+    std = cfg['normalize_std']
+    input_size = cfg['input_size']
+
+    if dataset_key == 'chestmnist':
+        normalize = transforms.Normalize(mean=mean, std=std)
+        transform_train = transforms.Compose([
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            normalize,
+        ])
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            normalize,
+        ])
+        dataset_path = os.path.join(data_root, 'chestmnist.npz')
+        if not os.path.exists(dataset_path):
+            raise FileNotFoundError(f"ChestMNIST数据集文件不存在: {dataset_path}")
+        train_set = LocalChestMNISTDataset(dataset_path, split='train', transform=transform_train)
+        test_set = LocalChestMNISTDataset(dataset_path, split='test', transform=transform_test)
+    elif dataset_key == 'pneumoniamnist':
+        normalize = transforms.Normalize(mean=mean, std=std)
+        transform_train = transforms.Compose([
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            normalize,
+        ])
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            normalize,
+        ])
+        dataset_path = os.path.join(data_root, 'pneumoniamnist.npz')
+        if not os.path.exists(dataset_path):
+            raise FileNotFoundError(f"PneumoniaMNIST数据集文件不存在: {dataset_path}")
+        train_set = LocalPneumoniaMNISTDataset(dataset_path, split='train', transform=transform_train)
+        test_set = LocalPneumoniaMNISTDataset(dataset_path, split='test', transform=transform_test)
+    elif dataset_key == 'pathmnist':
+        normalize = transforms.Normalize(mean=mean, std=std)
+        transform_train = transforms.Compose([
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            normalize,
+        ])
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            normalize,
+        ])
+        dataset_path = os.path.join(data_root, 'pathmnist.npz')
+        if not os.path.exists(dataset_path):
+            raise FileNotFoundError(f"PathMNIST数据集文件不存在: {dataset_path}")
+        train_set = LocalPathMNISTDataset(dataset_path, split='train', transform=transform_train)
+        test_set = LocalPathMNISTDataset(dataset_path, split='test', transform=transform_test)
+    elif dataset_key == 'cifar10':
+        transform_train = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+        ])
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+        ])
+        train_set = datasets.CIFAR10(root=data_root, train=True, download=True, transform=transform_train)
+        test_set = datasets.CIFAR10(root=data_root, train=False, download=True, transform=transform_test)
+    elif dataset_key == 'cifar100':
+        transform_train = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+        ])
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+        ])
+        train_set = datasets.CIFAR100(root=data_root, train=True, download=True, transform=transform_train)
+        test_set = datasets.CIFAR100(root=data_root, train=False, download=True, transform=transform_test)
+    else:
+        raise ValueError(f"finetune_attack 暂不支持数据集: {dataset_name}")
+
+    train_loader = create_safe_dataloader(train_set, batch_size=batch_size, shuffle=True)
+    test_loader = create_safe_dataloader(test_set, batch_size=batch_size * 2, shuffle=False)
+    print(f"✓ 已加载 {dataset_name} 数据集: 训练集 {len(train_set)} 个样本, 测试集 {len(test_set)} 个样本")
+    return train_loader, test_loader
+
+
+def load_test_data(dataset_name: str, batch_size: int = 128, data_dir: str = './data'):
+    """
+    根据数据集名称加载相应的测试数据
+
+    Args:
+        dataset_name: 数据集名称
         batch_size: 批次大小
         data_dir: 数据目录
 
     Returns:
-        MNIST测试数据加载器
+        测试数据加载器
     """
-    # 使用与train_autoencoder.py相同的数据预处理
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,))
-    ])
-
-    # 加载MNIST测试集
-    test_dataset = datasets.MNIST(data_dir, train=False, download=True, transform=transform)
-    test_loader = create_safe_dataloader(test_dataset, batch_size=batch_size, shuffle=False)
-
-    print(f"✓ 已加载MNIST测试集: {len(test_dataset)} 个样本")
+    _, test_loader = load_dataset_by_name(dataset_name, batch_size=batch_size, data_root=data_dir)
     return test_loader
 
 
@@ -165,30 +312,7 @@ def load_chestmnist_data(data_root: str = './data'):
     Returns:
         训练和测试数据加载器
     """
-    # ChestMNIST数据预处理
-    normalize = transforms.Normalize(mean=[0.5], std=[0.5])
-
-    transform_train = transforms.Compose([
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        normalize,
-    ])
-    transform_test = transforms.Compose([
-        transforms.ToTensor(),
-        normalize,
-    ])
-
-    # 加载ChestMNIST数据集
-    dataset_path = os.path.join(data_root, 'chestmnist.npz')
-    if not os.path.exists(dataset_path):
-        raise FileNotFoundError(f"ChestMNIST数据集文件不存在: {dataset_path}")
-
-    train_set = LocalChestMNISTDataset(dataset_path, split='train', transform=transform_train)
-    test_set = LocalChestMNISTDataset(dataset_path, split='test', transform=transform_test)
-
-    print(f"✓ 已加载ChestMNIST数据集 - 训练集: {len(train_set)}, 测试集: {len(test_set)}")
-
-    return train_set, test_set
+    return load_dataset_by_name('chestmnist', data_root=data_root)
 
 
 def load_cifar10_data(batch_size: int = 128, data_root: str = './data'):
@@ -202,40 +326,7 @@ def load_cifar10_data(batch_size: int = 128, data_root: str = './data'):
     Returns:
         训练和测试数据加载器
     """
-    # CIFAR-10数据预处理
-    transform_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616])
-    ])
-    
-    transform_test = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616])
-    ])
-
-    # 加载CIFAR-10数据集
-    train_dataset = datasets.CIFAR10(
-        root=data_root,
-        train=True,
-        download=True,
-        transform=transform_train
-    )
-    
-    test_dataset = datasets.CIFAR10(
-        root=data_root,
-        train=False,
-        download=True,
-        transform=transform_test
-    )
-
-    # 创建数据加载器
-    train_loader = create_safe_dataloader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = create_safe_dataloader(test_dataset, batch_size=batch_size*2, shuffle=False)
-
-    print(f"✓ 已加载CIFAR-10数据集: 训练集 {len(train_dataset)} 个样本, 测试集 {len(test_dataset)} 个样本")
-    return train_loader, test_loader
+    return load_dataset_by_name('cifar10', batch_size=batch_size, data_root=data_root)
 
 
 def load_cifar100_data(batch_size: int = 128, data_root: str = './data'):
@@ -249,40 +340,7 @@ def load_cifar100_data(batch_size: int = 128, data_root: str = './data'):
     Returns:
         训练和测试数据加载器
     """
-    # CIFAR-100数据预处理
-    transform_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5071, 0.4867, 0.4408], std=[0.2675, 0.2565, 0.2761])
-    ])
-    
-    transform_test = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5071, 0.4867, 0.4408], std=[0.2675, 0.2565, 0.2761])
-    ])
-
-    # 加载CIFAR-100数据集
-    train_dataset = datasets.CIFAR100(
-        root=data_root,
-        train=True,
-        download=True,
-        transform=transform_train
-    )
-    
-    test_dataset = datasets.CIFAR100(
-        root=data_root,
-        train=False,
-        download=True,
-        transform=transform_test
-    )
-
-    # 创建数据加载器
-    train_loader = create_safe_dataloader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = create_safe_dataloader(test_dataset, batch_size=batch_size*2, shuffle=False)
-
-    print(f"✓ 已加载CIFAR-100数据集: 训练集 {len(train_dataset)} 个样本, 测试集 {len(test_dataset)} 个样本")
-    return train_loader, test_loader
+    return load_dataset_by_name('cifar100', batch_size=batch_size, data_root=data_root)
 
 
 def load_main_task_model(model_path: str, device: str = 'cuda'):
@@ -294,11 +352,11 @@ def load_main_task_model(model_path: str, device: str = 'cuda'):
         device: 设备类型
 
     Returns:
-        加载的模型
+        tuple: (加载的模型, 模型信息字典)
     """
     if not os.path.exists(model_path):
         print(f"❌ 模型文件不存在: {model_path}")
-        return None
+        return None, None
     
     # 加载checkpoint获取参数信息
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
@@ -316,33 +374,9 @@ def load_main_task_model(model_path: str, device: str = 'cuda'):
         model_info = extract_model_info_from_path(model_path)
         model_name = model_info.get('model_name', 'resnet')  # 默认使用resnet
     
-    # 数据集预设配置（与 utils/args.py 保持一致）
-    DATASET_PRESETS = {
-        'chestmnist': {
-            'num_classes': 14,
-            'in_channels': 1,
-            'input_size': 28,
-        },
-        'cifar10': {
-            'num_classes': 10,
-            'in_channels': 3,
-            'input_size': 32,
-        },
-        'cifar100': {
-            'num_classes': 100,
-            'in_channels': 3,
-            'input_size': 32,
-        },
-        'imagenet': {
-            'num_classes': 1000,
-            'in_channels': 3,
-            'input_size': 224,
-        },
-    }
-    
-    # 根据数据集获取预设值
-    ds_key = dataset.lower()
-    preset = DATASET_PRESETS.get(ds_key, DATASET_PRESETS['chestmnist'])  # 默认使用chestmnist预设
+    # 数据集预设配置（与 finetune_attack 的 DATASET_PRESETS 保持一致）
+    ds_key = (dataset or '').lower()
+    preset = _get_dataset_config(ds_key)
     
     # 优先从arguments获取，如果为None则使用预设值
     num_classes = arguments.get('num_classes')
@@ -356,6 +390,16 @@ def load_main_task_model(model_path: str, device: str = 'cuda'):
     input_size = arguments.get('input_size')
     if input_size is None:
         input_size = preset['input_size']
+    
+    model_info = {
+        'dataset': dataset,
+        'num_classes': num_classes,
+        'in_channels': in_channels,
+        'input_size': input_size,
+        'model_name': model_name,
+        'model_path': model_path,
+        'model_filename': os.path.basename(model_path),
+    }
     
     print(f"✓ 检测到数据集: {dataset}, 类别数: {num_classes}, 输入通道: {in_channels}, 输入尺寸: {input_size}")
     print(f"✓ 模型类型: {model_name}")
@@ -377,13 +421,17 @@ def load_main_task_model(model_path: str, device: str = 'cuda'):
     model = model.to(device)
     model.train()  # 设置为训练模式，因为要进行微调
 
-    return model
+    return model, model_info
+
+
+def _resolve_task_type(dataset_name: str) -> str:
+    return _get_dataset_config(dataset_name)['task_type']
 
 
 def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.001,
                    device: str = 'cuda', eval_interval: int = 10, pcc_interval: int = 10,
-                   reconstructor=None, original_model_state=None, mnist_test_loader=None, fixed_tau=None,
-                   optimizer_type: str = 'adam', dataset_type: str = 'chestmnist'):
+                   reconstructor=None, original_model_state=None, ae_test_loader=None, fixed_tau=None,
+                   optimizer_type: str = 'adam', dataset_name: str = 'chestmnist'):
     """
     对模型进行微调训练（精简输出）
     
@@ -398,10 +446,12 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
         pcc_interval: PCC计算间隔（每几轮计算一次ΔPCC和侵权检测）
         reconstructor: 水印重建器
         original_model_state: 原始模型状态
-        mnist_test_loader: MNIST测试数据加载器
+        ae_test_loader: 用于自编码器阈值/ΔPCC评估的测试数据加载器
         fixed_tau: 固定阈值τ
+        dataset_name: 数据集名称，用于推断任务类型
     """
     from tqdm import tqdm
+    dataset_type = _resolve_task_type(dataset_name)
     # 根据optimizer_type参数选择优化器
     if optimizer_type.lower() == 'sgd':
         optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=1e-4)
@@ -409,9 +459,11 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
         optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
     
     # 根据数据集类型选择合适的损失函数
-    if dataset_type == 'chestmnist':
+    if dataset_type == 'multilabel':
         criterion = nn.BCEWithLogitsLoss()
-    else:  # cifar10 等多分类任务
+    elif dataset_type == 'binary':
+        criterion = nn.BCEWithLogitsLoss()
+    else:
         criterion = nn.CrossEntropyLoss()
     
     model_states, performance_metrics = [], []
@@ -429,9 +481,13 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
                 data, target = data.to(device), target.to(device)
                 optimizer.zero_grad()
                 
-                if dataset_type == 'chestmnist':
-                    loss = criterion(model(data), target.float())
-                else:  # 多分类任务
+                if dataset_type in ('multilabel', 'binary'):
+                    outputs = model(data)
+                    if outputs.shape[1] == 1:
+                        loss = nn.BCEWithLogitsLoss()(outputs, target.float())
+                    else:
+                        loss = nn.CrossEntropyLoss()(outputs, target.long())
+                else:
                     loss = criterion(model(data), target.long())
                 
                 loss.backward()
@@ -454,11 +510,15 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
                 data, target = data.to(device), target.to(device)
                 output = model(data)
                 
-                if dataset_type == 'chestmnist':
-                    test_loss += criterion(output, target.float()).item()
-                    all_predictions.append(torch.sigmoid(output).cpu().numpy())
-                else:  # 多分类任务
-                    test_loss += criterion(output, target.long()).item()
+                if dataset_type in ('multilabel', 'binary'):
+                    if output.shape[1] == 1:
+                        test_loss += nn.BCEWithLogitsLoss()(output, target.float()).item()
+                        all_predictions.append(torch.sigmoid(output).cpu().numpy())
+                    else:
+                        test_loss += nn.CrossEntropyLoss()(output, target.long()).item()
+                        all_predictions.append(torch.softmax(output, dim=1).cpu().numpy())
+                else:
+                    test_loss += nn.CrossEntropyLoss()(output, target.long()).item()
                     all_predictions.append(torch.softmax(output, dim=1).cpu().numpy())
                 
                 all_targets.append(target.cpu().numpy())
@@ -468,38 +528,48 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
         all_targets = np.concatenate(all_targets, axis=0)
 
         # 计算AUC和准确率（根据数据集类型）
-        if dataset_type == 'chestmnist':
-            # 多标签二分类任务
+        if dataset_type in ('multilabel', 'binary'):
+            # 二分类/多标签任务
             try:
                 from sklearn.metrics import roc_auc_score
-                auc_scores = [
-                    roc_auc_score(all_targets[:, i], all_predictions[:, i])
-                    for i in range(all_targets.shape[1])
-                    if len(np.unique(all_targets[:, i])) > 1
-                ]
-                mean_auc = np.mean(auc_scores) if auc_scores else 0.0
-            except ImportError:
+                if dataset_type == 'multilabel' and all_targets.ndim == 2 and all_targets.shape[1] > 1:
+                    auc_scores = [
+                        roc_auc_score(all_targets[:, i], all_predictions[:, i])
+                        for i in range(all_targets.shape[1])
+                        if len(np.unique(all_targets[:, i])) > 1
+                    ]
+                    mean_auc = np.mean(auc_scores) if auc_scores else 0.0
+                else:
+                    if all_predictions.ndim == 2 and all_predictions.shape[1] == 2:
+                        mean_auc = roc_auc_score(all_targets, all_predictions[:, 1])
+                    else:
+                        mean_auc = roc_auc_score(all_targets, all_predictions)
+            except Exception:
                 mean_auc = 0.0
             
-            # 计算准确率（多标签）
-            pred_binary = (all_predictions > 0.5).astype(int)
-            accuracy = np.mean((pred_binary == all_targets).astype(float))
+            if dataset_type == 'multilabel':
+                pred_binary = (all_predictions > 0.5).astype(int)
+                accuracy = np.mean((pred_binary == all_targets).astype(float))
+            else:
+                if all_predictions.ndim == 2 and all_predictions.shape[1] > 1:
+                    pred_classes = np.argmax(all_predictions, axis=1)
+                    accuracy = np.mean((pred_classes == all_targets).astype(float))
+                else:
+                    accuracy = np.mean(((all_predictions > 0.5).astype(int) == all_targets).astype(float))
         else:
             # 多分类任务
             try:
                 from sklearn.metrics import roc_auc_score
-                # 使用one-vs-rest策略计算多分类AUC
                 mean_auc = roc_auc_score(all_targets, all_predictions, multi_class='ovr', average='macro')
-            except ImportError:
+            except Exception:
                 mean_auc = 0.0
             
-            # 计算准确率（多分类）
             pred_classes = np.argmax(all_predictions, axis=1)
             accuracy = np.mean((pred_classes == all_targets).astype(float))
 
         # 打印基本指标（每轮都显示）
         print(f"\n=== 第 {epoch+1} 轮评估 ===")
-        if dataset_type == 'chestmnist':
+        if dataset_type in ('multilabel', 'binary'):
             print(f"训练损失: {avg_loss:.4f} | 测试损失: {avg_test_loss:.4f} | "
                   f"AUC: {mean_auc:.4f} [主要] | 准确率: {accuracy:.2%} [参考]")
         else:
@@ -513,12 +583,12 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
             # 保存状态
             model_states.append(copy.deepcopy(model.state_dict()))
             
-            if reconstructor and original_model_state and mnist_test_loader:
+            if reconstructor and original_model_state and ae_test_loader:
                 # 使用torch.no_grad()减少内存使用
                 with torch.no_grad():
                     delta_pcc_result = evaluate_delta_pcc(
                         original_model_state, model_states[-1], reconstructor,
-                        mnist_test_loader, device, perf_fail_ratio=0.1, fixed_tau=fixed_tau, model=model
+                        ae_test_loader, device, perf_fail_ratio=0.1, fixed_tau=fixed_tau, model=model
                     )
             
             # 打印ΔPCC结果
@@ -582,21 +652,12 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
 
 def evaluate_watermark_integrity(model_state_dict, reconstructor, model=None):
     """
-    评估水印完整性
-
-    Args:
-        model_state_dict: 模型状态字典
-        reconstructor: 水印重建器
-        model: 模型对象（可选），用于确保参数顺序一致性
-
-    Returns:
-        水印完整性评估结果
+    评估水印完整性（单客户端模式）
     """
     try:
-        # 从模型状态字典重建自编码器
-        reconstructed_autoencoder = reconstructor.reconstruct_autoencoder_from_all_clients(model_state_dict)
+        watermark_values = reconstructor.extract_watermark_parameters(model_state_dict, check_pruning=True)
 
-        if reconstructed_autoencoder is None:
+        if len(watermark_values) == 0:
             return {
                 'watermark_integrity': 0.0,
                 'reconstruction_success': False,
@@ -604,31 +665,9 @@ def evaluate_watermark_integrity(model_state_dict, reconstructor, model=None):
                 'damaged_watermark_params': 0
             }
 
-        # 计算水印参数统计
-        key_manager = reconstructor.key_manager
-        all_client_ids = key_manager.list_clients()
-
-        total_watermark_params = 0
-        damaged_watermark_params = 0
-
-        for cid in all_client_ids:
-            try:
-                # 提取水印参数（传入模型对象以确保参数顺序一致）
-                watermark_values = key_manager.extract_watermark(model_state_dict, cid, check_pruning=True, model=model)
-                total_watermark_params += len(watermark_values)
-
-                # 检查被破坏的水印参数（完全等于0的参数）
-                damaged_count = (watermark_values == 0.0).sum().item()
-                damaged_watermark_params += damaged_count
-
-            except Exception as e:
-                pass  # 静默处理错误
-
-        # 计算水印完整性
-        if total_watermark_params > 0:
-            watermark_integrity = 1.0 - (damaged_watermark_params / total_watermark_params)
-        else:
-            watermark_integrity = 0.0
+        total_watermark_params = len(watermark_values)
+        damaged_watermark_params = (watermark_values == 0.0).sum().item()
+        watermark_integrity = 1.0 - (damaged_watermark_params / total_watermark_params) if total_watermark_params > 0 else 0.0
 
         return {
             'watermark_integrity': watermark_integrity,
@@ -740,19 +779,19 @@ def main():
     
     # 解析微调攻击特定的命令行参数
     parser = argparse.ArgumentParser(description='微调攻击实验')
-    parser.add_argument('--model_path', type=str, 
-                       default='./save/alexnet/chestmnist/202605211009_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_10_fra_1.0000_auc_0.7730_r1_r2_r3_enhanced.pkl',
+    parser.add_argument('--model_path', type=str,
+                       default='./save/resnet/pathmnist/202607092227_Dp_0.1_wm_enhanced_ep_0.8857.pkl',
                        help='模型文件路径')
-    parser.add_argument('--model_type', type=str, default='alexnet',
+    parser.add_argument('--model_type', type=str, default='resnet',
                        choices=['resnet', 'alexnet'],
                        help='模型类型')
-    parser.add_argument('--client_num', type=int, default=10,
-                       help='客户端数量')
-    parser.add_argument('--dataset', type=str, default='chestmnist',
-                       choices=['cifar10', 'cifar100', 'chestmnist'],
+    parser.add_argument('--dataset', type=str, default='pathmnist',
+                       choices=['cifar10', 'cifar100', 'chestmnist', 'pneumoniamnist', 'pathmnist'],
                        help='数据集类型')
     parser.add_argument('--key_matrix_dir', type=str, default='./save/key_matrix',
                        help='密钥矩阵基础目录')
+    parser.add_argument('--key_matrix_path', type=str, default=None,
+                       help='密钥矩阵完整路径')
     parser.add_argument('--autoencoder_dir', type=str, default='./save/autoencoder',
                        help='自编码器目录')
     parser.add_argument('--optimizer', type=str, default='sgd', choices=['sgd', 'adam'],
@@ -771,7 +810,6 @@ def main():
     args = argparse.Namespace()
     args.model_path = cmd_args.model_path
     args.model_type = cmd_args.model_type
-    args.client_num = cmd_args.client_num
     args.key_matrix_dir = cmd_args.key_matrix_dir
     args.autoencoder_dir = cmd_args.autoencoder_dir
     args.finetune_epochs = cmd_args.finetune_epochs
@@ -780,18 +818,18 @@ def main():
     args.optimizer = cmd_args.optimizer if cmd_args.optimizer is not None else base_args.optim
     args.dataset = cmd_args.dataset
     
-    # 使用key_matrix_utils生成正确的密钥矩阵路径
-    from utils.key_matrix_utils import get_key_matrix_path
-    
     # 从模型路径自动推断正确的模型类型
     model_info = extract_model_info_from_path(args.model_path)
     inferred_model_type = model_info.get('model_name', cmd_args.model_type)
-    
+
     print(f"🔍 从模型路径推断的模型类型: {inferred_model_type}")
     print(f"   原指定的模型类型: {cmd_args.model_type}")
-    
-    # 使用推断的模型类型
-    args.key_matrix_path = get_key_matrix_path(cmd_args.key_matrix_dir, inferred_model_type, cmd_args.client_num)
+
+    # 优先使用直接指定的路径，否则使用默认 key_matrix_path
+    if cmd_args.key_matrix_path:
+        args.key_matrix_path = cmd_args.key_matrix_path
+    else:
+        args.key_matrix_path = os.path.join(cmd_args.key_matrix_dir, inferred_model_type).replace('\\', '/')
     
     # 从args.py获取其他必要参数
     args.data_root = base_args.data_root
@@ -820,7 +858,6 @@ def main():
     print(f"  - 批次大小: {batch_size}")
     print(f"  - 优化器: {optimizer_type}")
     print(f"  - 模型类型: {args.model_type}")
-    print(f"  - 客户端数量: {args.client_num}")
     print(f"  - 数据集: {args.dataset}")
     print(f"  - 密钥矩阵路径: {key_matrix_dir}")
     print(f"  - 自编码器路径: {autoencoder_dir}")
@@ -828,32 +865,15 @@ def main():
 
     # 加载数据
     print("加载数据...")
-    # 使用命令行参数指定的数据集
     dataset = args.dataset
-    dataset_type = dataset  # 用于损失函数选择
-    
-    # 根据数据集类型加载相应的数据
-    if dataset == 'cifar10':
-        train_loader, test_loader = load_cifar10_data(batch_size=batch_size, data_root=args.data_root)
-        mnist_test_loader = load_mnist_test_data(batch_size=128, data_dir=args.data_root)
-    elif dataset == 'cifar100':
-        print("使用CIFAR-100数据集进行微调攻击实验")
-        train_loader, test_loader = load_cifar100_data(batch_size=batch_size, data_root=args.data_root)
-        dataset_type = 'cifar100'
-        mnist_test_loader = load_mnist_test_data(batch_size=128, data_dir=args.data_root)
-    elif dataset == 'chestmnist':
-        train_set, test_set = load_chestmnist_data(data_root=args.data_root)
-        train_loader = create_safe_dataloader(train_set, batch_size=batch_size, shuffle=True)
-        test_loader = create_safe_dataloader(test_set, batch_size=batch_size, shuffle=False)
-        mnist_test_loader = load_mnist_test_data(batch_size=128, data_dir=args.data_root)
-    else:
-        print(f"❌ 不支持的数据集: {dataset}")
-        return
+    dataset_type = _resolve_task_type(dataset)
+    train_loader, test_loader = load_dataset_by_name(dataset, batch_size=batch_size, data_root=args.data_root)
+    ae_test_loader = test_loader
 
     # 加载主任务模型
     print("加载主任务模型...")
-    model = load_main_task_model(model_path, device)
-    if model is None:
+    model, model_info = load_main_task_model(model_path, device)
+    if model is None or model_info is None:
         print("❌ 主任务模型加载失败")
         return
 
@@ -869,8 +889,8 @@ def main():
     # 预计算固定阈值τ，避免重复计算
     print("预计算固定阈值τ...")
     fixed_tau = None
-    if reconstructor and original_model_state and mnist_test_loader:
-        fixed_tau = calculate_fixed_tau(original_model_state, reconstructor, mnist_test_loader, device, perf_fail_ratio=0.05, model=model)
+    if reconstructor and original_model_state and ae_test_loader:
+        fixed_tau = calculate_fixed_tau(original_model_state, reconstructor, ae_test_loader, device, perf_fail_ratio=0.05, model=model)
         if fixed_tau is None:
             print("❌ 无法计算固定阈值，将使用动态阈值")
         else:
@@ -887,12 +907,10 @@ def main():
     model.eval()
     test_loss, all_predictions, all_targets = 0.0, [], []
     
-    # 根据数据集类型选择合适的损失函数
-    if dataset_type == 'chestmnist':
-        criterion = nn.BCEWithLogitsLoss()
+    # 根据任务类型选择合适的激活函数
+    if dataset_type in ('multilabel', 'binary'):
         activation_fn = torch.sigmoid
-    else:  # cifar10, cifar100, mnist等多分类任务
-        criterion = nn.CrossEntropyLoss()
+    else:
         activation_fn = torch.softmax
     
     # 添加进度提示
@@ -903,12 +921,16 @@ def main():
             data, target = data.to(device), target.to(device)
             output = model(data)
             
-            if dataset_type == 'chestmnist':
-                test_loss += criterion(output, target.float()).item()
-                all_predictions.append(activation_fn(output).cpu().numpy())
-            else:  # 多分类任务
-                test_loss += criterion(output, target.long()).item()
-                all_predictions.append(activation_fn(output, dim=1).cpu().numpy())
+            if dataset_type in ('multilabel', 'binary'):
+                if output.shape[1] == 1:
+                    test_loss += nn.BCEWithLogitsLoss()(output, target.float()).item()
+                    all_predictions.append(torch.sigmoid(output).cpu().numpy())
+                else:
+                    test_loss += nn.CrossEntropyLoss()(output, target.long()).item()
+                    all_predictions.append(torch.softmax(output, dim=1).cpu().numpy())
+            else:
+                test_loss += nn.CrossEntropyLoss()(output, target.long()).item()
+                all_predictions.append(torch.softmax(output, dim=1).cpu().numpy())
             
             all_targets.append(target.cpu().numpy())
 
@@ -916,43 +938,51 @@ def main():
     all_predictions = np.concatenate(all_predictions, axis=0)
     all_targets = np.concatenate(all_targets, axis=0)
 
-    # 计算AUC和准确率（根据数据集类型）
-    if dataset_type == 'chestmnist':
-        # 多标签二分类任务
+    # 计算AUC和准确率（根据任务类型）
+    if dataset_type in ('multilabel', 'binary'):
         try:
             from sklearn.metrics import roc_auc_score
-            auc_scores = [
-                roc_auc_score(all_targets[:, i], all_predictions[:, i])
-                for i in range(all_targets.shape[1])
-                if len(np.unique(all_targets[:, i])) > 1
-            ]
-            mean_auc = np.mean(auc_scores) if auc_scores else 0.0
-        except ImportError:
+            if dataset_type == 'multilabel' and all_targets.ndim == 2 and all_targets.shape[1] > 1:
+                auc_scores = [
+                    roc_auc_score(all_targets[:, i], all_predictions[:, i])
+                    for i in range(all_targets.shape[1])
+                    if len(np.unique(all_targets[:, i])) > 1
+                ]
+                mean_auc = np.mean(auc_scores) if auc_scores else 0.0
+            else:
+                mean_auc = roc_auc_score(
+                    all_targets,
+                    all_predictions[:, 1] if all_predictions.ndim == 2 and all_predictions.shape[1] == 2 else all_predictions
+                )
+        except Exception:
             mean_auc = 0.0
         
-        # 计算准确率（多标签）
-        pred_binary = (all_predictions > 0.5).astype(int)
-        accuracy = np.mean((pred_binary == all_targets).astype(float))
+        if dataset_type == 'multilabel':
+            pred_binary = (all_predictions > 0.5).astype(int)
+            accuracy = np.mean((pred_binary == all_targets).astype(float))
+        else:
+            if all_predictions.ndim == 2 and all_predictions.shape[1] > 1:
+                pred_classes = np.argmax(all_predictions, axis=1)
+                accuracy = np.mean((pred_classes == all_targets).astype(float))
+            else:
+                accuracy = np.mean(((all_predictions > 0.5).astype(int) == all_targets).astype(float))
     else:
-        # 多分类任务
         try:
             from sklearn.metrics import roc_auc_score
-            # 使用one-vs-rest策略计算多分类AUC
             mean_auc = roc_auc_score(all_targets, all_predictions, multi_class='ovr', average='macro')
-        except ImportError:
+        except Exception:
             mean_auc = 0.0
         
-        # 计算准确率（多分类）
         pred_classes = np.argmax(all_predictions, axis=1)
         accuracy = np.mean((pred_classes == all_targets).astype(float))
     
     print(f"测试损失: {avg_test_loss:.4f} | AUC: {mean_auc:.4f} | 准确率: {accuracy:.2%}")
     
-    # 根据数据集类型显示指标重要性
-    if dataset_type == 'chestmnist':
-        print(f"📊 ChestMNIST多标签任务 - AUC为主要指标，准确率为参考指标")
+    # 根据任务类型显示指标重要性
+    if dataset_type in ('multilabel', 'binary'):
+        print(f"📊 {dataset.upper()}任务 - AUC为主要指标，准确率为参考指标")
     else:
-        print(f"📊 {dataset_type.upper()}多分类任务 - 准确率为主要指标，AUC为参考指标")
+        print(f"📊 {dataset.upper()}多分类任务 - 准确率为主要指标，AUC为参考指标")
     
     # ==================== 水印检测容忍度设置 ====================
     PERF_FAIL_RATIO = 0.5
@@ -962,7 +992,7 @@ def main():
     # 进行ΔPCC评估
     delta_pcc_result_0 = evaluate_delta_pcc(
         original_model_state, original_model_state, reconstructor,
-        mnist_test_loader, device, perf_fail_ratio=PERF_FAIL_RATIO, fixed_tau=fixed_tau
+        ae_test_loader, device, perf_fail_ratio=PERF_FAIL_RATIO, fixed_tau=fixed_tau
     )
     
     # 创建第0轮的结果记录
@@ -984,8 +1014,8 @@ def main():
         epochs=finetune_epochs, lr=learning_rate,
         device=device, eval_interval=eval_interval, pcc_interval=pcc_interval,
         reconstructor=reconstructor, original_model_state=original_model_state,
-        mnist_test_loader=mnist_test_loader, fixed_tau=fixed_tau,
-        optimizer_type=optimizer_type, dataset_type=dataset_type
+        ae_test_loader=ae_test_loader, fixed_tau=fixed_tau,
+        optimizer_type=optimizer_type, dataset_name=dataset
     )
 
     # 微调训练已完成，ΔPCC和侵权判断已在训练过程中评估
@@ -1006,8 +1036,8 @@ def main():
     print("微调攻击实验总结")
     print("=" * 80)
     
-    # 根据数据集类型调整显示格式
-    if dataset_type == 'chestmnist':
+    # 根据任务类型调整显示格式
+    if dataset_type in ('multilabel', 'binary'):
         print(f"{'轮次':<4} {'训练损失':<10} {'测试损失':<10} {'测试AUC':<10} {'测试准确率%':<8} {'ΔPCC':<8} {'侵权判断':<8}")
         print("-" * 80)
         
@@ -1018,12 +1048,12 @@ def main():
             print(f"{result['epoch']:>3}  "
                   f"{result['train_loss']:>8.4f}  "
                   f"{result['test_loss']:>8.4f}  "
-                  f"{result['test_auc']:>8.4f}  "  # AUC更宽显示
-                  f"{result['test_accuracy']:>6.2%}  "  # 准确率稍窄
+                  f"{result['test_auc']:>8.4f}  "
+                  f"{result['test_accuracy']:>6.2%}  "
                   f"{delta_pcc_str:>10}  "
                   f"{infringement_str:>6}")
     else:
-        # CIFAR10等多分类任务
+        # 多分类任务
         print(f"{'轮次':<4} {'训练损失':<10} {'测试损失':<10} {'测试AUC':<8} {'测试准确率%':<10} {'ΔPCC':<8} {'侵权判断':<8}")
         print("-" * 80)
         
@@ -1050,7 +1080,7 @@ def main():
         final_acc = results[-1]['test_accuracy']
         acc_change = final_acc - initial_acc
 
-        if dataset_type == 'chestmnist':
+        if dataset_type in ('multilabel', 'binary'):
             print(f"测试AUC变化: {initial_auc:.4f} → {final_auc:.4f} (变化: {auc_change:+.4f}) [主要指标]")
             print(f"测试准确率变化: {initial_acc:.2%} → {final_acc:.2%} (变化: {acc_change:+.2%}) [参考指标]")
         else:

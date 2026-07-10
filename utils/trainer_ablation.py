@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from models.light_autoencoder import LightAutoencoder
 from models.losses.multi_loss import FocalLoss
 from utils.key_matrix_utils import KeyMatrixManager
+from utils.metrics_utils import is_softmax_task
 from utils.trainer_private_enhanced import TesterPrivate
 
 
@@ -15,12 +16,12 @@ def accuracy(output, target):
     with torch.no_grad():
         pred_prob = torch.sigmoid(output)
         pred_binary = pred_prob > 0.5
-        
+
         # 标签级准确率
         label_correct = (pred_binary == target).float().mean()
         # 样本级准确率
         sample_correct = torch.all(pred_binary == target, dim=1).float().mean()
-        
+
         return [label_correct * 100.0, sample_correct * 100.0]
 
 
@@ -52,11 +53,11 @@ class TrainerAblation:
     def get_loss_function(self, pred, target):
         """
         计算损失函数，根据任务类型分支
-        multiclass 使用交叉熵，multi-label/binary 使用 FocalLoss（ChestMNIST）
-        
+        multiclass / binary 使用交叉熵，multi-label 使用 FocalLoss（ChestMNIST）
+
         注意：消融实验只使用主任务损失，不使用正则项
         """
-        if self.args is not None and getattr(self.args, 'task_type', 'multiclass') == 'multiclass':
+        if is_softmax_task(self.args):
             return F.cross_entropy(pred, target)
         
         # 对于ChestMNIST等multi-label任务，使用FocalLoss
@@ -78,10 +79,10 @@ class TrainerAblation:
 
     def _compute_accuracy(self, pred, target):
         """根据任务类型计算准确率（百分比）"""
-        if self.args is not None and getattr(self.args, 'task_type', 'multiclass') == 'multiclass':
+        if is_softmax_task(self.args):
             preds_top1 = pred.argmax(dim=1)
             return (preds_top1 == target).float().mean() * 100.0
-        # multilabel/binary 使用原有accuracy()
+        # multilabel 使用原有accuracy()
         return accuracy(pred, target)[0]
 
     def local_update(self, dataloader, local_ep, lr, client_id, current_epoch=0, total_epochs=100):
@@ -164,8 +165,7 @@ class TrainerAblation:
                     try:
                         # 初始化KeyMatrixManager，支持水印缩放
                         self._key_manager = KeyMatrixManager(
-                            self.args.key_matrix_path,
-                            args=self.args
+                            self.args.key_matrix_path
                         )
                     except Exception as e:
                         print(f"[Watermark Warning] Failed to load KeyMatrixManager: {e}. Fallback to random positions.")

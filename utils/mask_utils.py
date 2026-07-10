@@ -71,30 +71,14 @@ class MaskManager:
             # 重置编码器掩码
             self.encoder_mask.zero_()
             
-            # 获取所有客户端ID
-            if client_id is not None:
-                client_ids = [client_id]
-            else:
-                client_ids = self.key_matrix_manager.list_clients()
-            
-            # 加载所有客户端的位置信息并合并
-            all_positions = set()
-            for cid in client_ids:
-                try:
-                    positions = self.key_matrix_manager.load_positions(cid)
-                    all_positions.update(positions)
-                except Exception as e:
-                    # 静默处理错误
-                    continue
+            # 单机模式：直接加载位置信息
+            positions = self.key_matrix_manager.load_positions()
             
             # 更新编码器掩码（将局部索引转换为全局索引）
-            for param_name, local_idx in all_positions:
-                # 检查参数是否在位置映射中
+            for param_name, local_idx in positions:
                 if param_name in self.param_positions:
                     start_idx, end_idx = self.param_positions[param_name]
-                    # 将局部索引转换为全局索引
                     global_idx = start_idx + local_idx
-                    # 验证全局索引范围
                     if global_idx >= 0 and global_idx < len(self.encoder_mask):
                         self.encoder_mask[global_idx] = 1.0
 
@@ -193,10 +177,10 @@ def create_mask_manager(model, key_matrix_path: str, args=None) -> MaskManager:
         SystemExit: 当密钥矩阵管理器创建失败时，程序将退出
     """
     try:
-        key_manager = KeyMatrixManager(key_matrix_path, args)
+        key_manager = KeyMatrixManager(key_matrix_path)
         return MaskManager(model, key_manager)
     except Exception as e:
-        print(f"❌ 创建密钥矩阵管理器失败: {e}")
+        print(f"[ERROR] 创建密钥矩阵管理器失败: {e}")
         print(f"   密钥矩阵路径: {key_matrix_path}")
         print("   程序将退出，请检查密钥矩阵文件是否存在且格式正确")
         import sys

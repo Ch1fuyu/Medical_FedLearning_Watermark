@@ -40,7 +40,6 @@ def get_baseline_config():
     config.epochs = 150  # 全局训练轮次
     config.local_ep = 2  # 每个客户端的本地训练轮次
     config.batch_size = 128  # 批次大小
-    config.client_num = 10  # 客户端数量
     config.frac = 1.0  # 参与训练的客户端比例 (1.0 = 100%)
     config.iid = True  # IID数据分布
     
@@ -134,7 +133,6 @@ class BaselineFederatedLearning(Experiment):
         logging.info("🚀 启动基准联邦学习训练")
         logging.info(f"📊 数据集: {args.dataset}")
         logging.info(f"🏗️ 模型: {args.model_name}")
-        logging.info(f"👥 客户端数量: {args.client_num}")
         logging.info(f"📈 训练轮次: {args.epochs}")
         logging.info(f"🔒 差分隐私: {'启用' if args.dp else '禁用'}")
         if args.dp:
@@ -168,7 +166,7 @@ class BaselineFederatedLearning(Experiment):
         logging.info("🎯 开始基准联邦学习训练...")
         
         # 获取数据
-        train_data, test_data, user_groups = get_data(self.args.dataset, self.data_root, self.iid, self.client_num)
+        train_data, test_data, user_groups = get_data(self.args.dataset, self.data_root, self.iid)
         logging.info(f"📊 数据加载完成: 训练集 {len(train_data)} 样本, 测试集 {len(test_data)} 样本")
         
         # 获取全局模型
@@ -206,8 +204,8 @@ class BaselineFederatedLearning(Experiment):
             logging.info(f"\n🔄 轮次 {epoch + 1}/{self.args.epochs}")
             
             # 选择参与训练的客户端
-            m = max(int(self.args.frac * self.args.client_num), 1)
-            idxs_users = np.random.choice(range(self.args.client_num), m, replace=False)
+            m = max(int(self.args.frac * len(user_groups)), 1)
+            idxs_users = np.random.choice(range(len(user_groups)), m, replace=False)
             
             # 全局模型参数
             global_weights = global_model.state_dict()
@@ -402,7 +400,6 @@ def main():
     logging.info(f"  🔹 联邦学习参数:")
     logging.info(f"     - 全局训练轮次: {args.epochs}")
     logging.info(f"     - 本地训练轮次: {args.local_ep}")
-    logging.info(f"     - 客户端数量: {args.client_num}")
     logging.info(f"     - 参与比例: {args.frac * 100:.0f}%")
     logging.info(f"     - 数据分布: {'IID' if args.iid else 'Non-IID'}")
     logging.info(f"     - Early Stopping耐心值: {args.patience} {'(已启用)' if args.patience > 0 else '(已禁用)'}")

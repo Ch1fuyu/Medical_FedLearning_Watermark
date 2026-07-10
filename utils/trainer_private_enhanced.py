@@ -3,11 +3,17 @@ import os
 import numpy as np
 import torch
 import torch.nn.functional as F
-from sklearn.metrics import roc_auc_score
 
 from models.light_autoencoder import LightAutoencoder
 from models.losses.multi_loss import MultiLoss, FocalLoss
 from utils.key_matrix_utils import KeyMatrixManager
+from utils.metrics_utils import (
+    compute_accuracy,
+    compute_auc,
+    compute_loss,
+    is_softmax_task,
+    normalize_targets,
+)
 
 
 def accuracy(output, target):
@@ -44,10 +50,15 @@ class TesterPrivate:
         if self.loss_fn is not None:
             return self.loss_fn(pred, target)
 
-        # 默认使用标准损失函数
-        if self.args is not None and getattr(self.args, 'task_type', 'multiclass') == 'multiclass':
-            return F.cross_entropy(pred, target, reduction='mean')
-        return F.binary_cross_entropy_with_logits(pred, target.float(), reduction='mean')
+        if self.args is not None and not is_softmax_task(self.args):
+            return F.binary_cross_entropy_with_logits(
+                pred, target.float(), reduction="mean"
+            )
+        return compute_loss(
+            pred, target,
+            getattr(self.args, "task_type", "multiclass") if self.args else "multiclass",
+            reduction="mean",
+        )
 
     def _compute_loss_sum(self, pred, target):
         """计算损失的 sum 版本，用于累积"""
@@ -59,9 +70,15 @@ class TesterPrivate:
         if self.loss_fn is not None:
             return self.loss_fn(pred, target) * target.size(0)
 
-        if self.args is not None and getattr(self.args, 'task_type', 'multiclass') == 'multiclass':
-            return F.cross_entropy(pred, target, reduction='sum')
-        return F.binary_cross_entropy_with_logits(pred, target.float(), reduction='sum')
+        if self.args is not None and not is_softmax_task(self.args):
+            return F.binary_cross_entropy_with_logits(
+                pred, target.float(), reduction="sum"
+            )
+        return compute_loss(
+            pred, target,
+            getattr(self.args, "task_type", "multiclass") if self.args else "multiclass",
+            reduction="sum",
+        )
 
     def test(self, dataloader):
         """测试模型性能"""
@@ -84,28 +101,28 @@ class TesterPrivate:
 
                 pred = self.model(data)
 
-                if self.args is not None and getattr(self.args, 'task_type', 'multiclass') == 'multiclass':
+                if is_softmax_task(self.args):
                     loss_meter += self._compute_loss_sum(pred, target).item()
-                    # top-1 accuracy
-                    preds_top1 = pred.argmax(dim=1)
-                    label_acc = (preds_top1 == target).float().mean() * 100.0
-                    sample_acc = label_acc
-                    acc_meter += label_acc.item() * data.size(0) / 100.0
-                    sample_acc_meter += sample_acc.item() * data.size(0) / 100.0
+                    label_acc, sample_acc = compute_accuracy(
+                        pred, target, getattr(self.args, "task_type", "multiclass")
+                    )
+                    acc_meter += label_acc * data.size(0) / 100.0
+                    sample_acc_meter += sample_acc * data.size(0) / 100.0
                     probs = torch.softmax(pred, dim=1)
                     if self.verbose and run_count == 0:
+                        preds_top1 = pred.argmax(dim=1)
                         correct_first = (preds_top1 == target).sum().item()
                         print(f"First batch - Top1 Acc: {label_acc:.4f}% ({correct_first}/{data.size(0)})")
                     all_y_true.append(target.detach().cpu().numpy())
                     all_y_score.append(probs.detach().cpu().numpy())
                 else:
-                    # multilabel/binary
+                    # multilabel
                     loss_meter += self._compute_loss_sum(pred, target).item()
-                    acc_results = accuracy(pred, target)
-                    label_acc = acc_results[0]
-                    sample_acc = acc_results[1]
-                    acc_meter += label_acc.item() * data.size(0) / 100.0
-                    sample_acc_meter += sample_acc.item() * data.size(0) / 100.0
+                    label_acc, sample_acc = compute_accuracy(
+                        pred, target, "multilabel"
+                    )
+                    acc_meter += label_acc * data.size(0) / 100.0
+                    sample_acc_meter += sample_acc * data.size(0) / 100.0
                     pred_prob = torch.sigmoid(pred)
                     if self.verbose and run_count == 0:
                         pred_normal = torch.all(pred_prob < 0.5, dim=1).sum().item()
@@ -121,36 +138,15 @@ class TesterPrivate:
         if hasattr(acc_meter, 'item'):
             acc_meter = acc_meter.item()
 
-        # 计算AUC
+        # 计算AUC（统一通过 utils.metrics_utils）
         auc_val = 0.0
         if len(all_y_true) > 0:
-            try:
-                y_true_all = np.concatenate(all_y_true, axis=0)
-                y_score_all = np.concatenate(all_y_score, axis=0)
-                if self.args is not None and getattr(self.args, 'task_type', 'multiclass') == 'multiclass':
-                    # 使用一对多宏平均AUC，如果标签单一或异常则回退0.0
-                    try:
-                        auc_val = roc_auc_score(y_true_all, y_score_all, multi_class='ovr', average='macro')
-                    except Exception:
-                        auc_val = 0.0
-                else:
-                    valid_classes = []
-                    for i in range(y_true_all.shape[1]):
-                        if len(np.unique(y_true_all[:, i])) > 1:
-                            valid_classes.append(i)
-                    if len(valid_classes) > 0:
-                        auc_scores = []
-                        for i in valid_classes:
-                            try:
-                                auc_i = roc_auc_score(y_true_all[:, i], y_score_all[:, i])
-                                auc_scores.append(auc_i)
-                            except Exception:
-                                continue
-                        if len(auc_scores) > 0:
-                            auc_val = np.mean(auc_scores)
-            except Exception as e:
-                print(f"AUC计算错误: {e}")
-                auc_val = 0.0
+            task_type = (
+                getattr(self.args, "task_type", "multiclass")
+                if self.args is not None
+                else "multiclass"
+            )
+            auc_val = compute_auc(all_y_true, all_y_score, task_type)
 
         return loss_meter, acc_meter, float(auc_val), sample_acc_meter
 
@@ -191,11 +187,11 @@ class TrainerPrivateEnhanced:
         self.tester = TesterPrivate(model, device, args=args, loss_fn=self.focal_loss, get_loss_fn=self.get_loss_function)
         
         # 初始化掩码管理器
-        if args and getattr(args, 'use_key_matrix', False):
+        if args and getattr(args, 'enable_watermark', True):
             from utils.mask_utils import create_mask_manager
             # 在失败时会直接退出程序
             self.mask_manager = create_mask_manager(model, args.key_matrix_path, args)
-            # 初始化时更新所有客户端的编码器掩码
+            # 初始化时更新编码器掩码
             if self.mask_manager:
                 self.mask_manager.update_encoder_mask()
         
@@ -212,35 +208,35 @@ class TrainerPrivateEnhanced:
 
     def get_loss_function(self, pred, target):
         """计算损失函数，根据任务类型分支；
-        multiclass 使用交叉熵，multi-label/binary 使用 FocalLoss（ChestMNIST）。
+        multiclass / binary 使用交叉熵，multi-label 使用 FocalLoss（ChestMNIST）。
         """
-        if self.args is not None and getattr(self.args, 'task_type', 'multiclass') == 'multiclass':
+        if is_softmax_task(self.args):
             return F.cross_entropy(pred, target)
-        
+
         # 对于ChestMNIST等multi-label任务，使用FocalLoss
         if self.args is None or not self.args.class_weights:
             return self.focal_loss(pred, target)
-        
+
         pos_counts = target.sum(dim=0)
         neg_counts = target.shape[0] - pos_counts
         pos_weights = torch.zeros_like(pos_counts, dtype=torch.float32, device=pred.device)
-        
+
         for i in range(len(pos_counts)):
             if pos_counts[i] > 0 and neg_counts[i] > 0:
                 pos_weights[i] = (neg_counts[i] / pos_counts[i]) * self.args.pos_weight_factor
             else:
                 pos_weights[i] = 1.0
-        
+
         pos_weights = torch.clamp(pos_weights, min=0.1, max=10.0)
         # 仍然使用加权BCEWithLogits作为备选
         return F.binary_cross_entropy_with_logits(pred, target.float(), pos_weight=pos_weights)
 
     def _compute_accuracy(self, pred, target):
         """根据任务类型计算准确率（百分比）。"""
-        if self.args is not None and getattr(self.args, 'task_type', 'multiclass') == 'multiclass':
+        if is_softmax_task(self.args):
             preds_top1 = pred.argmax(dim=1)
             return (preds_top1 == target).float().mean() * 100.0
-        # multilabel/binary 使用原有accuracy()
+        # multilabel 使用原有accuracy()
         return accuracy(pred, target)[0]
 
     def _initialize_autoencoder(self):
@@ -272,14 +268,14 @@ class TrainerPrivateEnhanced:
                         self.autoencoder.encoder.load_state_dict(
                             torch.load(encoder_path, map_location=self.device, weights_only=False)
                         )
-                        print(f"✓ 编码器权重已加载: {encoder_path}")
+                        print(f"[OK] 编码器权重已加载: {encoder_path}")
                     
                     # 加载解码器
                     if os.path.exists(decoder_path):
                         self.autoencoder.decoder.load_state_dict(
                             torch.load(decoder_path, map_location=self.device, weights_only=False)
                         )
-                        print(f"✓ 解码器权重已加载: {decoder_path}")
+                        print(f"[OK] 解码器权重已加载: {decoder_path}")
                         
                 except Exception as e:
                     print(f"错误: 加载自编码器权重失败!")
@@ -319,9 +315,9 @@ class TrainerPrivateEnhanced:
         from .autoencoder_finetuner import extract_encoder_parameters
         return extract_encoder_parameters(self.autoencoder)
 
-    def _embed_watermark(self, client_id, current_epoch):
+    def _embed_watermark(self, current_epoch):
         """嵌入水印到目标模型"""
-        if not self.args or not getattr(self.args, 'use_key_matrix', False):
+        if not self.args or not getattr(self.args, 'enable_watermark', True):
             return
         
         try:
@@ -331,30 +327,25 @@ class TrainerPrivateEnhanced:
             
             if self._key_manager is None:
                 try:
-                    self._key_manager = KeyMatrixManager(
-                        self.args.key_matrix_path,
-                        args=self.args
-                    )
+                    self._key_manager = KeyMatrixManager(self.args.key_matrix_path)
                 except Exception as e:
-                    print(f"加载密钥矩阵管理器失败: {e}")
+                    print(f"[WARN] 加载密钥矩阵管理器失败: {e}")
                     return
             
             with torch.no_grad():
                 model_params = dict(self.model.named_parameters())
                 watermarked_params = self._key_manager.embed_watermark(
-                    model_params, client_id, encoder_params
+                    model_params, encoder_params, self.model
                 )
                 
                 for name, param in self.model.named_parameters():
                     if name in watermarked_params:
                         param.data.copy_(watermarked_params[name])
-                # 静默嵌入，减少日志输出
-                pass
                                 
         except Exception as e:
-            print(f"⚠️ 水印嵌入失败: {e}")
+            print(f"[WARN] 水印嵌入失败: {e}")
 
-    def local_update(self, dataloader, local_ep, lr, client_id, current_epoch=0, total_epochs=100):
+    def local_update(self, dataloader, local_ep, lr, current_epoch=0, total_epochs=100):
         """本地更新，支持MultiLoss和自编码器训练"""
         self.model.to(self.device)  # 确保模型在正确的设备上
         self.model.train()
@@ -401,8 +392,11 @@ class TrainerPrivateEnhanced:
                 pred = self.model(x)
                 main_loss = self.get_loss_function(pred, y)
 
-                # 计算最终损失
-                if current_epoch == 0:
+                # 根据 --use_multiloss 参数决定是否启用正则项
+                if self.args and not getattr(self.args, 'use_multiloss', True):
+                    # 完全禁用正则项：只用主损失
+                    total_loss = main_loss
+                elif current_epoch == 0:
                     total_loss = main_loss
                 else:
                     # 从args读取alpha参数
@@ -412,8 +406,18 @@ class TrainerPrivateEnhanced:
                         alpha_early = self.args.multiloss_alpha_early
                     if self.args and hasattr(self.args, 'multiloss_alpha_late'):
                         alpha_late = self.args.multiloss_alpha_late
-                    total_loss = self.multi_loss.compute_loss(main_loss, current_epoch, total_epochs, 
-                                                              alpha_early, alpha_late)
+
+                    # 统一使用 MultiLoss：根据 --use_multiloss 决定是否启用各正则项
+                    use_reg1 = getattr(self.args, 'use_multiloss', True)
+                    use_reg2 = getattr(self.args, 'use_multiloss', True)
+                    use_reg3 = getattr(self.args, 'use_multiloss', True)
+                    total_loss = self.multi_loss.compute_loss(
+                        main_loss, current_epoch, total_epochs,
+                        alpha_early, alpha_late,
+                        use_reg1=use_reg1,
+                        use_reg2=use_reg2,
+                        use_reg3=use_reg3
+                    )
 
                 total_loss.backward()
 
@@ -481,7 +485,7 @@ class TrainerPrivateEnhanced:
             # 简洁输出：只在最后epoch打印
             if epoch + 1 == local_ep:
                 from tqdm import tqdm
-                tqdm.write(f"C{client_id} E{epoch+1}/{local_ep}: L={loss_meter:.4f} A={acc_meter:.4f} LR={adjusted_lr:.6f}")
+                tqdm.write(f"E{epoch+1}/{local_ep}: L={loss_meter:.4f} A={acc_meter:.4f} LR={adjusted_lr:.6f}")
 
         # 本地训练结束后，先更新梯度统计量，然后再进行水印嵌入（避免梯度数据被清理导致统计量为0）
         if (self.mask_manager and current_epoch >= 0 and batch_count > 0):
@@ -500,7 +504,7 @@ class TrainerPrivateEnhanced:
                 )
                 
             except Exception as e:
-                print(f"⚠️ C{client_id} 梯度统计更新失败: {e}")
+                print(f"[WARN] 梯度统计更新失败: {e}")
                 raise RuntimeError(f"梯度统计更新失败: {e}")
             finally:
                 # 确保清理梯度数据，防止内存泄漏
@@ -524,7 +528,7 @@ class TrainerPrivateEnhanced:
 
         # 每5个epoch进行水印融合（放在梯度统计更新之后）
         if (current_epoch + 1) % 5 == 0:
-            self._embed_watermark(client_id, current_epoch)
+            self._embed_watermark(current_epoch)
 
         # 定期清理内存
         if current_epoch > 0 and current_epoch % 10 == 0:

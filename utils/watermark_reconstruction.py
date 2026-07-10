@@ -29,7 +29,7 @@ class WatermarkReconstructor:
         """
         self.key_matrix_dir = key_matrix_dir
         self.autoencoder_weights_dir = autoencoder_weights_dir
-        self.key_manager = KeyMatrixManager(key_matrix_dir, args)
+        self.key_manager = KeyMatrixManager(key_matrix_dir)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # 加载原始自编码器作为参考
@@ -54,101 +54,51 @@ class WatermarkReconstructor:
         
         return autoencoder
     
-    def extract_watermark_parameters(self, model_state_dict: Dict[str, torch.Tensor], 
-                                   client_id: int, check_pruning: bool = False) -> torch.Tensor:
-        """从模型状态字典中提取水印参数"""
+    def extract_watermark_parameters(self, model_state_dict: Dict[str, torch.Tensor],
+                                   check_pruning: bool = False) -> torch.Tensor:
+        """从模型状态字典中提取水印参数（单客户端模式）"""
         try:
-            return self.key_manager.extract_watermark(model_state_dict, client_id, check_pruning)
+            return self.key_manager.extract_watermark(model_state_dict, check_pruning)
         except Exception as e:
-            print(f"❌ 提取客户端 {client_id} 的水印参数失败: {e}")
+            print(f"❌ 提取水印参数失败: {e}")
             return torch.tensor([])
-    
-    def reconstruct_autoencoder_from_watermark(self, model_state_dict: Dict[str, torch.Tensor], 
-                                             client_id: int) -> LightAutoencoder:
-        """从水印参数重建自编码器"""
-        watermark_values = self.extract_watermark_parameters(model_state_dict, client_id)
-        
+
+    def reconstruct_autoencoder(self, model_state_dict: Dict[str, torch.Tensor]) -> LightAutoencoder:
+        """
+        从水印参数重建自编码器（单客户端模式，用于侵权判断）
+        """
+        watermark_values = self.extract_watermark_parameters(model_state_dict)
+
         if len(watermark_values) == 0:
-            print(f"❌ 无法从客户端 {client_id} 提取水印参数")
+            print("❌ 未能提取水印参数")
             return None
-        
+
+        # 检查参数数量是否匹配编码器
+        encoder_params = list(LightAutoencoder().encoder.parameters())
+        total_encoder_params = sum(p.numel() for p in encoder_params)
+
+        if len(watermark_values) != total_encoder_params:
+            if len(watermark_values) > total_encoder_params:
+                watermark_values = watermark_values[:total_encoder_params]
+            else:
+                padding = torch.zeros(total_encoder_params - len(watermark_values))
+                watermark_values = torch.cat([watermark_values, padding])
+
         reconstructed_autoencoder = LightAutoencoder().to(self.device)
-        
-        # 加载解码器权重
+
         decoder_path = os.path.join(self.autoencoder_weights_dir, 'decoder.pth')
         if os.path.exists(decoder_path):
             reconstructed_autoencoder.decoder.load_state_dict(
                 torch.load(decoder_path, map_location=self.device, weights_only=False)
             )
             print(f"✓ 已加载解码器权重: {decoder_path}")
-        
-        # 重建编码器参数
-        self._reconstruct_encoder_from_watermark(reconstructed_autoencoder.encoder, watermark_values)
-        
-        return reconstructed_autoencoder
-    
-    def reconstruct_autoencoder_from_all_clients(self, model_state_dict: Dict[str, torch.Tensor]) -> LightAutoencoder:
-        """
-        从所有客户端的水印参数重建自编码器（用于侵权判断）
-        
-        Args:
-            model_state_dict: 模型状态字典
-            
-        Returns:
-            重建的自编码器
-        """
-        # 获取所有客户端ID
-        all_client_ids = self.key_manager.list_clients()
-        
-        # 从所有客户端提取水印参数
-        all_watermark_values = []
-        successful_clients = []
-        
-        for client_id in all_client_ids:
-            try:
-                watermark_values = self.extract_watermark_parameters(model_state_dict, client_id)
-                if len(watermark_values) > 0:
-                    all_watermark_values.append(watermark_values)
-                    successful_clients.append(client_id)
-            except Exception as e:
-                pass  # 静默处理错误
-        
-        if not all_watermark_values:
-            print("❌ 未能从任何客户端提取到水印参数")
-            return None
-        
-        # 合并所有水印参数
-        combined_watermark_values = torch.cat(all_watermark_values)
-        
-        # 检查参数数量是否匹配编码器
-        encoder_params = list(LightAutoencoder().encoder.parameters())
-        total_encoder_params = sum(param.numel() for param in encoder_params)
-        
-        if len(combined_watermark_values) != total_encoder_params:
-            if len(combined_watermark_values) > total_encoder_params:
-                # 截断多余的参数
-                combined_watermark_values = combined_watermark_values[:total_encoder_params]
-            else:
-                # 填充不足的参数
-                padding = torch.zeros(total_encoder_params - len(combined_watermark_values))
-                combined_watermark_values = torch.cat([combined_watermark_values, padding])
-        
-        # 创建新的自编码器
-        reconstructed_autoencoder = LightAutoencoder().to(self.device)
-        
-        # 加载解码器权重（保持不变）
-        decoder_path = os.path.join(self.autoencoder_weights_dir, 'decoder.pth')
-        if os.path.exists(decoder_path):
-            reconstructed_autoencoder.decoder.load_state_dict(
-                torch.load(decoder_path, map_location=self.device, weights_only=False)
-            )
         else:
             print(f"⚠️  未找到解码器权重: {decoder_path}")
-        
-        # 重建编码器参数
-        self._reconstruct_encoder_from_watermark(reconstructed_autoencoder.encoder, combined_watermark_values)
-        
+
+        self._reconstruct_encoder_from_watermark(reconstructed_autoencoder.encoder, watermark_values)
+
         return reconstructed_autoencoder
+
     
     def _reconstruct_encoder_from_watermark(self, encoder: nn.Module, watermark_values: torch.Tensor):
         """

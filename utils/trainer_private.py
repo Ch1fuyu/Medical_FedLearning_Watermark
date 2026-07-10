@@ -4,10 +4,11 @@ import torch.nn.functional as F
 from torch import optim
 from models.light_autoencoder import LightAutoencoder
 from utils.key_matrix_utils import KeyMatrixManager
-try:
-    from sklearn.metrics import roc_auc_score
-except Exception:
-    roc_auc_score = None
+from utils.metrics_utils import (
+    compute_accuracy,
+    compute_auc,
+    is_softmax_task,
+)
 
 
 def accuracy(output, target, top_k=(1,)):
@@ -53,28 +54,28 @@ class TesterPrivate(object):
 
                 pred = self.model(data)
 
-                if self.args is not None and getattr(self.args, 'task_type', 'multiclass') == 'multiclass':
-                    # 多分类
+                if is_softmax_task(self.args):
+                    # 多分类 / 二分类（2 类 softmax 输出）
                     loss_meter += F.cross_entropy(pred, target, reduction='sum').item()
-                    preds_top1 = pred.argmax(dim=1)
-                    label_acc = (preds_top1 == target).float().mean() * 100.0
-                    sample_acc = label_acc
-                    acc_meter += label_acc.item() * data.size(0) / 100.0
-                    sample_acc_meter += sample_acc.item() * data.size(0) / 100.0
+                    label_acc, sample_acc = compute_accuracy(
+                        pred, target,
+                        getattr(self.args, "task_type", "multiclass"),
+                    )
+                    acc_meter += label_acc * data.size(0) / 100.0
+                    sample_acc_meter += sample_acc * data.size(0) / 100.0
                     probs = torch.softmax(pred, dim=1)
                     if self.verbose and run_count == 0:
+                        preds_top1 = pred.argmax(dim=1)
                         correct_first = (preds_top1 == target).sum().item()
                         print(f"First batch - Top1 Acc: {label_acc:.4f}% ({correct_first}/{data.size(0)})")
                     all_y_true.append(target.detach().cpu().numpy())
                     all_y_score.append(probs.detach().cpu().numpy())
                 else:
-                    # 多标签/二分类
+                    # 多标签
                     loss_meter += F.binary_cross_entropy_with_logits(pred, target.float(), reduction='sum').item()
-                    acc_results = accuracy(pred, target)
-                    label_acc = acc_results[0]
-                    sample_acc = acc_results[1]
-                    acc_meter += label_acc.item() * data.size(0) / 100.0
-                    sample_acc_meter += sample_acc.item() * data.size(0) / 100.0
+                    label_acc, sample_acc = compute_accuracy(pred, target, "multilabel")
+                    acc_meter += label_acc * data.size(0) / 100.0
+                    sample_acc_meter += sample_acc * data.size(0) / 100.0
                     pred_prob = torch.sigmoid(pred)
                     if self.verbose and run_count == 0:
                         pred_normal = torch.all(pred_prob < 0.5, dim=1).sum().item()
@@ -92,37 +93,15 @@ class TesterPrivate(object):
         if hasattr(acc_meter, 'item'):
             acc_meter = acc_meter.item()
 
-        # 计算整体AUC
+        # 计算整体AUC（统一通过 utils.metrics_utils）
         auc_val = 0.0
-        if len(all_y_true) > 0 and roc_auc_score is not None:
-            try:
-                # 合并所有batch的数据
-                y_true_all = np.concatenate(all_y_true, axis=0)
-                y_score_all = np.concatenate(all_y_score, axis=0)
-                if self.args is not None and getattr(self.args, 'task_type', 'multiclass') == 'multiclass':
-                    try:
-                        auc_val = roc_auc_score(y_true_all, y_score_all, multi_class='ovr', average='macro')
-                    except Exception:
-                        auc_val = 0.0
-                else:
-                    # 多标签宏平均
-                    valid_classes = []
-                    for i in range(y_true_all.shape[1]):
-                        if len(np.unique(y_true_all[:, i])) > 1:  # 确保有0和1两种标签
-                            valid_classes.append(i)
-                    if len(valid_classes) > 0:
-                        auc_scores = []
-                        for i in valid_classes:
-                            try:
-                                auc_i = roc_auc_score(y_true_all[:, i], y_score_all[:, i])
-                                auc_scores.append(auc_i)
-                            except Exception:
-                                continue
-                        if len(auc_scores) > 0:
-                            auc_val = np.mean(auc_scores)  # 宏平均
-            except Exception as e:
-                print(f"AUC计算错误: {e}")
-                auc_val = 0.0
+        if len(all_y_true) > 0:
+            task_type = (
+                getattr(self.args, "task_type", "multiclass")
+                if self.args is not None
+                else "multiclass"
+            )
+            auc_val = compute_auc(all_y_true, all_y_score, task_type)
 
         # 为保持接口一致性并扩展多指标，返回 (loss, acc_label, auc, acc_sample)
         return loss_meter, acc_meter, float(auc_val), sample_acc_meter
@@ -141,8 +120,8 @@ class TrainerPrivate(object):
         self.position_dict = random_positions  # 为了兼容性，添加这个属性
 
     def get_loss_function(self, pred, target):
-        """根据任务类型计算损失：multiclass 用 CrossEntropy；其他用 BCEWithLogits。"""
-        if self.args is not None and getattr(self.args, 'task_type', 'multiclass') == 'multiclass':
+        """根据任务类型计算损失：multiclass / binary 用 CrossEntropy；multilabel 用 BCEWithLogits。"""
+        if is_softmax_task(self.args):
             return F.cross_entropy(pred, target)
         if self.args is None or not self.args.class_weights:
             return F.binary_cross_entropy_with_logits(pred, target.float())
@@ -162,7 +141,7 @@ class TrainerPrivate(object):
 
     def _compute_accuracy(self, pred, target):
         """根据任务类型计算准确率（百分比）。"""
-        if self.args is not None and getattr(self.args, 'task_type', 'multiclass') == 'multiclass':
+        if is_softmax_task(self.args):
             preds_top1 = pred.argmax(dim=1)
             return (preds_top1 == target).float().mean() * 100.0
         return accuracy(pred, target)[0]
@@ -245,8 +224,7 @@ class TrainerPrivate(object):
                     try:
                         # 初始化KeyMatrixManager，支持水印缩放
                         self._key_manager = KeyMatrixManager(
-                            self.args.key_matrix_path,
-                            args=self.args
+                            self.args.key_matrix_path
                         )
                     except Exception as e:
                         print(f"[Watermark Warning] Failed to load KeyMatrixManager: {e}. Fallback to random positions.")

@@ -35,7 +35,6 @@ BASE_ARGS = {
     'dataset': 'chestmnist',
     'model_name': 'alexnet',
     'epochs': 100,
-    'client_num': 10,
     'local_ep': 5,
     'lr': 0.01,
     'momentum': 0.9,

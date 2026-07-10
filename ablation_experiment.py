@@ -68,8 +68,6 @@ class AblationExperiment(Experiment):
 
         self.train_set, self.test_set, self.dict_users = get_data(dataset_name=self.dataset,
                                                                   data_root=self.data_root,
-                                                                  iid=self.iid,
-                                                                  client_num=self.client_num,
                                                                   )
         logging.info('==> Training model...')
         self.logs = {'best_train_acc': -np.inf, 'best_train_loss': -np.inf,
@@ -125,7 +123,8 @@ class AblationExperiment(Experiment):
 
         local_train_loader = []
 
-        for i in range(self.client_num):
+        num_clients = len(self.dict_users)
+        for i in range(num_clients):
             local_train_ldr = DataLoader(DatasetSplit(self.train_set, self.dict_users[i]),
                                          batch_size=self.batch_size,
                                          shuffle=True, num_workers=0, pin_memory=False)
@@ -148,8 +147,8 @@ class AblationExperiment(Experiment):
 
         for epoch in range(self.epochs):
             # 均匀采样
-            self.m = max(int(self.frac * self.client_num), 1)
-            idxs_users = np.random.choice(range(self.client_num), self.m, replace=False)
+            self.m = max(int(self.frac * num_clients), 1)
+            idxs_users = np.random.choice(range(num_clients), self.m, replace=False)
 
             local_ws, local_losses = [], []
 
@@ -362,7 +361,7 @@ class AblationExperiment(Experiment):
             from utils.key_matrix_utils import KeyMatrixManager
             
             # 加载密钥矩阵管理器
-            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
+            key_manager = KeyMatrixManager(self.args.key_matrix_path)
             
             # 对每个客户端的水印位置进行独占式聚合
             for i, client_id in enumerate(idxs_users):
@@ -410,7 +409,6 @@ def main(args):
                 'log_interval': args.log_interval,
                 'num_classes': args.num_classes,
                 'epochs': args.epochs,
-                'client_num': args.client_num,
                 'console_log': os.path.basename(log_file_name),
             }
             }
@@ -433,9 +431,9 @@ def main(args):
 
     # 根据选择指标命名文件
     watermark_suffix = f"wm_{args.watermark_mode}" if hasattr(args, 'watermark_mode') and args.watermark_mode else "wm_basic"
-    file_name = '{}_Dp_{}_iid_{}_{}_ep_{}_le_{}_cn_{}_fra_{:.4f}_{}_{{:.4f}}{}.pkl'.format(
+    file_name = '{}_Dp_{}_iid_{}_{}_ep_{}_le_{}_fra_{:.4f}_{}_{{:.4f}}{}.pkl'.format(
         formatted_now, args.sigma, args.iid, watermark_suffix,
-        args.epochs, args.local_ep, args.client_num, args.frac, best_metric_name, enhanced
+        args.epochs, args.local_ep, args.frac, best_metric_name, enhanced
     )
     file_name = file_name.format(best_metric_value)
     torch.save(logs, os.path.join(save_dir, file_name))

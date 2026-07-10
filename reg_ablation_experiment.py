@@ -124,7 +124,6 @@ class RegAblationExperiment(Experiment):
         self.train_set, self.test_set, self.dict_users = get_data(dataset_name=self.dataset,
                                                                   data_root=self.data_root,
                                                                   iid=self.iid,
-                                                                  client_num=self.client_num,
                                                                   )
         logging.info('==> Training model...')
         self.logs = {'best_train_acc': -np.inf, 'best_train_loss': -np.inf,
@@ -204,7 +203,7 @@ class RegAblationExperiment(Experiment):
         """
         try:
             from utils.key_matrix_utils import KeyMatrixManager
-            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
+            key_manager = KeyMatrixManager(self.args.key_matrix_path)
             positions = key_manager.load_positions(client_id)
             return set(positions)
         except Exception as e:
@@ -260,7 +259,7 @@ class RegAblationExperiment(Experiment):
 
         try:
             from utils.key_matrix_utils import KeyMatrixManager
-            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
+            key_manager = KeyMatrixManager(self.args.key_matrix_path)
 
             # 构建参数偏移映射
             offset_map, param_order = self._build_param_offset_map(global_model)
@@ -340,7 +339,7 @@ class RegAblationExperiment(Experiment):
         """
         try:
             from utils.key_matrix_utils import KeyMatrixManager
-            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
+            key_manager = KeyMatrixManager(self.args.key_matrix_path)
 
             # 构建参数偏移映射
             offset_map, param_order = self._build_param_offset_map(model_state)
@@ -348,7 +347,7 @@ class RegAblationExperiment(Experiment):
             all_watermark_indices = []  # [(param_name, global_idx), ...]
 
             # 收集所有客户端的水印位置（除非指定了排除的客户端）
-            for client_id in range(self.client_num):
+            for client_id in range(len(self.dict_users)):
                 if exclude_client_id is not None and client_id == exclude_client_id:
                     continue
                 positions = key_manager.load_positions(client_id)
@@ -553,7 +552,7 @@ class RegAblationExperiment(Experiment):
         """
         try:
             from utils.key_matrix_utils import KeyMatrixManager
-            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
+            key_manager = KeyMatrixManager(self.args.key_matrix_path)
 
             # 深拷贝模型
             noisy_model = {}
@@ -670,7 +669,7 @@ class RegAblationExperiment(Experiment):
 
         local_train_loader = []
 
-        for i in range(self.client_num):
+        for i in range(len(self.dict_users)):
             local_train_ldr = DataLoader(DatasetSplit(self.train_set, self.dict_users[i]),
                                          batch_size=self.batch_size,
                                          shuffle=True, num_workers=0, pin_memory=False)
@@ -693,8 +692,8 @@ class RegAblationExperiment(Experiment):
 
         for epoch in range(self.epochs): # 均匀采样，frac 默认为 1，即每轮中全体客户端参与训练
             # 均匀采样
-            self.m = max(int(self.frac * self.client_num), 1)
-            idxs_users = np.random.choice(range(self.client_num), self.m, replace=False)
+            self.m = max(int(self.frac * len(self.dict_users)), 1)
+            idxs_users = np.random.choice(range(len(self.dict_users)), self.m, replace=False)
 
             logging.info('Epoch: %d / %d' % (epoch + 1, self.epochs))
             
@@ -1115,7 +1114,7 @@ class RegAblationExperiment(Experiment):
             from utils.key_matrix_utils import KeyMatrixManager
 
             # 加载密钥矩阵管理器
-            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
+            key_manager = KeyMatrixManager(self.args.key_matrix_path)
 
             # 构建参数偏移映射
             offset_map, param_order = self._build_param_offset_map(local_ws[0])
@@ -1246,7 +1245,6 @@ def main(args):
                 'log_interval': args.log_interval,
                 'num_classes': args.num_classes,
                 'epochs': args.epochs,
-                'client_num': args.client_num,
                 'console_log': os.path.basename(log_file_name),
                 'use_reg1': getattr(args, 'use_reg1', True),
                 'use_reg2': getattr(args, 'use_reg2', True),
@@ -1282,9 +1280,9 @@ def main(args):
 
     # 根据选择指标命名文件
     watermark_suffix = f"wm_{args.watermark_mode}" if hasattr(args, 'watermark_mode') and args.watermark_mode else "wm_basic"
-    file_name = '{}_reg_ablation_Dp_{}_iid_{}_{}_ep_{}_le_{}_cn_{}_fra_{:.4f}_{}_{{:.4f}}_{}{}.pkl'.format(
+    file_name = '{}_reg_ablation_Dp_{}_iid_{}_{}_ep_{}_le_{}_fra_{:.4f}_{}_{{:.4f}}_{}{}.pkl'.format(
         formatted_now, args.sigma, args.iid, watermark_suffix,
-        args.epochs, args.local_ep, args.client_num, args.frac, best_metric_name, reg_suffix, enhanced
+        args.epochs, args.local_ep, args.frac, best_metric_name, reg_suffix, enhanced
     )
     file_name = file_name.format(best_metric_value)
     torch.save(logs, os.path.join(save_dir, file_name))
