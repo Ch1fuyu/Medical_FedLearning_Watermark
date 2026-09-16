@@ -120,6 +120,14 @@ class FederatedLearningOnChestMNIST(Experiment):
         # 用于存储用于追踪的基准值（其他客户端水印区域的聚合结果）
         self.watermark_baseline = {}  # {client_id: aggregated_watermark_params}
         
+        # ========== 水印偏差检测功能初始化 ==========
+        # 用于记录每次水印偏差检测的结果
+        self.watermark_detection_results = []  # [{round, client_assessments, detected_malicious, ...}]
+        # 统计所有检测的偏差值（用于确定阈值）
+        self.all_detection_deviations = []  # [[deviation, ...], ...] 每轮一个列表
+        # 用于记录当前轮次的恶意客户端（模拟泄漏）
+        self.current_malicious_client = None  # int or None
+        
         # 根据watermark_mode参数选择trainer
         if self.args.watermark_mode == 'enhanced':
             logging.info('==> 使用增强水印系统（密钥矩阵 + 自编码器）')
@@ -273,10 +281,18 @@ class FederatedLearningOnChestMNIST(Experiment):
             # ========== 第四步：本地训练（使用下发的定制模型） ==========
             local_ws, local_losses = [], []
             
+            # 确定本轮的恶意客户端（用于模拟泄漏）
+            self.current_malicious_client = self._get_current_malicious_client(epoch, idxs_users)
+            if self.current_malicious_client is not None:
+                logging.info(f"[本地训练] 第 {epoch + 1} 轮恶意客户端: {self.current_malicious_client}")
+            
             for i, idx in enumerate(tqdm(idxs_users, desc='Progress: %d / %d' % (epoch + 1, self.epochs))):
                 # 使用下发给该客户端的定制模型作为起点
                 self.model.load_state_dict(self.customized_models[idx])
 
+                # 判断是否为恶意客户端（跳过梯度缩放）
+                skip_gradient_scaling = (idx == self.current_malicious_client)
+                
                 # 统一调用：始终传入 current_epoch/total_epochs；
                 # 普通 Trainer 会通过 **kwargs 忽略
                 local_w, local_loss, local_acc = self.trainer.local_update(
@@ -285,7 +301,8 @@ class FederatedLearningOnChestMNIST(Experiment):
                     lr=self.lr, 
                     client_id=idx,
                     current_epoch=epoch,
-                    total_epochs=self.epochs
+                    total_epochs=self.epochs,
+                    skip_gradient_scaling=skip_gradient_scaling
                 )
 
                 local_ws.append(copy.deepcopy(local_w))
@@ -293,6 +310,20 @@ class FederatedLearningOnChestMNIST(Experiment):
                 
                 # 清理临时变量，释放内存
                 del local_w, local_loss, local_acc
+            
+            # ========== 第四步半：训练后泄露模拟 + 水印偏差检测（每leak_interval轮执行一次） ==========
+            if self.args.leak_interval > 0 and (epoch + 1) % self.args.leak_interval == 0:
+                # 首先模拟训练后的泄露（从local_ws中获取训练后的模型）
+                post_train_leak_info = self._simulate_post_training_leakage(
+                    epoch, idxs_users, local_ws
+                )
+                # 执行水印相似度检测（对比训练后的模型）
+                detection_result = self._watermark_deviation_detection(
+                    local_ws, idxs_users, current_round=epoch + 1,
+                    post_train_leak_info=post_train_leak_info
+                )
+                if detection_result is not None:
+                    self.watermark_detection_results.append(detection_result)
 
             # 计算参与训练的客户端的权重（相对于总数据集）
             client_weights = []
@@ -311,8 +342,8 @@ class FederatedLearningOnChestMNIST(Experiment):
             if hasattr(self.trainer, 'optimizer') and self.trainer.optimizer is not None:
                 self.trainer.optimizer.zero_grad()
             
-            # 梯度统计（仅每10轮打印一次）
-            if epoch >= 0 and hasattr(self.trainer, 'multi_loss') and (epoch + 1) % 10 == 0:
+            # 梯度统计（已禁用，如需开启可将条件改为 % 10）
+            # if epoch >= 0 and hasattr(self.trainer, 'multi_loss') and (epoch + 1) % 10 == 0:
                 try:
                     stats = self.trainer.get_gradient_stats()
                     if stats:
@@ -321,7 +352,8 @@ class FederatedLearningOnChestMNIST(Experiment):
                     pass  # 静默处理错误
 
 
-            if (epoch + 1) == self.epochs or (epoch + 1) % 1 == 0:
+            # 评估（每10轮评估一次以节省时间）
+            if (epoch + 1) == self.epochs or (epoch + 1) % 10 == 0:
                 train_metrics = self.trainer.test(train_ldr)
                 val_metrics = self.trainer.test(val_ldr)
 
@@ -517,6 +549,93 @@ class FederatedLearningOnChestMNIST(Experiment):
                 logging.warning(f'保存追踪结果失败: {e}')
         else:
             logging.info('本轮训练未发生模型泄漏事件')
+        
+        # ========== 水印偏差检测结果汇总 ==========
+        if len(self.watermark_detection_results) > 0:
+            logging.info('='*60 + ' 水印偏差检测结果 ' + '='*60)
+            logging.info(f'总共执行 {len(self.watermark_detection_results)} 次水印偏差检测')
+            
+            correct_detections = sum(1 for r in self.watermark_detection_results 
+                                    if r.get('is_detection_correct') == True)
+            accuracy = correct_detections / len(self.watermark_detection_results) * 100
+            logging.info(f'检测准确率: {accuracy:.2f}% ({correct_detections}/{len(self.watermark_detection_results)})')
+            
+            logging.info('详细检测记录:')
+            for result in self.watermark_detection_results:
+                status = '✓' if result.get('is_detection_correct') else ('✗' if result.get('is_detection_correct') == False else '?')
+                actual = result.get('actual_leaked_client', 'N/A')
+                detected = result.get('detected_malicious_client', 'N/A')
+                logging.info(
+                    f"  轮次 {result['round']}: 实际={actual}, "
+                    f"检测={detected} [{status}]"
+                )
+            
+            # 保存检测结果到文件
+            try:
+                import json
+                # 创建 detection 专用目录
+                detection_dir = os.path.join('save', 'detection')
+                os.makedirs(detection_dir, exist_ok=True)
+                detection_log_path = os.path.join(
+                    detection_dir,
+                    f'watermark_deviation_detection_{self.model_name}_{self.dataset}_{datetime.now().strftime("%Y%m%d%H%M%S")}.json'
+                )
+                
+                # 计算统计信息
+                all_devs = []
+                for devs in self.all_detection_deviations:
+                    all_devs.extend(devs)
+                
+                threshold_stats = {
+                    'mean': float(np.mean(all_devs)) if all_devs else 0,
+                    'std': float(np.std(all_devs)) if all_devs else 0,
+                    'threshold_3sigma': float(np.mean(all_devs) + 3 * np.std(all_devs)) if all_devs else 0
+                }
+                
+                # 构建要保存的检测结果（确保所有值都是Python原生类型）
+                detection_rounds = []
+                for r in self.watermark_detection_results:
+                    round_data = {
+                        'round': int(r['round']),
+                        'detected_malicious_client': r['detected_malicious_client'],
+                        'actual_leaked_client': r['actual_leaked_client'],
+                        'is_correct': bool(r.get('is_detection_correct')) if r.get('is_detection_correct') is not None else None,
+                        'confidence': float(r['detected_malicious_confidence']),
+                        'threshold_info': {
+                            'mean': float(r['threshold_info']['mean']),
+                            'std': float(r['threshold_info']['std']),
+                            'threshold_2sigma': float(r['threshold_info']['threshold_2sigma'])
+                        },
+                        'client_assessments': {}
+                    }
+                    for k, v in r['client_assessments'].items():
+                        round_data['client_assessments'][str(k)] = {
+                            'similarity': float(v['similarity']) if v.get('similarity') is not None else None,
+                            'watermark_mean': float(v['watermark_mean']) if v.get('watermark_mean') is not None else None,
+                            'watermark_std': float(v['watermark_std']) if v.get('watermark_std') is not None else None,
+                            'similarity_rank': int(v['similarity_rank']) if v.get('similarity_rank') is not None else None,
+                            'is_suspicious': bool(v['is_suspicious']) if v.get('is_suspicious') is not None else None,
+                        }
+                    detection_rounds.append(round_data)
+                
+                with open(detection_log_path, 'w', encoding='utf-8') as f:
+                    json.dump({
+                        'experiment_info': {
+                            'model': self.model_name,
+                            'dataset': self.dataset,
+                            'client_num': self.client_num,
+                            'epochs': self.epochs,
+                            'leak_interval': getattr(self.args, 'leak_interval', 0)
+                        },
+                        'total_detections': int(len(self.watermark_detection_results)),
+                        'correct_detections': int(correct_detections),
+                        'detection_accuracy': float(accuracy),
+                        'threshold_stats': threshold_stats,
+                        'rounds': detection_rounds
+                    }, f, indent=2, ensure_ascii=False)
+                logging.info(f'水印相似度检测结果已保存到: {detection_log_path}')
+            except Exception as e:
+                logging.warning(f'保存水印相似度检测结果失败: {e}')
 
         logging.info(
             f'最佳模型 | Loss:{self.logs["best_model_loss"]:.4f} Acc:{self.logs["best_model_acc"]:.4f} AUC:{self.logs["best_model_auc"]:.4f}')
@@ -704,22 +823,25 @@ class FederatedLearningOnChestMNIST(Experiment):
         计算两个向量之间的余弦相似度
 
         Args:
-            vec1, vec2: torch.Tensor
+            vec1, vec2: torch.Tensor 或 numpy.ndarray
 
         Returns:
             similarity: float
         """
-        vec1_flat = vec1.view(-1).float()
-        vec2_flat = vec2.view(-1).float()
+        # 统一转为 numpy 处理
+        if isinstance(vec1, torch.Tensor):
+            vec1 = vec1.cpu().numpy()
+        if isinstance(vec2, torch.Tensor):
+            vec2 = vec2.cpu().numpy()
 
-        dot_product = torch.dot(vec1_flat, vec2_flat)
-        norm1 = torch.norm(vec1_flat)
-        norm2 = torch.norm(vec2_flat)
+        dot_product = np.dot(vec1, vec2)
+        norm1 = np.linalg.norm(vec1)
+        norm2 = np.linalg.norm(vec2)
 
         if norm1 == 0 or norm2 == 0:
             return 0.0
 
-        return (dot_product / (norm1 * norm2)).item()
+        return float(dot_product / (norm1 * norm2))
 
     def _extract_watermark_params_for_tracking(self, model_state, exclude_client_id):
         """
@@ -792,6 +914,67 @@ class FederatedLearningOnChestMNIST(Experiment):
             logging.warning(f"Failed to extract watermark params for tracking: {e}")
             return torch.tensor([])
 
+    def _extract_single_client_watermark_params(self, model_state, client_id):
+        """
+        提取指定客户端的水印参数
+
+        Args:
+            model_state: 模型参数字典
+            client_id: 客户端ID
+
+        Returns:
+            watermark_params: 该客户端水印区域的参数（numpy数组）
+        """
+        try:
+            from utils.key_matrix_utils import KeyMatrixManager
+            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
+
+            # 构建参数偏移映射
+            offset_map, param_order = self._build_param_offset_map(model_state)
+
+            # 获取该客户端的水印位置
+            positions = key_manager.load_positions(client_id)
+
+            watermark_values = []
+            for param_name, global_idx in positions:
+                local_idx = None
+                actual_param_name = None
+
+                # 检查是否可以直接使用
+                if param_name in model_state:
+                    param_flat = model_state[param_name].view(-1)
+                    if global_idx < param_flat.numel():
+                        local_idx = global_idx
+                        actual_param_name = param_name
+
+                # 全局索引转换
+                if actual_param_name is None and param_name in offset_map:
+                    param_offset = offset_map[param_name]
+                    param_flat = model_state[param_name].view(-1)
+                    if param_offset <= global_idx < param_offset + param_flat.numel():
+                        local_idx = global_idx - param_offset
+                        actual_param_name = param_name
+
+                # 遍历查找
+                if actual_param_name is None:
+                    for name, offset in offset_map.items():
+                        param_size = model_state[name].numel()
+                        if offset <= global_idx < offset + param_size:
+                            actual_param_name = name
+                            local_idx = global_idx - offset
+                            break
+
+                if actual_param_name and local_idx is not None:
+                    if actual_param_name in model_state:
+                        param_flat = model_state[actual_param_name].view(-1)
+                        watermark_values.append(param_flat[local_idx].item())
+
+            return np.array(watermark_values) if watermark_values else np.array([])
+
+        except Exception as e:
+            logging.warning(f"Failed to extract watermark params for client {client_id}: {e}")
+            return np.array([])
+
     def _track_model_leakage(self, leaked_model_state, idxs_users):
         """
         追踪模型泄漏源
@@ -830,11 +1013,11 @@ class FederatedLearningOnChestMNIST(Experiment):
                 )
 
                 if len(leaked_watermark_params) > 0 and len(client_watermark_params) > 0:
-                    # 确保长度一致
+                    # 确保长度一致，转换为numpy进行切片
                     min_len = min(len(leaked_watermark_params), len(client_watermark_params))
                     similarity = self._cosine_similarity(
-                        leaked_watermark_params[:min_len],
-                        client_watermark_params[:min_len]
+                        leaked_watermark_params[:min_len].numpy(),
+                        client_watermark_params[:min_len].numpy()
                     )
                 else:
                     similarity = 0.0
@@ -929,6 +1112,88 @@ class FederatedLearningOnChestMNIST(Experiment):
 
         logging.info(f"=" * 60)
         logging.info(f"[模型泄漏模拟] 第 {epoch + 1} 轮 - 客户端 {leaked_client} 的定制模型在下发时泄漏")
+        logging.info(f"=" * 60)
+
+        return leak_info
+
+    def _get_current_malicious_client(self, epoch, idxs_users):
+        """
+        获取当前轮次的恶意客户端ID
+
+        如果本轮不进行泄漏模拟，返回None
+
+        Args:
+            epoch: 当前轮次（0索引）
+            idxs_users: 参与训练的客户端ID列表
+
+        Returns:
+            malicious_client: 恶意客户端ID，如果本轮不泄漏则返回None
+        """
+        leak_interval = self.args.leak_interval
+
+        # 如果泄漏间隔为0或负数，则不设置恶意客户端
+        if leak_interval <= 0:
+            return None
+
+        # 检查是否为本轮的泄漏检测轮次
+        if (epoch + 1) % leak_interval != 0:
+            return None
+
+        # 从参与训练的客户端中随机选择一个作为恶意客户端
+        malicious_client = int(np.random.choice(idxs_users, 1)[0])
+        return malicious_client
+
+    def _simulate_post_training_leakage(self, epoch, idxs_users, local_ws):
+        """
+        模拟模型泄漏事件（发生在本地训练之后）
+
+        从本地训练后的模型中选择一个客户端泄露其训练后的模型
+        用于测试水印相似度检测在训练后泄露场景下的表现
+
+        Args:
+            epoch: 当前轮次
+            idxs_users: 参与训练的客户端ID列表
+            local_ws: 本地训练后的模型列表
+
+        Returns:
+            leak_info: 泄漏信息字典，如果本轮不泄漏则返回None
+        """
+        leak_interval = self.args.leak_interval
+
+        # 如果泄漏间隔为0或负数，则禁用泄漏模拟
+        if leak_interval <= 0:
+            return None
+
+        # 模拟训练后泄露（每leak_interval轮一次，与训练前泄露同步）
+        if (epoch + 1) % leak_interval != 0:
+            return None
+
+        # 使用预先确定的恶意客户端
+        leaked_client = self.current_malicious_client
+        if leaked_client is None or leaked_client not in idxs_users:
+            logging.warning(f"未确定恶意客户端或客户端不在参与者中，跳过泄漏模拟")
+            return None
+
+        client_idx = list(idxs_users).index(leaked_client)
+        leaked_model = local_ws[client_idx]
+
+        # 深拷贝以保存泄漏的模型
+        leaked_model_copy = {}
+        for k, v in leaked_model.items():
+            if isinstance(v, torch.Tensor):
+                leaked_model_copy[k] = v.clone().detach().cpu()
+            else:
+                leaked_model_copy[k] = v
+
+        leak_info = {
+            'round': epoch + 1,
+            'leaked_client': leaked_client,
+            'model_params': leaked_model_copy,
+            'leak_type': 'post_training'  # 标记为训练后泄露
+        }
+
+        logging.info(f"=" * 60)
+        logging.info(f"[训练后泄漏模拟] 第 {epoch + 1} 轮 - 客户端 {leaked_client} 的训练后模型泄漏")
         logging.info(f"=" * 60)
 
         return leak_info
@@ -1153,6 +1418,285 @@ class FederatedLearningOnChestMNIST(Experiment):
                     break
 
         return local_idx, actual_param_name
+
+    def _watermark_deviation_detection(self, local_ws, idxs_users, current_round, post_train_leak_info=None):
+        """
+        水印相似度检测：计算每个客户端的水印区域与泄漏模型的相似度
+
+        原理（与泄露检测一致）：
+        - 如果某轮发生泄漏，泄漏模型的来源客户端与该客户端的训练后模型高度相似
+        - 通过计算各客户端模型与泄漏模型的相似度，相似度最高的客户端即为泄漏者
+
+        Args:
+            local_ws: 本地模型列表
+            idxs_users: 参与训练的客户端ID列表
+            current_round: 当前训练轮次
+            post_train_leak_info: 训练后泄露信息（优先使用）
+
+        Returns:
+            detection_result: 检测结果字典
+        """
+        try:
+            from utils.key_matrix_utils import KeyMatrixManager
+            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
+
+            # 优先使用训练后的泄露信息（最准确）
+            if post_train_leak_info is not None:
+                leaked_model_state = post_train_leak_info.get('model_params')
+                actual_leaked = post_train_leak_info.get('leaked_client')
+            else:
+                # 查找当前轮次的泄漏记录（训练前的定制模型）
+                leaked_model_state = None
+                actual_leaked = None
+                for record in self.leakage_records:
+                    if record.get('round') == current_round:
+                        leaked_model_state = record.get('model_params')
+                        actual_leaked = record.get('leaked_client')
+                        break
+
+            # 如果本轮没有泄漏，则跳过检测
+            if leaked_model_state is None:
+                logging.info(f"[水印相似度检测] 第 {current_round} 轮未发生泄漏，跳过检测")
+                return None
+
+            logging.info(f"[水印相似度检测] 第 {current_round} 轮发生泄漏，实际泄漏者: 客户端 {actual_leaked}")
+
+            # 存储每个客户端的检测结果
+            client_assessments = {}
+            all_similarities = []
+
+            # 提取泄漏模型中泄漏者的水印区域参数（使用泄漏者的位置）
+            leaked_watermark_params = self._extract_single_client_watermark_params(
+                leaked_model_state, actual_leaked
+            )
+
+            # 对每个客户端进行检测：计算其定制模型的水印区域与泄漏模型中泄漏者水印的相似度
+            for client_id in idxs_users:
+                # 获取该客户端的定制模型
+                if client_id not in self.customized_models:
+                    continue
+                customized_model = self.customized_models[client_id]
+
+                # 提取该客户端定制模型的水印区域参数
+                client_watermark_params = self._extract_single_client_watermark_params(
+                    customized_model, client_id
+                )
+
+                # 计算余弦相似度
+                if len(leaked_watermark_params) > 0 and len(client_watermark_params) > 0:
+                    min_len = min(len(leaked_watermark_params), len(client_watermark_params))
+                    similarity = self._cosine_similarity(
+                        leaked_watermark_params[:min_len],
+                        client_watermark_params[:min_len]
+                    )
+                else:
+                    similarity = 0.0
+
+                # 计算水印区域的统计量
+                if len(client_watermark_params) > 0:
+                    wm_mean = np.mean(client_watermark_params)
+                    wm_std = np.std(client_watermark_params)
+                else:
+                    wm_mean, wm_std = None, None
+
+                client_assessments[client_id] = {
+                    'similarity': float(similarity),
+                    'watermark_mean': float(wm_mean) if wm_mean is not None else None,
+                    'watermark_std': float(wm_std) if wm_std is not None else None,
+                }
+
+                all_similarities.append((client_id, similarity))
+
+            # 按相似度降序排序（相似度最高的为可疑）
+            all_similarities.sort(key=lambda x: x[1], reverse=True)
+
+            # 为每个客户端添加排名（相似度最高排名1）
+            for rank, (cid, sim) in enumerate(all_similarities, 1):
+                client_assessments[cid]['similarity_rank'] = rank
+
+            # 检测到的恶意客户端（相似度最高的）
+            detected_malicious = all_similarities[0][0] if all_similarities else None
+            detected_confidence = self._compute_similarity_confidence(all_similarities) if all_similarities else 0
+
+            # 确定阈值（均值 + 2倍标准差）
+            if all_similarities:
+                sim_values = [sim for _, sim in all_similarities]
+                mean_sim = np.mean(sim_values)
+                std_sim = np.std(sim_values) if len(sim_values) > 1 else 0
+                threshold = mean_sim + 2 * std_sim if std_sim > 0 else mean_sim * 1.2
+            else:
+                mean_sim, std_sim, threshold = 0.0, 0.0, 0.0
+
+            # 标记可疑客户端（相似度高于阈值的）
+            for cid in client_assessments:
+                sim = client_assessments[cid]['similarity']
+                client_assessments[cid]['is_suspicious'] = sim > threshold
+
+            # 构建检测结果
+            detection_result = {
+                'round': current_round,
+                'total_clients': self.client_num,
+                'participating_clients': [int(c) for c in idxs_users],
+                'client_assessments': client_assessments,
+                'detected_malicious_client': int(detected_malicious) if detected_malicious is not None else None,
+                'detected_malicious_confidence': float(detected_confidence),
+                'detection_method': 'watermark_similarity',
+                'actual_leaked_client': int(actual_leaked) if actual_leaked is not None else None,
+                'is_detection_correct': (actual_leaked == detected_malicious) if actual_leaked is not None and detected_malicious is not None else None,
+                'threshold_info': {
+                    'mean': float(mean_sim),
+                    'std': float(std_sim),
+                    'threshold_2sigma': float(threshold)
+                }
+            }
+
+            # 保存所有相似度值（用于后续统计）
+            self.all_detection_deviations.append([sim for _, sim in all_similarities])
+
+            # 打印检测结果日志
+            self._log_watermark_detection(detection_result, all_similarities)
+
+            return detection_result
+
+        except Exception as e:
+            logging.warning(f"[水印相似度检测] 检测失败: {e}")
+            import traceback
+            logging.warning(traceback.format_exc())
+            return None
+
+    def _compute_client_watermark_similarity(self, client_model, client_id, encoder_params, offset_map):
+        """
+        计算指定客户端的水印相似度
+        
+        Args:
+            client_model: 客户端模型参数字典
+            client_id: 客户端ID
+            encoder_params: 编码器参数（真实水印值）
+            offset_map: 参数偏移映射
+            
+        Returns:
+            similarity: 余弦相似度
+            wm_mean: 水印区域参数均值
+            wm_std: 水印区域参数标准差
+            wm_values: 水印区域参数值列表
+        """
+        try:
+            from utils.key_matrix_utils import KeyMatrixManager
+            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
+            
+            # 获取该客户端的水印位置
+            positions = key_manager.load_positions(client_id)
+            
+            if not positions:
+                return None, None, None, []
+            
+            # 提取水印区域的参数值
+            watermark_values = []
+            encoder_idx = 0
+            
+            for param_name, global_idx in positions:
+                local_idx, actual_param_name = self._convert_global_to_local_idx(
+                    global_idx, param_name, client_model, offset_map
+                )
+                
+                if actual_param_name and local_idx is not None:
+                    if actual_param_name in client_model:
+                        param_flat = client_model[actual_param_name].view(-1)
+                        if local_idx < param_flat.numel():
+                            wm_value = param_flat[local_idx].item()
+                            watermark_values.append(wm_value)
+                            encoder_idx += 1
+            
+            # 计算统计量
+            if watermark_values:
+                wm_mean = np.mean(watermark_values)
+                wm_std = np.std(watermark_values)
+            else:
+                wm_mean, wm_std = None, None
+            
+            # 计算与编码器的余弦相似度
+            if watermark_values and encoder_params is not None:
+                # 确保长度一致
+                min_len = min(len(watermark_values), len(encoder_params))
+                wm_tensor = torch.tensor(watermark_values[:min_len])
+                enc_tensor = encoder_params[:min_len].clone().detach().cpu()
+                
+                # 统一到 CPU 计算，避免设备不匹配
+                similarity = self._cosine_similarity(wm_tensor, enc_tensor)
+            else:
+                similarity = None
+            
+            return similarity, wm_mean, wm_std, watermark_values
+            
+        except Exception as e:
+            logging.warning(f"[水印相似度检测] 计算客户端 {client_id} 的相似度失败: {e}")
+            return None, None, None, []
+
+    def _compute_similarity_confidence(self, sorted_similarities):
+        """
+        计算检测置信度（基于相似度差异）
+        
+        置信度 = (次低相似度 - 最低相似度) / 最低相似度
+        """
+        if len(sorted_similarities) < 2:
+            return 1.0 if sorted_similarities else 0.0
+        
+        first_sim = sorted_similarities[0][1]  # 最低相似度
+        second_sim = sorted_similarities[1][1]  # 次低相似度
+        
+        if first_sim == 0:
+            return 1.0 if second_sim > 0 else 0.0
+        
+        # 差异越大，置信度越高
+        diff_ratio = (second_sim - first_sim) / abs(first_sim) if first_sim != 0 else 1.0
+        confidence = min(diff_ratio, 1.0)
+        
+        return confidence
+
+    def _log_watermark_detection(self, detection_result, sorted_similarities):
+        """
+        打印水印相似度检测的日志
+        """
+        logging.info("=" * 80)
+        logging.info(f"[水印相似度检测] 第 {detection_result['round']} 轮")
+        logging.info("=" * 80)
+        
+        # 打印每个客户端的相似度
+        for cid in detection_result['participating_clients']:
+            assessment = detection_result['client_assessments'].get(cid, {})
+            sim = assessment.get('similarity')
+            rank = assessment.get('similarity_rank', '-')
+            is_susp = assessment.get('is_suspicious', False)
+            
+            if sim is not None:
+                status = "⚠️ 可疑" if is_susp else "正常"
+                marker = " ← 检测" if cid == detection_result.get('detected_malicious_client') else ""
+                actual_marker = " (实际泄漏者)" if cid == detection_result.get('actual_leaked_client') else ""
+                logging.info(
+                    f"  客户端 {cid}: 相似度={sim:.6f} (排名 {rank})  状态: {status}{marker}{actual_marker}"
+                )
+            else:
+                logging.info(f"  客户端 {cid}: 无法计算相似度")
+        
+        # 打印检测结果
+        if detection_result['detected_malicious_client'] is not None:
+            logging.info(
+                f"\n检测结果: 客户端 {detection_result['detected_malicious_client']} 可疑"
+            )
+        
+        # 打印实际泄漏者
+        if detection_result['actual_leaked_client'] is not None:
+            correct_str = "✓ 正确" if detection_result['is_detection_correct'] else "✗ 错误"
+            logging.info(f"实际泄漏者: 客户端 {detection_result['actual_leaked_client']}")
+            logging.info(f"检测正确性: {correct_str}")
+        
+        # 打印阈值信息
+        threshold_info = detection_result['threshold_info']
+        logging.info(
+            f"\n阈值信息: 均值={threshold_info['mean']:.6f}, "
+            f"标准差={threshold_info['std']:.6f}, 阈值={threshold_info['threshold_2sigma']:.6f}"
+        )
+        logging.info("=" * 80)
 
 def main(args):
     logs = {'net_info': None,

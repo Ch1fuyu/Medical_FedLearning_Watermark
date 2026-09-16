@@ -333,8 +333,13 @@ class TrainerPrivateEnhanced:
         except Exception as e:
             print(f"⚠️ 水印嵌入失败: {e}")
 
-    def local_update(self, dataloader, local_ep, lr, client_id, current_epoch=0, total_epochs=100):
-        """本地更新，支持MultiLoss和自编码器训练"""
+    def local_update(self, dataloader, local_ep, lr, client_id, current_epoch=0, total_epochs=100,
+                     skip_gradient_scaling=False):
+        """本地更新，支持MultiLoss和自编码器训练
+        
+        Args:
+            skip_gradient_scaling: 如果为True，跳过水印梯度缩放（用于恶意客户端模拟）
+        """
         self.model.to(self.device)
         self.model.train()
 
@@ -397,7 +402,8 @@ class TrainerPrivateEnhanced:
                         encoder_mask,
                         effective_mask,
                         current_epoch,
-                        total_epochs
+                        total_epochs,
+                        skip_gradient_scaling=skip_gradient_scaling
                     )
                 
                 # 梯度裁剪

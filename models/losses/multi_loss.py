@@ -134,8 +134,13 @@ class MultiLoss:
 
     def compute_loss_and_backward(self, main_loss, target_mask, encoder_mask, effective_mask,
                                   current_epoch, total_epochs,
-                                  alpha_early=None, alpha_late=None):
-        """Compute loss and perform backward pass with contrastive regularization."""
+                                  alpha_early=None, alpha_late=None,
+                                  skip_gradient_scaling=False):
+        """Compute loss and perform backward pass with contrastive regularization.
+        
+        Args:
+            skip_gradient_scaling: 如果为True，跳过水印梯度缩放（用于恶意客户端模拟）
+        """
         device = main_loss.device
         if self.device is None:
             self.set_device(device)
@@ -189,7 +194,8 @@ class MultiLoss:
 
         self.update_gradient_stats(gradients, watermark_grads, target_mask, encoder_mask, effective_mask)
 
-        if getattr(self, 'target_ratio', 0.3) > 0 and wm_ratio > self.target_ratio:
+        # 只有在非恶意客户端时才进行水印梯度缩放
+        if not skip_gradient_scaling and getattr(self, 'target_ratio', 0.3) > 0 and wm_ratio > self.target_ratio:
             target_wm_grad = mean_non_watermark_grad.detach() * self.target_ratio
             current_wm_grad_val = mean_watermark_grad.detach()
 
