@@ -352,139 +352,205 @@ class FederatedLearningOnChestMNIST(Experiment):
                     pass  # 静默处理错误
 
 
-            # 评估（每10轮评估一次以节省时间）
-            if (epoch + 1) == self.epochs or (epoch + 1) % 10 == 0:
-                train_metrics = self.trainer.test(train_ldr)
-                val_metrics = self.trainer.test(val_ldr)
+            # 评估
+            train_metrics = self.trainer.test(train_ldr)
+            val_metrics = self.trainer.test(val_ldr)
 
-                # (loss, acc_label, auc, acc_sample)
-                loss_train_mean, acc_train_label_mean, auc_train, acc_train_sample_mean = train_metrics
-                loss_val_mean, acc_val_label_mean, auc_val, acc_val_sample_mean = val_metrics
+            # (loss, acc_label, auc, acc_sample)
+            loss_train_mean, acc_train_label_mean, auc_train, acc_train_sample_mean = train_metrics
+            loss_val_mean, acc_val_label_mean, auc_val, acc_val_sample_mean = val_metrics
 
-                self.logs['val_acc'].append(acc_val_label_mean)
-                self.logs['val_loss'].append(loss_val_mean)
-                self.logs['local_loss'].append(np.mean(local_losses))
+            # 创建本轮记录行
+            stats_row = {
+                'round': epoch + 1,
+                'lr': self.lr,
+            }
 
-                # 更新历史最高值跟踪
-                if self.logs['highest_acc_ever'] < acc_val_label_mean:
-                    self.logs['highest_acc_ever'] = acc_val_label_mean
-                    self.logs['auc_when_highest_acc'] = auc_val
-                    
-                if self.logs['highest_auc_ever'] < auc_val:
-                    self.logs['highest_auc_ever'] = auc_val
-                    self.logs['acc_when_highest_auc'] = acc_val_label_mean
+            self.logs['val_acc'].append(acc_val_label_mean)
+            self.logs['val_loss'].append(loss_val_mean)
+            self.logs['local_loss'].append(np.mean(local_losses))
 
-                # 模型选择标准：ChestMNIST 按 AUC；否则按准确率
+            # 更新历史最高值跟踪
+            if self.logs['highest_acc_ever'] < acc_val_label_mean:
+                self.logs['highest_acc_ever'] = acc_val_label_mean
+                self.logs['auc_when_highest_acc'] = auc_val
+                
+            if self.logs['highest_auc_ever'] < auc_val:
+                self.logs['highest_auc_ever'] = auc_val
+                self.logs['acc_when_highest_auc'] = acc_val_label_mean
+
+            # 模型选择标准：ChestMNIST 按 AUC；否则按准确率
+            if select_by_auc:
+                if self.logs['best_model_auc'] < auc_val:
+                    self.logs['best_model_acc'] = acc_val_label_mean
+                    self.logs['best_model_loss'] = loss_val_mean
+                    self.logs['best_model_auc'] = auc_val
+                    # 优化模型存储，减少内存占用
+                    optimized_state = self._optimize_model_storage(self.model.state_dict())
+                    self.logs['best_model'] = [optimized_state]
+                    logging.info(f'🌟 最佳模型已保存! AUC↑{auc_val:.4f}')
+            else:
+                if self.logs['best_model_acc'] < acc_val_label_mean:
+                    self.logs['best_model_acc'] = acc_val_label_mean
+                    self.logs['best_model_loss'] = loss_val_mean
+                    self.logs['best_model_auc'] = auc_val
+                    optimized_state = self._optimize_model_storage(self.model.state_dict())
+                    self.logs['best_model'] = [optimized_state]
+                    logging.info(f'🌟 最佳模型已保存! ACC↑{acc_val_label_mean:.4f}')
+
+            if self.logs['best_train_acc'] < acc_train_label_mean:
+                self.logs['best_train_acc'] = acc_train_label_mean
+                self.logs['best_train_loss'] = loss_train_mean
+
+            # 合并训练和验证指标到一行
+            logging.info(
+                f"轮次{epoch+1} | Train Loss:{loss_train_mean:.4f} Acc:{acc_train_label_mean:.4f} AUC:{auc_train:.4f} | "
+                f"Val Loss:{loss_val_mean:.4f} Acc:{acc_val_label_mean:.4f} AUC:{auc_val:.4f} | "
+                f"Best Acc:{self.logs['highest_acc_ever']:.4f} Best AUC:{self.logs['highest_auc_ever']:.4f}")
+            
+            # MultiLoss统计信息
+            if hasattr(self.trainer, 'multi_loss'):
+                stats = self.trainer.multi_loss.get_stats()
+                logging.info(f"MultiLoss - GM:{stats['prevGM']:.6f} GH:{stats['prevGH']:.6f} Ratio:{stats['prevRatio']:.6f}")
+            
+            # 更新评估指标到记录行
+            stats_row.update({
+                'train_loss': float(loss_train_mean),
+                'val_loss': float(loss_val_mean),
+                'train_acc_label': float(acc_train_label_mean),
+                'train_auc': float(auc_train),
+                'val_acc_label': float(acc_val_label_mean),
+                'val_auc': float(auc_val),
+                'best_val_acc_so_far': float(self.logs['highest_acc_ever']),
+                'best_val_auc_so_far': float(self.logs['highest_auc_ever']),
+                'train_acc_sample': float(acc_train_sample_mean),
+                'val_acc_sample': float(acc_val_sample_mean),
+            })
+            
+            # 早停检查：patience > 0 时启用
+            if use_early_stopping:
                 if select_by_auc:
-                    if self.logs['best_model_auc'] < auc_val:
-                        self.logs['best_model_acc'] = acc_val_label_mean
-                        self.logs['best_model_loss'] = loss_val_mean
-                        self.logs['best_model_auc'] = auc_val
-                        # 优化模型存储，减少内存占用
-                        optimized_state = self._optimize_model_storage(self.model.state_dict())
-                        self.logs['best_model'] = [optimized_state]
-                        logging.info(f'🌟 最佳模型已保存! AUC↑{auc_val:.4f}')
-                else:
-                    if self.logs['best_model_acc'] < acc_val_label_mean:
-                        self.logs['best_model_acc'] = acc_val_label_mean
-                        self.logs['best_model_loss'] = loss_val_mean
-                        self.logs['best_model_auc'] = auc_val
-                        optimized_state = self._optimize_model_storage(self.model.state_dict())
-                        self.logs['best_model'] = [optimized_state]
-                        logging.info(f'🌟 最佳模型已保存! ACC↑{acc_val_label_mean:.4f}')
-
-                if self.logs['best_train_acc'] < acc_train_label_mean:
-                    self.logs['best_train_acc'] = acc_train_label_mean
-                    self.logs['best_train_loss'] = loss_train_mean
-
-                # 合并训练和验证指标到一行
-                logging.info(
-                    f"轮次{epoch+1} | Train Loss:{loss_train_mean:.4f} Acc:{acc_train_label_mean:.4f} AUC:{auc_train:.4f} | "
-                    f"Val Loss:{loss_val_mean:.4f} Acc:{acc_val_label_mean:.4f} AUC:{auc_val:.4f} | "
-                    f"Best Acc:{self.logs['highest_acc_ever']:.4f} Best AUC:{self.logs['highest_auc_ever']:.4f}")
-                
-                # MultiLoss统计信息（仅每10轮打印）
-                if hasattr(self.trainer, 'multi_loss') and (epoch + 1) % 10 == 0:
-                    stats = self.trainer.multi_loss.get_stats()
-                    logging.info(f"MultiLoss - GM:{stats['prevGM']:.6f} GH:{stats['prevGH']:.6f} Ratio:{stats['prevRatio']:.6f}")
-                
-                # 记录本轮统计数据
-                stats_row = {
-                    'round': epoch + 1,
-                    'lr': self.lr,
-                    'train_loss': float(loss_train_mean),
-                    'val_loss': float(loss_val_mean),
-                    'train_acc_label': float(acc_train_label_mean),
-                    'train_auc': float(auc_train),
-                    'val_acc_label': float(acc_val_label_mean),
-                    'val_auc': float(auc_val),
-                    'best_val_acc_so_far': float(self.logs['highest_acc_ever']),
-                    'best_val_auc_so_far': float(self.logs['highest_auc_ever']),
-                    'train_acc_sample': float(acc_train_sample_mean),
-                    'val_acc_sample': float(acc_val_sample_mean),
-                }
-                
-                # 早停检查：patience > 0 时启用
-                if use_early_stopping:
-                    if select_by_auc:
-                        if auc_val > best_val_auc:
-                            best_val_auc = auc_val
-                            early_stop_counter = 0
-                        else:
-                            early_stop_counter += 1
-                            if early_stop_counter >= self.args.patience:
-                                logging.info(f'Early stopping triggered at epoch {epoch + 1}. Best Val AUC: {best_val_auc:.4f}')
-                                break
+                    if auc_val > best_val_auc:
+                        best_val_auc = auc_val
+                        early_stop_counter = 0
                     else:
-                        if acc_val_label_mean > best_val_acc:
-                            best_val_acc = acc_val_label_mean
-                            early_stop_counter = 0
-                        else:
-                            early_stop_counter += 1
-                            if early_stop_counter >= self.args.patience:
-                                logging.info(f'Early stopping triggered at epoch {epoch + 1}. Best Val ACC: {best_val_acc:.4f}')
-                                break
-                
-                # 每轮训练后清理内存
-                self._cleanup_memory()
-                
-                # 清理临时变量
-                del train_metrics, val_metrics
-                del loss_train_mean, acc_train_label_mean, auc_train, acc_train_sample_mean
-                del loss_val_mean, acc_val_label_mean, auc_val, acc_val_sample_mean
-                
-                # 添加自编码器微调统计信息
-                if self.autoencoder_finetuner is not None and hasattr(self.trainer, 'autoencoder'):
-                    try:
-                        # 获取当前自编码器性能
-                        current_performance = self.autoencoder_finetuner.evaluate_encoder_performance(
-                            self.trainer.autoencoder, 
-                            test_samples=500  # 使用较少样本进行快速评估
-                        )
-                        stats_row['autoencoder_performance'] = float(current_performance)
-                        # 自编码器性能（仅每20轮显示）
-                        if (epoch + 1) % 20 == 0:
-                            logging.info(f'📊 自编码器性能: {current_performance:.6f}')
-                    except Exception as e:
-                        stats_row['autoencoder_performance'] = float('inf')
-                        logging.warning(f'⚠️ 无法评估自编码器性能: {e}')
+                        early_stop_counter += 1
+                        if early_stop_counter >= self.args.patience:
+                            logging.info(f'Early stopping triggered at epoch {epoch + 1}. Best Val AUC: {best_val_auc:.4f}')
+                            break
                 else:
-                    stats_row['autoencoder_performance'] = None
-                
-                # 添加增强水印系统统计信息
-                if hasattr(self.trainer, 'multi_loss'):
-                    multi_loss_stats = self.trainer.multi_loss.get_stats()
-                    stats_row.update({
-                        'prevGM': float(multi_loss_stats['prevGM']),
-                        'prevGH': float(multi_loss_stats['prevGH']),
-                        'prevRatio': float(multi_loss_stats['prevRatio']),
-                        'current_grad_M': float(multi_loss_stats['current_grad_M']),
-                        'current_grad_H': float(multi_loss_stats['current_grad_H']),
-                        'current_var_M': float(multi_loss_stats['current_var_M']),
-                        'current_var_H': float(multi_loss_stats['current_var_H']),
-                    })
-                
-                stats_rows.append(stats_row)
+                    if acc_val_label_mean > best_val_acc:
+                        best_val_acc = acc_val_label_mean
+                        early_stop_counter = 0
+                    else:
+                        early_stop_counter += 1
+                        if early_stop_counter >= self.args.patience:
+                            logging.info(f'Early stopping triggered at epoch {epoch + 1}. Best Val ACC: {best_val_acc:.4f}')
+                            break
+            
+            # 每轮训练后清理内存
+            self._cleanup_memory()
+            
+            # 清理临时变量
+            del train_metrics, val_metrics
+            del loss_train_mean, acc_train_label_mean, auc_train, acc_train_sample_mean
+            del loss_val_mean, acc_val_label_mean, auc_val, acc_val_sample_mean
+            
+            # 添加自编码器微调统计信息
+            if self.autoencoder_finetuner is not None and hasattr(self.trainer, 'autoencoder'):
+                try:
+                    # 获取当前自编码器性能
+                    current_performance = self.autoencoder_finetuner.evaluate_encoder_performance(
+                        self.trainer.autoencoder, 
+                        test_samples=500  # 使用较少样本进行快速评估
+                    )
+                    stats_row['autoencoder_performance'] = float(current_performance)
+                    logging.info(f'📊 自编码器性能: {current_performance:.6f}')
+                except Exception as e:
+                    stats_row['autoencoder_performance'] = float('inf')
+                    logging.warning(f'⚠️ 无法评估自编码器性能: {e}')
+            else:
+                stats_row['autoencoder_performance'] = None
+            
+            # 添加增强水印系统统计信息
+            if hasattr(self.trainer, 'multi_loss'):
+                multi_loss_stats = self.trainer.multi_loss.get_stats()
+            stats_row.update({
+                'prevGM': float(multi_loss_stats['prevGM']),
+                'prevGH': float(multi_loss_stats['prevGH']),
+                'prevRatio': float(multi_loss_stats['prevRatio']),
+                'current_grad_M': float(multi_loss_stats['current_grad_M']),
+                'current_grad_H': float(multi_loss_stats['current_grad_H']),
+                'current_var_M': float(multi_loss_stats['current_var_M']),
+                'current_var_H': float(multi_loss_stats['current_var_H']),
+            })
+
+            # 添加三种噪声等级的泄露检测详细记录
+            current_round = epoch + 1
+            trace_record = next((r for r in self.trace_results if r.get('round') == current_round), None)
+            if trace_record:
+                actual_leaked = trace_record.get('actual_leaked_client')
+                stats_row['leakage_actual_client'] = actual_leaked
+                attack_results = trace_record.get('attack_results', {})
+                for noise_level in [1, 2, 3]:
+                    if noise_level in attack_results:
+                        ar = attack_results[noise_level]
+                        ar_detected = ar.get('detected_leaker')
+                        ar_rankings = ar.get('similarity_rankings', [])
+                        ar_actual_sim = next((sim for cid, sim in ar_rankings if cid == actual_leaked), None)
+                        ar_detected_sim = next((sim for cid, sim in ar_rankings if cid == ar_detected), None)
+                        stats_row[f'leakage_noise{noise_level}_detected'] = ar_detected
+                        stats_row[f'leakage_noise{noise_level}_similarity_actual'] = float(ar_actual_sim) if ar_actual_sim is not None else None
+                        stats_row[f'leakage_noise{noise_level}_similarity_detected'] = float(ar_detected_sim) if ar_detected_sim is not None else None
+                        stats_row[f'leakage_noise{noise_level}_correct'] = 1 if ar.get('is_correct') else 0
+                    else:
+                        stats_row[f'leakage_noise{noise_level}_detected'] = None
+                        stats_row[f'leakage_noise{noise_level}_similarity_actual'] = None
+                        stats_row[f'leakage_noise{noise_level}_similarity_detected'] = None
+                        stats_row[f'leakage_noise{noise_level}_correct'] = None
+            else:
+                stats_row['leakage_actual_client'] = None
+                for noise_level in [1, 2, 3]:
+                    stats_row[f'leakage_noise{noise_level}_detected'] = None
+                    stats_row[f'leakage_noise{noise_level}_similarity_actual'] = None
+                    stats_row[f'leakage_noise{noise_level}_similarity_detected'] = None
+                    stats_row[f'leakage_noise{noise_level}_correct'] = None
+
+            # 添加水印偏差检测信息
+            wm_record = next((r for r in self.watermark_detection_results if r.get('round') == current_round), None)
+            if wm_record:
+                actual_client = wm_record.get('actual_leaked_client')
+                detected_client = wm_record.get('detected_malicious_client')
+                client_assessments = wm_record.get('client_assessments', {})
+
+                # client_assessments 的 key 可能是 numpy.int32/int/str，统一处理
+                def get_similarity(d, client_id, assessments):
+                    if client_id is None:
+                        return None
+                    # 尝试转换为 int 再查找
+                    key = int(client_id)
+                    if key in assessments:
+                        return assessments[key].get('similarity')
+                    if str(key) in assessments:
+                        return assessments[str(key)].get('similarity')
+                    return None
+
+                actual_sim = get_similarity(wm_record, actual_client, client_assessments)
+                detected_sim = get_similarity(wm_record, detected_client, client_assessments)
+
+                stats_row['watermark_actual_client'] = actual_client
+                stats_row['watermark_detected_client'] = detected_client
+                stats_row['watermark_similarity_actual'] = float(actual_sim) if actual_sim is not None else None
+                stats_row['watermark_similarity_detected'] = float(detected_sim) if detected_sim is not None else None
+                stats_row['watermark_detection_correct'] = 1 if wm_record.get('is_detection_correct') else 0
+            else:
+                stats_row['watermark_actual_client'] = None
+                stats_row['watermark_detected_client'] = None
+                stats_row['watermark_similarity_actual'] = None
+                stats_row['watermark_similarity_detected'] = None
+                stats_row['watermark_detection_correct'] = None
+
+            stats_rows.append(stats_row)
 
         logging.info('='*60 + ' 训练结果 ' + '='*60)
 
@@ -600,7 +666,6 @@ class FederatedLearningOnChestMNIST(Experiment):
                         'detected_malicious_client': r['detected_malicious_client'],
                         'actual_leaked_client': r['actual_leaked_client'],
                         'is_correct': bool(r.get('is_detection_correct')) if r.get('is_detection_correct') is not None else None,
-                        'confidence': float(r['detected_malicious_confidence']),
                         'threshold_info': {
                             'mean': float(r['threshold_info']['mean']),
                             'std': float(r['threshold_info']['std']),
@@ -653,11 +718,28 @@ class FederatedLearningOnChestMNIST(Experiment):
         try:
             os.makedirs(self.args.save_excel_dir, exist_ok=True)
             # 基础列 + 增强水印系统统计列 + 自编码器性能列
-            columns = ['round', 'lr', 'train_loss', 'val_loss', 'train_acc_label', 'train_auc', 
-                     'val_acc_label', 'val_auc', 'best_val_acc_so_far', 'best_val_auc_so_far', 
-                     'train_acc_sample', 'val_acc_sample', 'autoencoder_performance',
-                     'prevGM', 'prevGH', 'prevRatio', 
-                     'current_grad_M', 'current_grad_H', 'current_var_M', 'current_var_H']
+            columns = [
+                # 基础信息
+                'round', 'lr', 'train_loss', 'val_loss',
+                'train_acc_label', 'train_auc', 'val_acc_label', 'val_auc',
+                'best_val_acc_so_far', 'best_val_auc_so_far',
+                'train_acc_sample', 'val_acc_sample',
+                # 增强水印系统统计
+                'prevGM', 'prevGH', 'prevRatio',
+                'current_grad_M', 'current_grad_H', 'current_var_M', 'current_var_H',
+                # 自编码器性能
+                'autoencoder_performance',
+                # 泄露检测与三种噪声等级详细记录
+                'leakage_actual_client',
+                # 三种噪声等级详细记录
+                'leakage_noise1_detected', 'leakage_noise1_similarity_actual', 'leakage_noise1_similarity_detected', 'leakage_noise1_correct',
+                'leakage_noise2_detected', 'leakage_noise2_similarity_actual', 'leakage_noise2_similarity_detected', 'leakage_noise2_correct',
+                'leakage_noise3_detected', 'leakage_noise3_similarity_actual', 'leakage_noise3_similarity_detected', 'leakage_noise3_correct',
+                # 水印偏差检测
+                'watermark_actual_client', 'watermark_detected_client',
+                'watermark_similarity_actual', 'watermark_similarity_detected',
+                'watermark_detection_correct',
+            ]
             df = pd.DataFrame(stats_rows, columns=columns)
             now = datetime.now().strftime('%Y%m%d%H%M%S')
             excel_path = f'{self.args.save_excel_dir}/metrics_{self.model_name}_{self.dataset}_{now}.xlsx'
@@ -1516,7 +1598,6 @@ class FederatedLearningOnChestMNIST(Experiment):
 
             # 检测到的恶意客户端（相似度最高的）
             detected_malicious = all_similarities[0][0] if all_similarities else None
-            detected_confidence = self._compute_similarity_confidence(all_similarities) if all_similarities else 0
 
             # 确定阈值（均值 + 2倍标准差）
             if all_similarities:
@@ -1539,7 +1620,6 @@ class FederatedLearningOnChestMNIST(Experiment):
                 'participating_clients': [int(c) for c in idxs_users],
                 'client_assessments': client_assessments,
                 'detected_malicious_client': int(detected_malicious) if detected_malicious is not None else None,
-                'detected_malicious_confidence': float(detected_confidence),
                 'detection_method': 'watermark_similarity',
                 'actual_leaked_client': int(actual_leaked) if actual_leaked is not None else None,
                 'is_detection_correct': (actual_leaked == detected_malicious) if actual_leaked is not None and detected_malicious is not None else None,
@@ -1631,27 +1711,6 @@ class FederatedLearningOnChestMNIST(Experiment):
         except Exception as e:
             logging.warning(f"[水印相似度检测] 计算客户端 {client_id} 的相似度失败: {e}")
             return None, None, None, []
-
-    def _compute_similarity_confidence(self, sorted_similarities):
-        """
-        计算检测置信度（基于相似度差异）
-        
-        置信度 = (次低相似度 - 最低相似度) / 最低相似度
-        """
-        if len(sorted_similarities) < 2:
-            return 1.0 if sorted_similarities else 0.0
-        
-        first_sim = sorted_similarities[0][1]  # 最低相似度
-        second_sim = sorted_similarities[1][1]  # 次低相似度
-        
-        if first_sim == 0:
-            return 1.0 if second_sim > 0 else 0.0
-        
-        # 差异越大，置信度越高
-        diff_ratio = (second_sim - first_sim) / abs(first_sim) if first_sim != 0 else 1.0
-        confidence = min(diff_ratio, 1.0)
-        
-        return confidence
 
     def _log_watermark_detection(self, detection_result, sorted_similarities):
         """
