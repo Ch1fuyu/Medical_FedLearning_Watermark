@@ -9,7 +9,7 @@ def parser_args():
     parser.add_argument('--gpu', default='0', type=str, help='GPU device ID')
 
     # ========================= 数据集和模型参数 ========================
-    parser.add_argument('--dataset', type=str, default='chestmnist', choices=['chestmnist', 'cifar10', 'cifar100'], help='name of dataset')
+    parser.add_argument('--dataset', type=str, default='cifar10', choices=['chestmnist', 'cifar10', 'cifar100'], help='name of dataset')
     parser.add_argument('--model_name', type=str, default='alexnet', choices=['alexnet', 'resnet'], help='model architecture name')
     parser.add_argument('--num_classes', default=None, type=int, help='number of classes')
     parser.add_argument('--in_channels', type=int, default=None, help='input channels')
@@ -17,7 +17,7 @@ def parser_args():
     parser.add_argument('--override', type=str, default=None, help='comma-separated key=value overrides')
 
     # ========================= 联邦学习核心参数 ========================
-    parser.add_argument('--epochs', type=int, default=150, help='total communication rounds')
+    parser.add_argument('--epochs', type=int, default=30, help='total communication rounds')
     parser.add_argument('--local_ep', type=int, default=2, help='local epochs per client: E')
     parser.add_argument('--batch_size', type=int, default=128, help='local batch size: B')
     parser.add_argument('--client_num', type=int, default=5, help='number of clients: K')
@@ -49,7 +49,7 @@ def parser_args():
     parser.add_argument('--margin_lambda', type=float, default=1.0, help='weight for margin penalty term')
     parser.add_argument('--multiloss_alpha_early', type=float, default=5e-5, help='alpha value for early training phase')
     parser.add_argument('--multiloss_alpha_late', type=float, default=1e-4, help='alpha value for late training phase')
-    parser.add_argument('--watermark_grad_target_ratio', type=float, default=0, help='target ratio of watermark gradient to non-watermark gradient; set to 0 to disable watermark gradient capping')
+    parser.add_argument('--watermark_grad_target_ratio', type=float, default=0.3, help='target ratio of watermark gradient to non-watermark gradient; set to 0 to disable watermark gradient capping')
 
     # ========================= 水印与密钥矩阵配置 ========================
     parser.add_argument('--enable_watermark', action='store_true', default=True, help='enable watermark embedding')
@@ -60,7 +60,7 @@ def parser_args():
     # ========================= 模型泄漏追踪配置 ========================
     parser.add_argument('--enable_leakage_tracking', action='store_true', default=False, help='enable model leakage tracking simulation and detection')
     parser.add_argument('--no_source_tracing', action='store_false', dest='enable_source_tracing', help='disable leakage source tracing while keeping customized model distribution')
-    parser.add_argument('--leak_interval', type=int, default=30, help='leak simulation interval (every N rounds), set to 0 to disable')
+    parser.add_argument('--leak_interval', type=int, default=1, help='leak simulation interval (every N rounds), set to 0 to disable')
     parser.add_argument('--leak_attack_mode', type=str, default='gaussian_noise', choices=['none', 'gaussian_noise'], help='attack mode after model leakage')
     parser.add_argument('--leak_noise_weak', type=float, default=0.01, help='weak noise scale for level 1 (ratio of mean watermark value)')
     parser.add_argument('--leak_noise_medium', type=float, default=0.05, help='medium noise scale for level 2 (ratio of mean watermark value)')

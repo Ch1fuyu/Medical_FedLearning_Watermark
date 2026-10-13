@@ -120,6 +120,17 @@ class FederatedLearningOnChestMNIST(Experiment):
         # 用于存储用于追踪的基准值（其他客户端水印区域的聚合结果）
         self.watermark_baseline = {}  # {client_id: aggregated_watermark_params}
         
+        # ========== 后验泄露检测：保存所有轮次的模型存档 ==========
+        # 模型存档：{(round, client_id): model_state_dict}
+        self.model_archive = {}  # 存储所有轮次的模型
+        # 每轮参与训练的客户端列表：{round: [client_id, ...]}
+        self.round_participants = {}  # 记录每轮参与的客户端
+        # 每轮的训练后模型存档（可选，用于更细粒度的检测）
+        self.trained_model_archive = {}  # {(round, client_id): trained_model_state_dict}
+        # 模型存档目录
+        self.model_archive_dir = os.path.join('save', 'model_archive', 
+            f'{self.model_name}_{self.dataset}_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
+        
         # ========== 水印偏差检测功能初始化 ==========
         # 用于记录每次水印偏差检测的结果
         self.watermark_detection_results = []  # [{round, client_assessments, detected_malicious, ...}]
@@ -324,6 +335,9 @@ class FederatedLearningOnChestMNIST(Experiment):
                 )
                 if detection_result is not None:
                     self.watermark_detection_results.append(detection_result)
+
+            # ========== 模型存档：在本轮训练结束后保存所有模型（用于后验泄露检测） ==========
+            self._archive_round_models(epoch + 1, idxs_users, local_ws)
 
             # 计算参与训练的客户端的权重（相对于总数据集）
             client_weights = []
@@ -710,6 +724,75 @@ class FederatedLearningOnChestMNIST(Experiment):
         end = time.time()
         logging.info(f'训练耗时: {(end - start) / 60:.1f} 分钟')
         
+        # ========== 后验泄露检测：训练结束后进行回顾性检测 ==========
+        if len(self.model_archive) > 0:
+            logging.info("=" * 80)
+            logging.info("=" * 80)
+            logging.info("[后验泄露检测] 训练已完成，开始进行回顾性泄露检测...")
+            logging.info("=" * 80)
+            
+            # 执行全覆盖后验检测
+            posterior_summary = self.run_posterior_detection_sweep(use_trained_model=True)
+            
+            # 保存后验检测结果到文件
+            try:
+                import json
+                posterior_dir = os.path.join('save', 'posterior_detection')
+                os.makedirs(posterior_dir, exist_ok=True)
+                posterior_log_path = os.path.join(
+                    posterior_dir,
+                    f'posterior_detection_{self.model_name}_{self.dataset}_{datetime.now().strftime("%Y%m%d%H%M%S")}.json'
+                )
+                
+                # 转换numpy类型为Python原生类型
+                def convert_to_serializable(obj):
+                    if isinstance(obj, (np.integer,)):
+                        return int(obj)
+                    elif isinstance(obj, (np.floating,)):
+                        return float(obj)
+                    elif isinstance(obj, np.ndarray):
+                        return obj.tolist()
+                    elif isinstance(obj, torch.Tensor):
+                        return obj.cpu().numpy().tolist()
+                    return obj
+                
+                with open(posterior_log_path, 'w', encoding='utf-8') as f:
+                    json.dump({
+                        'experiment_info': {
+                            'model': self.model_name,
+                            'dataset': self.dataset,
+                            'client_num': self.client_num,
+                            'epochs': self.epochs,
+                            'total_archived_models': len(self.model_archive),
+                            'total_trained_models': len(self.trained_model_archive),
+                            'rounds_archived': list(self.round_participants.keys())
+                        },
+                        'summary': {
+                            'total_tested': int(posterior_summary['total_tested']),
+                            'source_confirmed': int(posterior_summary['source_confirmed']),
+                            'false_positives': int(posterior_summary['false_positives']),
+                            'accuracy': float(posterior_summary['accuracy']),
+                            'use_trained_model': bool(posterior_summary['use_trained_model'])
+                        },
+                        'detection_details': posterior_summary['details']
+                    }, f, indent=2, ensure_ascii=False, default=convert_to_serializable)
+                logging.info(f'后验检测结果已保存到: {posterior_log_path}')
+            except Exception as e:
+                logging.warning(f'保存后验检测结果失败: {e}')
+            
+            # 示例：随机选择一个存档模型进行单次检测演示
+            if len(self.trained_model_archive) > 0:
+                import random
+                demo_key = random.choice(list(self.trained_model_archive.keys()))
+                demo_round, demo_client = demo_key
+                logging.info("=" * 80)
+                logging.info(f"[后验检测演示] 随机选择轮次 {demo_round}, 客户端 {demo_client} 作为假设泄漏者进行检测...")
+                demo_result = self.posterior_leak_detection(
+                    demo_client, demo_round, use_trained_model=True
+                )
+                if demo_result:
+                    logging.info(f"[后验检测演示] 检测完成")
+        
         # 最终内存清理
         self._cleanup_memory()
         logging.info('🧹 训练完成，已清理内存缓存')
@@ -786,6 +869,543 @@ class FederatedLearningOnChestMNIST(Experiment):
             self.w_t[k] = w_avg[k]
 
         return watermark_baseline
+
+    def _archive_round_models(self, current_round, idxs_users, local_ws):
+        """
+        存档本轮所有客户端的模型（用于后验泄露检测）
+
+        保存内容：
+        1. 定制模型（下发前的模型，包含水印指纹）
+        2. 训练后模型（本地训练完成后的模型）
+
+        同时保存到磁盘文件夹，方便手动检查
+
+        Args:
+            current_round: 当前轮次（1索引）
+            idxs_users: 参与训练的客户端ID列表
+            local_ws: 本地训练后的模型列表
+        """
+        try:
+            # 记录本轮参与的客户端
+            self.round_participants[current_round] = list(idxs_users)
+
+            # 确保存档目录存在
+            os.makedirs(self.model_archive_dir, exist_ok=True)
+
+            # 保存定制模型（从 self.customized_models 获取）
+            for client_id in idxs_users:
+                if client_id in self.customized_models:
+                    # 优化存储：移到CPU并detach
+                    optimized_state = self._optimize_model_storage(self.customized_models[client_id])
+                    self.model_archive[(current_round, client_id)] = optimized_state
+
+                    # 保存到磁盘
+                    self._save_model_to_disk(
+                        optimized_state,
+                        current_round,
+                        client_id,
+                        model_type='customized'
+                    )
+
+            # 保存训练后模型
+            for i, client_id in enumerate(idxs_users):
+                if i < len(local_ws):
+                    # 优化存储：移到CPU并detach
+                    optimized_state = self._optimize_model_storage(local_ws[i])
+                    self.trained_model_archive[(current_round, client_id)] = optimized_state
+
+                    # 保存到磁盘
+                    self._save_model_to_disk(
+                        optimized_state,
+                        current_round,
+                        client_id,
+                        model_type='trained'
+                    )
+
+            logging.info(f"[模型存档] 第 {current_round} 轮: 已保存 {len(idxs_users)} 个客户端的模型 "
+                        f"(累计存档: {len(self.model_archive)} 个定制模型, "
+                        f"{len(self.trained_model_archive)} 个训练后模型)")
+            logging.info(f"[模型存档] 已保存到: {self.model_archive_dir}")
+
+        except Exception as e:
+            logging.warning(f"[模型存档] 第 {current_round} 轮存档失败: {e}")
+            import traceback
+            logging.warning(traceback.format_exc())
+
+    def _save_model_to_disk(self, model_state, round_num, client_id, model_type):
+        """
+        将模型保存到磁盘文件夹
+
+        文件结构：
+        save/model_archive/{experiment_name}/
+        ├── round_1/
+        │   ├── client_0_customized.pth
+        │   ├── client_0_trained.pth
+        │   ├── client_1_customized.pth
+        │   └── client_1_trained.pth
+        └── round_2/
+            └── ...
+
+        Args:
+            model_state: 模型参数字典
+            round_num: 轮次编号
+            client_id: 客户端ID
+            model_type: 模型类型 ('customized' 或 'trained')
+        """
+        try:
+            # 创建轮次子目录
+            round_dir = os.path.join(self.model_archive_dir, f'round_{round_num}')
+            os.makedirs(round_dir, exist_ok=True)
+
+            # 构建文件名
+            filename = f'client_{client_id}_{model_type}.pth'
+            filepath = os.path.join(round_dir, filename)
+
+            # 保存模型
+            torch.save({
+                'round': round_num,
+                'client_id': client_id,
+                'model_type': model_type,
+                'state_dict': model_state
+            }, filepath)
+
+        except Exception as e:
+            logging.warning(f"[模型存档] 保存模型到磁盘失败: {e}")
+
+    def load_model_from_archive(self, round_num, client_id, model_type='trained'):
+        """
+        从磁盘加载存档的模型（供手动检查使用）
+
+        Args:
+            round_num: 轮次编号
+            client_id: 客户端ID
+            model_type: 模型类型 ('customized' 或 'trained')
+
+        Returns:
+            model_state: 模型参数字典，如果加载失败返回None
+        """
+        try:
+            filename = f'client_{client_id}_{model_type}.pth'
+            filepath = os.path.join(self.model_archive_dir, f'round_{round_num}', filename)
+
+            if not os.path.exists(filepath):
+                logging.warning(f"[模型加载] 文件不存在: {filepath}")
+                return None
+
+            checkpoint = torch.load(filepath, map_location='cpu')
+            return checkpoint['state_dict']
+
+        except Exception as e:
+            logging.warning(f"[模型加载] 加载失败: {e}")
+            return None
+
+    @staticmethod
+    def list_archived_models(archive_dir):
+        """
+        列出存档目录中的所有模型文件
+
+        Args:
+            archive_dir: 存档目录路径
+
+        Returns:
+            model_list: [(round, client_id, model_type, filepath), ...]
+        """
+        model_list = []
+        try:
+            if not os.path.exists(archive_dir):
+                return model_list
+
+            for round_dir in sorted(os.listdir(archive_dir)):
+                round_path = os.path.join(archive_dir, round_dir)
+                if not os.path.isdir(round_path):
+                    continue
+
+                # 解析轮次编号
+                if round_dir.startswith('round_'):
+                    round_num = int(round_dir.split('_')[1])
+                else:
+                    continue
+
+                for filename in sorted(os.listdir(round_path)):
+                    if filename.endswith('.pth'):
+                        # 解析文件名: client_X_customized.pth 或 client_X_trained.pth
+                        parts = filename[:-4].split('_')  # 去掉.pth
+                        if len(parts) >= 3:
+                            client_id = int(parts[1])
+                            model_type = parts[2]
+                            filepath = os.path.join(round_path, filename)
+                            model_list.append((round_num, client_id, model_type, filepath))
+
+            return model_list
+
+        except Exception as e:
+            logging.warning(f"[模型列表] 列出模型失败: {e}")
+            return model_list
+
+    def get_archive_summary(self):
+        """
+        获取存档摘要信息
+
+        Returns:
+            summary: 存档摘要字典
+        """
+        summary = {
+            'archive_dir': self.model_archive_dir,
+            'total_customized': len(self.model_archive),
+            'total_trained': len(self.trained_model_archive),
+            'rounds': list(self.round_participants.keys()),
+            'model_list': self.list_archived_models(self.model_archive_dir)
+        }
+        return summary
+
+    def posterior_leak_detection(self, suspected_client, suspected_round, use_trained_model=True):
+        """
+        后验泄露检测：训练结束后，根据指定的假设泄漏者进行追溯检测
+
+        工作原理：
+        1. 获取假设泄漏者在那轮的模型（定制模型或训练后模型）
+        2. 遍历所有存档的模型，计算与假设模型的水印区域相似度
+        3. 相似度最高的模型所在轮次和客户端即为真正的泄漏源
+
+        Args:
+            suspected_client: 假设的泄漏客户端ID
+            suspected_round: 假设的泄漏轮次
+            use_trained_model: 是否使用训练后模型（True=训练后模型，False=定制模型）
+
+        Returns:
+            result: {
+                'suspected_client': int,  # 假设的泄漏客户端
+                'suspected_round': int,   # 假设的泄漏轮次
+                'actual_source': {         # 实际检测到的泄漏源
+                    'round': int,          # 实际泄漏轮次
+                    'client': int,        # 实际泄漏客户端
+                    'similarity': float   # 相似度
+                },
+                'all_rankings': [(round, client, similarity), ...],  # 所有模型的相似度排名
+                'is_correct': bool       # 假设是否正确
+            }
+        """
+        logging.info("=" * 80)
+        logging.info(f"[后验泄露检测] 假设泄漏者: 轮次 {suspected_round}, 客户端 {suspected_client}")
+        logging.info(f"[后验泄露检测] 使用模型类型: {'训练后模型' if use_trained_model else '定制模型'}")
+        logging.info("=" * 80)
+
+        try:
+            # 确定使用哪个存档
+            archive = self.trained_model_archive if use_trained_model else self.model_archive
+
+            # 检查假设的模型是否存在
+            suspected_key = (suspected_round, suspected_client)
+            if suspected_key not in archive:
+                logging.warning(f"[后验泄露检测] 假设的模型不存在: 轮次 {suspected_round}, 客户端 {suspected_client}")
+                return None
+
+            suspected_model = archive[suspected_key]
+            logging.info(f"[后验泄露检测] 已加载假设模型，当前存档共 {len(archive)} 个模型")
+
+            # 计算假设模型与所有存档模型的相似度
+            similarity_rankings = []
+
+            for (round_idx, client_id), model_state in archive.items():
+                if round_idx == suspected_round and client_id == suspected_client:
+                    # 跳过自身
+                    continue
+
+                # 计算水印区域相似度
+                similarity = self._compute_archive_similarity(
+                    suspected_model, model_state, suspected_client
+                )
+                similarity_rankings.append((round_idx, client_id, similarity))
+
+            # 按相似度降序排序
+            similarity_rankings.sort(key=lambda x: x[2], reverse=True)
+
+            # 找出相似度最高的模型（排除自身）
+            if similarity_rankings:
+                actual_round, actual_client, max_similarity = similarity_rankings[0]
+                actual_source = {
+                    'round': actual_round,
+                    'client': actual_client,
+                    'similarity': max_similarity
+                }
+            else:
+                actual_source = None
+                max_similarity = 0.0
+
+            # 判断假设是否正确（泄漏源就是假设的模型本身）
+            is_correct = (actual_source is None)  # 如果没有找到其他相似模型，说明假设正确
+
+            # 构建结果
+            result = {
+                'suspected_client': suspected_client,
+                'suspected_round': suspected_round,
+                'use_trained_model': use_trained_model,
+                'actual_source': actual_source,
+                'all_rankings': similarity_rankings[:20],  # 只保留前20个
+                'is_correct': is_correct,
+                'total_models_checked': len(archive) - 1
+            }
+
+            # 打印检测结果
+            logging.info(f"[后验泄露检测] 已检查 {len(archive) - 1} 个模型")
+            if actual_source:
+                logging.info(f"[后验泄露检测] 最相似的模型: 轮次 {actual_source['round']}, "
+                           f"客户端 {actual_source['client']}, 相似度={actual_source['similarity']:.6f}")
+            else:
+                logging.info(f"[后验泄露检测] 未找到其他相似模型，假设泄漏者可能正确")
+
+            logging.info(f"[后验泄露检测] 相似度排名前10:")
+            for i, (r, c, s) in enumerate(similarity_rankings[:10], 1):
+                marker = ""
+                if r == suspected_round and c == suspected_client:
+                    marker = " ← 假设泄漏者"
+                logging.info(f"  {i}. 轮次 {r}, 客户端 {c}: 相似度={s:.6f}{marker}")
+
+            logging.info("=" * 80)
+
+            return result
+
+        except Exception as e:
+            logging.warning(f"[后验泄露检测] 检测失败: {e}")
+            import traceback
+            logging.warning(traceback.format_exc())
+            return None
+
+    def _compute_archive_similarity(self, model_a, model_b, watermark_owner=None):
+        """
+        计算两个存档模型之间的水印区域相似度
+
+        Args:
+            model_a: 模型A的状态字典
+            model_b: 模型B的状态字典
+            watermark_owner: 水印所有者ID（用于提取特定水印区域）
+
+        Returns:
+            similarity: 余弦相似度
+        """
+        try:
+            # 获取水印位置
+            if watermark_owner is not None:
+                # 使用指定客户端的水印位置
+                positions_a = self._get_watermark_positions_for_client(watermark_owner)
+                positions_b = positions_a  # 使用相同的水印位置
+            else:
+                # 使用所有客户端的水印位置
+                positions_a = self._get_all_watermark_positions()
+                positions_b = positions_a
+
+            # 构建参数偏移映射
+            offset_map_a, _ = self._build_param_offset_map(model_a)
+            offset_map_b, _ = self._build_param_offset_map(model_b)
+
+            # 提取水印参数
+            params_a = self._extract_watermark_values(model_a, positions_a, offset_map_a)
+            params_b = self._extract_watermark_values(model_b, positions_b, offset_map_b)
+
+            if len(params_a) == 0 or len(params_b) == 0:
+                return 0.0
+
+            # 确保长度一致
+            min_len = min(len(params_a), len(params_b))
+            params_a = params_a[:min_len]
+            params_b = params_b[:min_len]
+
+            # 计算余弦相似度
+            return self._cosine_similarity(
+                torch.tensor(params_a),
+                torch.tensor(params_b)
+            )
+
+        except Exception as e:
+            logging.warning(f"[相似度计算] 计算失败: {e}")
+            return 0.0
+
+    def _get_all_watermark_positions(self):
+        """获取所有客户端的水印位置（去重）"""
+        try:
+            from utils.key_matrix_utils import KeyMatrixManager
+            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
+
+            all_positions = set()
+            for client_id in range(self.client_num):
+                positions = key_manager.load_positions(client_id)
+                all_positions.update(positions)
+
+            return list(all_positions)
+        except Exception as e:
+            logging.warning(f"[水印位置] 获取失败: {e}")
+            return []
+
+    def _extract_watermark_values(self, model_state, positions, offset_map):
+        """从模型状态中提取水印位置的参数值"""
+        values = []
+        for param_name, global_idx in positions:
+            local_idx, actual_param_name = self._convert_global_to_local_idx(
+                global_idx, param_name, model_state, offset_map
+            )
+
+            if actual_param_name and local_idx is not None:
+                if actual_param_name in model_state:
+                    param_flat = model_state[actual_param_name].view(-1)
+                    if local_idx < param_flat.numel():
+                        values.append(param_flat[local_idx].item())
+
+        return values
+
+    def run_posterior_detection_sweep(self, use_trained_model=True):
+        """
+        后验检测全覆盖：遍历所有存档的模型，验证检测准确性
+
+        对每个存档模型，假设它是泄漏者，使用后验检测方法找出它的"来源"。
+        如果检测正确，应该找不到比它更相似的模型（即它本身就是源头）。
+
+        Args:
+            use_trained_model: 是否使用训练后模型
+
+        Returns:
+            results: 每个假设泄漏者的检测结果列表
+        """
+        logging.info("=" * 80)
+        logging.info(f"[后验检测全覆盖] 开始遍历检测...")
+        logging.info(f"[后验检测全覆盖] 使用模型类型: {'训练后模型' if use_trained_model else '定制模型'}")
+        logging.info(f"[后验检测全覆盖] 存档总数: {len(self.trained_model_archive if use_trained_model else self.model_archive)}")
+        logging.info("=" * 80)
+
+        archive = self.trained_model_archive if use_trained_model else self.model_archive
+        results = []
+        correct_count = 0
+        total_count = 0
+
+        for (round_idx, client_id), model_state in archive.items():
+            # 使用该模型作为假设泄漏者进行检测
+            result = self._detect_source_for_model(
+                model_state, round_idx, client_id, archive
+            )
+            if result:
+                results.append(result)
+                total_count += 1
+                if result['is_source_confirmed']:
+                    correct_count += 1
+
+        # 汇总结果
+        accuracy = (correct_count / total_count * 100) if total_count > 0 else 0
+
+        summary = {
+            'total_tested': total_count,
+            'source_confirmed': correct_count,
+            'false_positives': total_count - correct_count,
+            'accuracy': accuracy,
+            'use_trained_model': use_trained_model,
+            'details': results
+        }
+
+        logging.info("=" * 80)
+        logging.info(f"[后验检测全覆盖] 汇总结果:")
+        logging.info(f"  总测试数: {total_count}")
+        logging.info(f"  源头确认: {correct_count} ({accuracy:.2f}%)")
+        logging.info(f"  误报数: {total_count - correct_count}")
+        logging.info("=" * 80)
+
+        return summary
+
+    def _detect_source_for_model(self, suspected_model, suspected_round, suspected_client, archive):
+        """
+        检测给定模型的"来源"（内部方法）
+
+        Args:
+            suspected_model: 假设泄漏的模型
+            suspected_round: 假设的泄漏轮次
+            suspected_client: 假设的泄漏客户端
+            archive: 模型存档
+
+        Returns:
+            result: 检测结果字典
+        """
+        try:
+            # 计算与所有其他模型的相似度
+            similarities = []
+
+            for (round_idx, client_id), model_state in archive.items():
+                if round_idx == suspected_round and client_id == suspected_client:
+                    continue
+
+                similarity = self._compute_archive_similarity(
+                    suspected_model, model_state, suspected_client
+                )
+                similarities.append((round_idx, client_id, similarity))
+
+            # 按相似度降序排序
+            similarities.sort(key=lambda x: x[2], reverse=True)
+
+            # 使用 Top-1 与 Top-2 的差距来判断源头是否唯一
+            # 核心思想：
+            #   - 如果该模型是唯一来源，它的相似度应该"一骑绝尘"
+            #   - 如果存在更相似的竞争者，Top-1 和 Top-2 会很接近
+            if len(similarities) >= 2:
+                top1_sim = similarities[0][2]
+                top2_sim = similarities[1][2]
+                top1_match = {
+                    'round': similarities[0][0],
+                    'client': similarities[0][1],
+                    'similarity': top1_sim
+                }
+                top2_match = {
+                    'round': similarities[1][0],
+                    'client': similarities[1][1],
+                    'similarity': top2_sim
+                }
+                # 计算差距：差距越大，说明源头越唯一
+                similarity_gap = top1_sim - top2_sim
+                # 相对差距：相对于 Top-2 的提升比例
+                relative_gap = (top1_sim - top2_sim) / max(top2_sim, 1e-8)
+            elif len(similarities) == 1:
+                top1_sim = similarities[0][2]
+                top2_sim = 0.0
+                top1_match = {
+                    'round': similarities[0][0],
+                    'client': similarities[0][1],
+                    'similarity': top1_sim
+                }
+                top2_match = None
+                similarity_gap = top1_sim  # 只有一个对比对象，差距就是它本身
+                relative_gap = float('inf')
+            else:
+                top1_sim = 0.0
+                top2_sim = 0.0
+                top1_match = None
+                top2_match = None
+                similarity_gap = 0.0
+                relative_gap = 0.0
+
+            # 判断源头是否唯一（基于差距而非绝对阈值）
+            # 使用相对差距 > 1% 作为判断标准（即 Top-1 比 Top-2 高出至少 1%）
+            GAP_THRESHOLD = 0.01  # 1% 的相对差距
+            is_source = relative_gap > GAP_THRESHOLD if relative_gap != float('inf') else True
+
+            result = {
+                'suspected_round': suspected_round,
+                'suspected_client': suspected_client,
+                'is_source_confirmed': is_source,
+                'top1_match': top1_match,
+                'top2_match': top2_match,
+                'top1_similarity': top1_sim,
+                'top2_similarity': top2_sim,
+                'similarity_gap': similarity_gap,
+                'relative_gap': relative_gap,
+                'gap_threshold': GAP_THRESHOLD
+            }
+
+            # 打印详细结果
+            status = "✓ 源头确认" if is_source else "⚠️ 存在竞争模型"
+            logging.info(f"[检测] 轮次 {suspected_round}, 客户端 {suspected_client}: {status} "
+                       f"(Top-1={top1_sim:.6f}, Top-2={top2_sim:.6f}, "
+                       f"差距={similarity_gap:.6f}, 相对差距={relative_gap*100:.2f}%)")
+
+            return result
+
+        except Exception as e:
+            logging.warning(f"[检测] 轮次 {suspected_round}, 客户端 {suspected_client} 检测失败: {e}")
+            return None
 
     def _get_watermark_positions_for_client(self, client_id):
         """
