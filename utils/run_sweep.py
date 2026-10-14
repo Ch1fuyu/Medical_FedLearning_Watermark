@@ -33,7 +33,7 @@ EXPERIMENTS = [
         '--dataset': 'cifar10',
         '--model_name': 'alexnet',
         '--optim': 'adam',
-        '--lr': '0.003',
+        '--lr': '0.001',
         '--client_num': '5',
     },
     {
@@ -41,7 +41,7 @@ EXPERIMENTS = [
         '--dataset': 'cifar10',
         '--model_name': 'alexnet',
         '--optim': 'adam',
-        '--lr': '0.003',
+        '--lr': '0.001',
         '--client_num': '10',
     },
     {
@@ -49,7 +49,7 @@ EXPERIMENTS = [
         '--dataset': 'cifar10',
         '--model_name': 'alexnet',
         '--optim': 'adam',
-        '--lr': '0.003',
+        '--lr': '0.001',
         '--client_num': '20',
     },
 
@@ -59,7 +59,7 @@ EXPERIMENTS = [
         '--dataset': 'cifar10',
         '--model_name': 'resnet',
         '--optim': 'sgd',
-        '--lr': '0.01',
+        '--lr': '0.001',
         '--client_num': '5',
     },
     {
@@ -67,7 +67,7 @@ EXPERIMENTS = [
         '--dataset': 'cifar10',
         '--model_name': 'resnet',
         '--optim': 'sgd',
-        '--lr': '0.01',
+        '--lr': '0.001',
         '--client_num': '10',
     },
     {
@@ -75,7 +75,7 @@ EXPERIMENTS = [
         '--dataset': 'cifar10',
         '--model_name': 'resnet',
         '--optim': 'sgd',
-        '--lr': '0.01',
+        '--lr': '0.001',
         '--client_num': '20',
     },
 
@@ -85,7 +85,7 @@ EXPERIMENTS = [
         '--dataset': 'cifar100',
         '--model_name': 'alexnet',
         '--optim': 'adam',
-        '--lr': '0.003',
+        '--lr': '0.001',
         '--client_num': '5',
     },
     {
@@ -93,7 +93,7 @@ EXPERIMENTS = [
         '--dataset': 'cifar100',
         '--model_name': 'alexnet',
         '--optim': 'adam',
-        '--lr': '0.003',
+        '--lr': '0.001',
         '--client_num': '10',
     },
     {
@@ -101,7 +101,7 @@ EXPERIMENTS = [
         '--dataset': 'cifar100',
         '--model_name': 'alexnet',
         '--optim': 'adam',
-        '--lr': '0.003',
+        '--lr': '0.001',
         '--client_num': '20',
     },
 
@@ -111,7 +111,7 @@ EXPERIMENTS = [
         '--dataset': 'cifar100',
         '--model_name': 'resnet',
         '--optim': 'sgd',
-        '--lr': '0.01',
+        '--lr': '0.001',
         '--client_num': '5',
     },
     {
@@ -127,7 +127,59 @@ EXPERIMENTS = [
         '--dataset': 'cifar100',
         '--model_name': 'resnet',
         '--optim': 'sgd',
-        '--lr': '0.01',
+        '--lr': '0.001',
+        '--client_num': '20',
+    },
+
+    # chestmnist + alexnet
+    {
+        'name': 'chestmnist_alexnet_5clients',
+        '--dataset': 'chestmnist',
+        '--model_name': 'alexnet',
+        '--optim': 'adam',
+        '--lr': '0.001',
+        '--client_num': '5',
+    },
+    {
+        'name': 'chestmnist_alexnet_10clients',
+        '--dataset': 'chestmnist',
+        '--model_name': 'alexnet',
+        '--optim': 'adam',
+        '--lr': '0.001',
+        '--client_num': '10',
+    },
+    {
+        'name': 'chestmnist_alexnet_20clients',
+        '--dataset': 'chestmnist',
+        '--model_name': 'alexnet',
+        '--optim': 'adam',
+        '--lr': '0.001',
+        '--client_num': '20',
+    },
+
+    # chestmnist + resnet
+    {
+        'name': 'chestmnist_resnet_5clients',
+        '--dataset': 'chestmnist',
+        '--model_name': 'resnet',
+        '--optim': 'sgd',
+        '--lr': '0.001',
+        '--client_num': '5',
+    },
+    {
+        'name': 'chestmnist_resnet_10clients',
+        '--dataset': 'chestmnist',
+        '--model_name': 'resnet',
+        '--optim': 'sgd',
+        '--lr': '0.001',
+        '--client_num': '10',
+    },
+    {
+        'name': 'chestmnist_resnet_20clients',
+        '--dataset': 'chestmnist',
+        '--model_name': 'resnet',
+        '--optim': 'sgd',
+        '--lr': '0.001',
         '--client_num': '20',
     },
 ]
@@ -138,7 +190,6 @@ GPU = '0'
 
 # 日志输出目录
 LOG_DIR = PROJECT_ROOT / 'logs'
-os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
 
