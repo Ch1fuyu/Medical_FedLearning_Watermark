@@ -301,12 +301,12 @@ class TrainerPrivateEnhanced:
         """嵌入水印到目标模型"""
         if not self.args or not getattr(self.args, 'use_key_matrix', False):
             return
-        
+
         try:
             encoder_params = self._extract_encoder_parameters()
             if encoder_params is None:
                 return
-            
+
             if self._key_manager is None:
                 try:
                     self._key_manager = KeyMatrixManager(
@@ -316,20 +316,36 @@ class TrainerPrivateEnhanced:
                 except Exception as e:
                     print(f"加载密钥矩阵管理器失败: {e}")
                     return
-            
+
             with torch.no_grad():
                 # 必须传递 self.model 以确保参数顺序与密钥矩阵生成时一致
                 model_params = dict(self.model.named_parameters())
+
+                # ========== 计算该客户端在 encoder_params 中的专属切片 ==========
+                # 水印值来自 encoder_params，各客户端连续存储（按 client_id 顺序）
+                # 客户端 k 的水印值 = encoder_params[offset_k : offset_k + len(positions_k)]
+                positions = self._key_manager.load_positions(client_id)
+                encoder_offset = 0
+                for cid in range(client_id):
+                    try:
+                        cid_positions = self._key_manager.load_positions(cid)
+                        encoder_offset += len(cid_positions)
+                    except Exception:
+                        pass
+                enc_slice_start = encoder_offset
+                enc_slice_end = enc_slice_start + len(positions)
+                client_encoder_slice = encoder_params[enc_slice_start:enc_slice_end]
+
                 watermarked_params = self._key_manager.embed_watermark(
-                    model_params, client_id, encoder_params, model=self.model
+                    model_params, client_id, client_encoder_slice, model=self.model
                 )
-                
+
                 for name, param in self.model.named_parameters():
                     if name in watermarked_params:
                         param.data.copy_(watermarked_params[name])
                 # 静默嵌入，减少日志输出
                 pass
-                                
+
         except Exception as e:
             print(f"⚠️ 水印嵌入失败: {e}")
 

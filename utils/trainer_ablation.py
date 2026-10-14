@@ -181,12 +181,27 @@ class TrainerAblation:
 
                     with torch.no_grad():
                         encoder_flat = torch.cat([param.view(-1) for param in encoder.parameters()])
-                        
+
+                        # ========== 计算该客户端在 encoder_flat 中的专属切片 ==========
+                        # 水印值来自 encoder_flat，各客户端连续存储（按 client_id 顺序）
+                        # 客户端 k 的水印值 = encoder_flat[offset_k : offset_k + len(positions_k)]
+                        positions = self._key_manager.load_positions(client_id)
+                        encoder_offset = 0
+                        for cid in range(client_id):
+                            try:
+                                cid_positions = self._key_manager.load_positions(cid)
+                                encoder_offset += len(cid_positions)
+                            except Exception:
+                                pass
+                        enc_slice_start = encoder_offset
+                        enc_slice_end = enc_slice_start + len(positions)
+                        client_encoder_slice = encoder_flat[enc_slice_start:enc_slice_end]
+
                         # 使用KeyMatrixManager的embed_watermark方法，自动处理缩放
                         # 必须传递 self.model 以确保参数顺序与密钥矩阵生成时一致
                         model_params = dict(self.model.named_parameters())
                         watermarked_params = self._key_manager.embed_watermark(
-                            model_params, client_id, encoder_flat, model=self.model
+                            model_params, client_id, client_encoder_slice, model=self.model
                         )
                         
                         # 将水印参数更新到模型中

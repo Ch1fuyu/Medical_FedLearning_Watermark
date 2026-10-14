@@ -268,27 +268,42 @@ class TrainerPrivate(object):
                 else:
                     encoder.load_state_dict(torch.load(self.args.encoder_path, map_location=self.device, weights_only=False))
 
-                with torch.no_grad():
-                    encoder_flat = torch.cat([param.view(-1) for param in encoder.parameters()])
+                    with torch.no_grad():
+                        encoder_flat = torch.cat([param.view(-1) for param in encoder.parameters()])
 
-                    # ==================== 水印参数自适应缩放 ====================
-                    # 分析主任务参数和水印参数的数值范围
-                    main_params = []
-                    for name, param in self.model.named_parameters():
-                        main_params.extend(param.view(-1).tolist())
-                    
-                    main_params = torch.tensor(main_params)
-                    main_std = main_params.std().item()
-                    main_mean_abs = main_params.abs().mean().item()
-                    watermark_std = encoder_flat.std().item()
-                    watermark_mean_abs = encoder_flat.abs().mean().item()
-                    
-                    # 使用KeyMatrixManager的embed_watermark方法，自动处理缩放
-                    # 必须传递 self.model 以确保参数顺序与密钥矩阵生成时一致
-                    model_params = dict(self.model.named_parameters())
-                    watermarked_params = self._key_manager.embed_watermark(
-                        model_params, client_id, encoder_flat, model=self.model
-                    )
+                        # ==================== 水印参数自适应缩放 ====================
+                        # 分析主任务参数和水印参数的数值范围
+                        main_params = []
+                        for name, param in self.model.named_parameters():
+                            main_params.extend(param.view(-1).tolist())
+
+                        main_params = torch.tensor(main_params)
+                        main_std = main_params.std().item()
+                        main_mean_abs = main_params.abs().mean().item()
+                        watermark_std = encoder_flat.std().item()
+                        watermark_mean_abs = encoder_flat.abs().mean().item()
+
+                        # ========== 计算该客户端在 encoder_flat 中的专属切片 ==========
+                        # 水印值来自 encoder_flat，各客户端连续存储（按 client_id 顺序）
+                        # 客户端 k 的水印值 = encoder_flat[offset_k : offset_k + len(positions_k)]
+                        position_dict = self._key_manager.load_positions(client_id)
+                        encoder_offset = 0
+                        for cid in range(client_id):
+                            try:
+                                cid_positions = self._key_manager.load_positions(cid)
+                                encoder_offset += len(cid_positions)
+                            except Exception:
+                                pass
+                        enc_slice_start = encoder_offset
+                        enc_slice_end = enc_slice_start + len(position_dict)
+                        client_encoder_slice = encoder_flat[enc_slice_start:enc_slice_end]
+
+                        # 使用KeyMatrixManager的embed_watermark方法，自动处理缩放
+                        # 必须传递 self.model 以确保参数顺序与密钥矩阵生成时一致
+                        model_params = dict(self.model.named_parameters())
+                        watermarked_params = self._key_manager.embed_watermark(
+                            model_params, client_id, client_encoder_slice, model=self.model
+                        )
                     
                     # 将水印参数更新到模型中
                     for name, param in self.model.named_parameters():
