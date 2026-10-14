@@ -349,15 +349,15 @@ class FederatedLearningOnChestMNIST(Experiment):
                             'is_correct': (actual_leaker == detected_leaker)
                         }
 
-                        logging.info(f"[追踪结果-噪声等级{level}] 轮次 {epoch + 1}")
-                        logging.info(f"  实际泄漏者: 客户端 {actual_leaker}")
-                        logging.info(f"  检测结果: 客户端 {detected_leaker}")
-                        logging.info(f"  追踪正确性: {'✓ 正确' if attack_results[level]['is_correct'] else '✗ 错误'}")
-                        logging.info(f"  相似度排名:")
-                        for rank, (cid, sim) in enumerate(similarity_rankings[:5], 1):
-                            marker = " <-- 检测" if cid == detected_leaker else ""
-                            actual_marker = " (实际泄漏者)" if cid == actual_leaker else ""
-                            logging.info(f"    {rank}. 客户端 {cid}: 相似度 = {sim:.6f}{marker}{actual_marker}")
+                        # 精简日志：每个噪声等级只输出 Top-1 + 实际泄漏者，避免冗长
+                        actual_sim = next((sim for c, sim in similarity_rankings if c == actual_leaker), 0.0)
+                        detected_sim = similarity_rankings[0][1] if similarity_rankings else 0.0
+                        status = '✓' if attack_results[level]['is_correct'] else '✗'
+                        logging.info(
+                            f"[追踪] 轮次{epoch + 1} 等级{level} | "
+                            f"实际C{actual_leaker}(sim={actual_sim:.4f}) | "
+                            f"检测C{detected_leaker}(sim={detected_sim:.4f}) {status}"
+                        )
 
                     # 记录汇总结果（使用等级2的结果作为主要判断）
                     primary_result = attack_results.get(2, attack_results.get(1, {}))
@@ -459,16 +459,6 @@ class FederatedLearningOnChestMNIST(Experiment):
             # 清理优化器状态，避免梯度累积
             if hasattr(self.trainer, 'optimizer') and self.trainer.optimizer is not None:
                 self.trainer.optimizer.zero_grad()
-            
-            # 梯度统计（已禁用，如需开启可将条件改为 % 10）
-            # if epoch >= 0 and hasattr(self.trainer, 'multi_loss') and (epoch + 1) % 10 == 0:
-                try:
-                    stats = self.trainer.get_gradient_stats()
-                    if stats:
-                        logging.info(f'轮次{epoch+1}梯度统计 - GM:{stats.get("prevGM", 0):.6f} GH:{stats.get("prevGH", 0):.6f} Ratio:{stats.get("prevRatio", 1):.6f}')
-                except Exception as e:
-                    pass  # 静默处理错误
-
 
             # 评估
             train_metrics = self.trainer.test(train_ldr)
@@ -937,22 +927,25 @@ class FederatedLearningOnChestMNIST(Experiment):
             for k in w_avg.keys():
                 w_avg[k] += local_ws[i][k] * normalized_weights[i]
 
-        # 水印聚合：使用密钥矩阵的独占式聚合，返回其他客户端水印区域的聚合结果
-        watermark_baseline = self._watermark_aggregation(local_ws, idxs_users, w_avg)
+        # 水印聚合：客户端 k 的 P_k 区域覆盖为 encoder_params 权威值，
+        # 其余水印区域与非水印区域保持 FedAvg 结果
+        self._watermark_aggregation(local_ws, idxs_users, w_avg)
 
         # 更新全局模型权重
         for k in w_avg.keys():
             self.w_t[k] = w_avg[k]
 
-        return watermark_baseline
+        return None
 
     def _generate_all_customized_models(self, global_model, idxs_users, epoch):
         """
         为所有参与本轮训练的客户端生成定制模型（下发前生成）
 
-        每个客户端的定制模型包含：
-        - 该客户端的独特水印区域：嵌入客户端专属的"指纹值"
-        - 其他区域：使用全局模型的参数
+        定制模型规则：
+        - 客户端 k 的水印区域 P_k：覆盖为服务器端 encoder_params 中的权威值
+          （客户端 k 的权威值 = encoder_params[encoder_offset_k : +len(P_k)]）
+        - 其它水印区域 P_j (j≠k)：保持 w_t 原值（即上一轮 FedAvg 结果）
+        - 非水印区域：保持 w_t 原值
 
         Args:
             global_model: 全局模型参数 (w_t)
@@ -964,57 +957,72 @@ class FederatedLearningOnChestMNIST(Experiment):
         """
         customized_models = {}
 
-        # 为每个客户端生成独特的基准偏移量
-        torch.manual_seed(42 + epoch)  # 保证每轮的可重复性
-        base_offset = torch.randn(1).item() * 0.01  # 基础偏移量
+        try:
+            from utils.key_matrix_utils import KeyMatrixManager
+            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
 
-        for client_id in idxs_users:
-            customized_models[client_id] = self._generate_customized_model(
-                client_id, global_model, base_offset, epoch
-            )
+            # 提取服务器端编码器参数作为权威水印源
+            encoder_params = self.trainer._extract_encoder_parameters()
+
+            if encoder_params is None:
+                logging.warning('无法提取 encoder_params，所有客户端下发 w_t 原值')
+                for client_id in idxs_users:
+                    customized_models[client_id] = {k: v.clone() for k, v in global_model.items()}
+                return customized_models
+
+            # 收集所有客户端的水印位置与长度
+            # encoder_params 按 client_id 顺序存储（0, 1, 2, ..., client_num-1）
+            # 所以 offset 必须按 client_id 顺序计算，不能按 idxs_users 顺序
+            all_watermark_positions = {}
+            all_position_lengths = {}
+            for client_id in idxs_users:
+                positions = key_manager.load_positions(client_id)
+                all_watermark_positions[client_id] = positions
+                all_position_lengths[client_id] = len(positions)
+
+            # 计算每个客户端在 encoder_params 中的偏移量（按 client_id 顺序）
+            # encoder_params[0 : len(P_0)] = client0
+            # encoder_params[len(P_0) : len(P_0)+len(P_1)] = client1
+            # 注意：必须对所有客户端（0到client_num-1）计算偏移，不能只对idxs_users中的客户端
+            # 因为 encoder_params 是按 client_id 顺序完整排列所有客户端的水印
+            encoder_offsets = {}
+            cumulative_offset = 0
+            for cid in range(self.client_num):
+                encoder_offsets[cid] = cumulative_offset
+                cumulative_offset += all_position_lengths.get(cid, 0)
+
+            # 构建参数偏移映射
+            offset_map, _ = self._build_param_offset_map(global_model)
+
+            for client_id in idxs_users:
+                customized_models[client_id] = self._generate_customized_model(
+                    client_id, global_model, all_watermark_positions[client_id],
+                    encoder_params, encoder_offsets[client_id], offset_map
+                )
+        except Exception as e:
+            logging.warning(f'_generate_all_customized_models 失败: {e}')
+            for client_id in idxs_users:
+                customized_models[client_id] = {k: v.clone() for k, v in global_model.items()}
+
         return customized_models
 
-    def _watermark_aggregation(self, local_ws, idxs_users, w_avg):
-        """
-        为所有参与本轮训练的客户端生成定制模型（下发前生成）
-
-        每个客户端的定制模型包含：
-        - 该客户端的独特水印区域：嵌入客户端专属的"指纹值"
-        - 其他区域：使用全局模型的参数
-
-        Args:
-            global_model: 全局模型参数 (w_t)
-            idxs_users: 参与训练的客户端ID列表
-            epoch: 当前轮次
-
-        Returns:
-            customized_models: 字典 {client_id: model_state_dict}
-        """
-        customized_models = {}
-        
-        # 为每个客户端生成独特的基准偏移量
-        torch.manual_seed(42 + epoch)  # 保证每轮的可重复性
-        base_offset = torch.randn(1).item() * 0.01  # 基础偏移量
-        
-        for client_id in idxs_users:
-            customized_models[client_id] = self._generate_customized_model(
-                client_id, global_model, base_offset, epoch
-            )
-        return customized_models
-
-    def _generate_customized_model(self, client_id, global_model, base_offset, epoch):
+    def _generate_customized_model(self, client_id, global_model, client_positions,
+                                   encoder_params, encoder_offset, offset_map):
         """
         为指定客户端生成"定制模型"
 
-        定制模型规则（泄漏前版本）：
-        - 客户端k的水印区域：嵌入客户端k专属的指纹值（基于 client_id 和轮次生成）
-        - 非水印区域：使用全局模型的参数
+        定制模型规则：
+        - 客户端 k 的水印区域 P_k：覆盖为 encoder_params[encoder_offset : +len(P_k)] 权威值
+        - 其它水印区域 P_j (j≠k)：保持 w_t 原值
+        - 非水印区域：保持 w_t 原值
 
         Args:
             client_id: 目标客户端ID
-            global_model: 全局模型参数
-            base_offset: 基础偏移量
-            epoch: 当前轮次
+            global_model: 全局模型参数 (w_t)
+            client_positions: 客户端 k 的水印位置 [(param_name, global_idx), ...]
+            encoder_params: 服务器端权威水印源（autoencoder 编码器参数）
+            encoder_offset: 客户端 k 在 encoder_params 中的起始偏移
+            offset_map: 参数偏移映射
 
         Returns:
             customized_model: 定制模型参数字典
@@ -1022,26 +1030,17 @@ class FederatedLearningOnChestMNIST(Experiment):
         customized_model = {}
 
         try:
-            from utils.key_matrix_utils import KeyMatrixManager
-            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
-
-            # 构建参数偏移映射
-            offset_map, param_order = self._build_param_offset_map(global_model)
-
-            # 获取当前客户端的水印位置
-            client_positions = self._get_watermark_positions_for_client(client_id)
-
             for param_name in global_model.keys():
                 param_tensor = global_model[param_name].clone()
                 param_flat = param_tensor.view(-1)
 
-                # 在该客户端的水印位置嵌入独特指纹
-                for param_name_w, global_idx in client_positions:
+                # 在该客户端的水印位置覆盖为 encoder 权威值
+                for wm_local_idx, (param_name_w, global_idx) in enumerate(client_positions):
                     if param_name_w != param_name:
                         continue
-                    
+
                     local_idx = None
-                    
+
                     # 直接使用局部索引
                     if global_idx < param_flat.numel():
                         local_idx = global_idx
@@ -1050,21 +1049,17 @@ class FederatedLearningOnChestMNIST(Experiment):
                         param_offset = offset_map[param_name]
                         if param_offset <= global_idx < param_offset + param_flat.numel():
                             local_idx = global_idx - param_offset
-                    
+
                     if local_idx is not None:
-                        # 生成客户端专属的指纹值
-                        torch.manual_seed(1000 + client_id + epoch * 100)
-                        fingerprint = base_offset + (torch.rand(1).item() - 0.5) * 0.02
-                        
-                        # 将指纹值添加到原有参数上（产生独特但微小的差异）
-                        original_value = param_flat[local_idx].item()
-                        param_flat[local_idx] = original_value + fingerprint
+                        enc_global_idx = encoder_offset + wm_local_idx
+                        if enc_global_idx < len(encoder_params):
+                            param_flat[local_idx] = encoder_params[enc_global_idx].item()
 
                 customized_model[param_name] = param_tensor
 
         except Exception as e:
-            logging.warning(f"Failed to generate customized model for client {client_id}: {e}")
-            return global_model.copy()
+            logging.warning(f'Failed to generate customized model for client {client_id}: {e}')
+            return {k: v.clone() for k, v in global_model.items()}
 
         return customized_model
 
@@ -1269,10 +1264,11 @@ class FederatedLearningOnChestMNIST(Experiment):
         追踪模型泄漏源
 
         原理：
-        - 每个客户端的定制模型在其水印区域嵌入了客户端专属的指纹值
-        - 如果客户端k的定制模型泄漏，我们可以从泄漏模型中提取其水印区域
-        - 比较泄漏模型与每个客户端的定制模型的水印区域相似度
-        - 客户端k的相似度最高（因为泄漏的就是k的模型）
+        - 服务器端 encoder_params 中按 idxs_users 顺序连续存储各客户端的权威水印
+        - 客户端 k 的权威水印 = encoder_params[encoder_offset_k : +len(P_k)]
+        - 从泄漏模型中逐个客户端提取其负责的水印区域 P_k 分片
+        - 计算泄漏模型的 P_k 分片与 encoder_params 中客户端 k 权威水印的余弦相似度
+        - 相似度最高的客户端即为泄漏者
 
         Args:
             leaked_model_state: 泄漏的模型参数字典
@@ -1283,30 +1279,41 @@ class FederatedLearningOnChestMNIST(Experiment):
             detected_leaker: 检测到的泄漏者ID
         """
         try:
-            # 计算每个客户端的定制模型与泄漏模型的相似度
+            from utils.key_matrix_utils import KeyMatrixManager
+            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
+
+            # 读取服务器端 encoder 权威水印
+            # encoder_params 按 client_id 顺序存储（0, 1, 2, ..., client_num-1）
+            encoder_params = self.trainer._extract_encoder_parameters()
+            if encoder_params is None:
+                logging.warning('无法提取 encoder_params，跳过泄漏追踪')
+                return [], None
+
+            encoder_params_np = encoder_params.cpu().numpy() if hasattr(encoder_params, 'cpu') else np.array(encoder_params)
+
+            # 计算每个客户端在 encoder_params 中的累计偏移（按 client_id 顺序）
+            # encoder_params[0 : len(P_0)] = client0 的权威水印
+            # encoder_params[len(P_0) : len(P_0)+len(P_1)] = client1 的权威水印
+            # ...
+            client_authority_wm = {}  # {client_id: numpy权威水印数组}
+            cumulative_offset = 0
+            for cid in range(self.client_num):
+                positions = key_manager.load_positions(cid)
+                wm_len = len(positions)
+                client_authority_wm[cid] = encoder_params_np[cumulative_offset:cumulative_offset + wm_len]
+                cumulative_offset += wm_len
+
+            # 逐个客户端从泄漏模型中提取其水印区域 P_k 分片，与该客户端的权威水印做余弦相似度
             similarity_rankings = []
-
             for client_id in idxs_users:
-                # 获取该客户端的定制模型
-                if client_id not in self.customized_models:
-                    continue
+                leaked_wm_k = self._extract_single_client_watermark_params(leaked_model_state, client_id)
+                authority_wm_k = client_authority_wm[client_id]
 
-                customized_model = self.customized_models[client_id]
-
-                # 提取该客户端的水印区域参数
-                leaked_watermark_params = self._extract_watermark_params_for_tracking(
-                    leaked_model_state, exclude_client_id=None  # 不排除任何客户端
-                )
-                client_watermark_params = self._extract_watermark_params_for_tracking(
-                    customized_model, exclude_client_id=None
-                )
-
-                if len(leaked_watermark_params) > 0 and len(client_watermark_params) > 0:
-                    # 确保长度一致，转换为numpy进行切片
-                    min_len = min(len(leaked_watermark_params), len(client_watermark_params))
+                if len(leaked_wm_k) > 0 and len(authority_wm_k) > 0:
+                    min_len = min(len(leaked_wm_k), len(authority_wm_k))
                     similarity = self._cosine_similarity(
-                        leaked_watermark_params[:min_len].numpy(),
-                        client_watermark_params[:min_len].numpy()
+                        leaked_wm_k[:min_len],
+                        authority_wm_k[:min_len]
                     )
                 else:
                     similarity = 0.0
@@ -1386,11 +1393,12 @@ class FederatedLearningOnChestMNIST(Experiment):
                 attacked_models[level] = self._add_noise_to_client_watermark(
                     leaked_model_copy, leaked_client, scale
                 )
-                logging.info(f"   [攻击模拟] 等级{level}: 已对客户端 {leaked_client} 的水印区域添加高斯噪声 (scale={scale})")
 
             leak_info['attacked_models'] = attacked_models
             # 默认使用中等强度进行追踪（便于观察）
             leak_info['model_params'] = attacked_models.get(2, leaked_model_copy)
+            # 一次性汇总攻击配置（避免每个等级重复打印）
+            logging.info(f"   [攻击配置] 客户端 {leaked_client} | 等级1/2/3 scale={list(noise_configs.values())}")
         else:
             # 无攻击模式，直接使用原始模型
             leak_info['model_params'] = leaked_model_copy
@@ -1399,9 +1407,7 @@ class FederatedLearningOnChestMNIST(Experiment):
         # 记录泄漏事件
         self.leakage_records.append(leak_info)
 
-        logging.info(f"=" * 60)
         logging.info(f"[模型泄漏模拟] 第 {epoch + 1} 轮 - 客户端 {leaked_client} 的定制模型在下发时泄漏")
-        logging.info(f"=" * 60)
 
         return leak_info
 
@@ -1481,9 +1487,7 @@ class FederatedLearningOnChestMNIST(Experiment):
             'leak_type': 'post_training'  # 标记为训练后泄露
         }
 
-        logging.info(f"=" * 60)
         logging.info(f"[训练后泄漏模拟] 第 {epoch + 1} 轮 - 客户端 {leaked_client} 的训练后模型泄漏")
-        logging.info(f"=" * 60)
 
         return leak_info
 
@@ -1572,8 +1576,6 @@ class FederatedLearningOnChestMNIST(Experiment):
                     new_value = original_value + noise
                     param_flat[local_idx] = new_value
 
-            logging.info(f"   [噪声统计] 水印参数均值={np.mean(watermark_values):.6f}, 标准差={value_std:.6f}, 噪声std={noise_std:.6f}")
-
             return noisy_model
 
         except Exception as e:
@@ -1631,100 +1633,40 @@ class FederatedLearningOnChestMNIST(Experiment):
 
     def _watermark_aggregation(self, local_ws, idxs_users, w_avg):
         """
-        水印聚合：水印区域覆盖为客户端专属水印值，非水印区域使用 FedAvg 结果
+        水印聚合：
 
-        定制模型逻辑（客户端 k）：
-        - 非水印区域：FedAvg（k-1 个其他客户端的平均）
-        - 水印区域：用服务器端保存的 encoder_params 切片覆盖
-          （客户端 k 的水印值 = encoder_params[offset_k : offset_k + len(positions_k)]）
+        ⚠️ 重要：水印覆盖 **不在此处** 进行！
+
+        设计意图：
+        - 聚合阶段：仅执行 FedAvg，所有水印位置和非水印位置都参与平均
+        - 覆盖阶段：仅在 _generate_customized_model 中，为每个客户端 k 单独覆盖其
+                   专属水印区域 P_k 为 encoder_params 权威值
+
+        因此聚合后的 w_t 中：
+        - 所有水印区域 P_k (k=0..N-1) = FedAvg 结果（每轮变化）
+        - 所有非水印区域 = FedAvg 结果
+
+        下发时为每个客户端 k 单独构造 M_k：
+        - M_k 的 P_k 区域 = encoder_params 权威值（每轮固定）
+        - M_k 的 P_j (j≠k) 区域 = w_t 的 FedAvg 结果（每轮变化）
+        - M_k 的非水印区域 = w_t 的 FedAvg 结果
+
+        这样追踪时：
+        - 客户端 0 泄漏 → M_0 的 P_0 区域为固定权威值
+        - 其他客户端 j ≠ 0 的 P_j 区域是上一轮 FedAvg 后的不同值
+        - 因此客户端 0 的相似度显著高于其他客户端，能正确追踪
 
         Args:
             local_ws: 本地模型权重列表
             idxs_users: 参与训练的客户端ID列表
-            w_avg: FedAvg 聚合后的权重字典
+            w_avg: FedAvg 聚合后的权重字典 (in-place 修改)
 
         Returns:
-            watermark_baseline: 其他客户端水印区域的聚合结果（用于追踪）
+            None
         """
-        watermark_baseline = {}
-        try:
-            from utils.key_matrix_utils import KeyMatrixManager
-
-            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
-
-            # 提取编码器参数作为水印
-            encoder_params = self.trainer._extract_encoder_parameters()
-
-            # 构建参数偏移映射
-            offset_map, param_order = self._build_param_offset_map(local_ws[0])
-
-            # 收集所有参与客户端的水印位置，并计算每个客户端的 encoder 偏移量
-            # encoder_params 中各客户端水印是连续存储的（按 client_id 顺序）
-            all_watermark_positions = {}
-            all_position_lengths = {}  # {client_id: len(positions)}
-
-            for i, client_id in enumerate(idxs_users):
-                positions = key_manager.load_positions(client_id)
-                all_watermark_positions[client_id] = positions
-                all_position_lengths[client_id] = len(positions)
-
-            # 计算每个客户端在 encoder_params 中的偏移量（累计）
-            # client_0: offset=0
-            # client_1: offset=len(positions_0)
-            # client_2: offset=len(positions_0)+len(positions_1)
-            # ...
-            encoder_offsets = {}  # {client_id: cumulative_encoder_offset}
-            cumulative_offset = 0
-            for client_id in idxs_users:
-                encoder_offsets[client_id] = cumulative_offset
-                cumulative_offset += all_position_lengths[client_id]
-
-            # 初始化 watermark_baseline
-            watermark_param_names = set()
-            for positions in all_watermark_positions.values():
-                for param_name, _ in positions:
-                    watermark_param_names.add(param_name)
-            for param_name in watermark_param_names:
-                if param_name in local_ws[0]:
-                    watermark_baseline[param_name] = torch.zeros_like(local_ws[0][param_name])
-
-            # 统计参与聚合的客户端数量
-            client_count = len(idxs_users)
-
-            # 聚合所有客户端的水印区域（用于追踪基准）
-            for i, client_id in enumerate(idxs_users):
-                positions = all_watermark_positions[client_id]
-                for param_name, global_idx in positions:
-                    local_idx, actual_param_name = self._convert_global_to_local_idx(
-                        global_idx, param_name, local_ws[i], offset_map
-                    )
-                    if actual_param_name and local_idx is not None:
-                        if actual_param_name in local_ws[i] and actual_param_name in watermark_baseline:
-                            local_param = local_ws[i][actual_param_name].view(-1)
-                            watermark_baseline[actual_param_name].view(-1)[local_idx] += local_param[local_idx].item() / client_count
-
-            # ========== 核心修改：为每个客户端覆盖其专属水印区域 ==========
-            # 水印值来自 encoder_params，各客户端连续存储（按 client_id 顺序）
-            # 客户端 k 的水印值 = encoder_params[offset_k : offset_k + len(positions_k)]
-            if encoder_params is not None:
-                for i, client_id in enumerate(idxs_users):
-                    positions = all_watermark_positions[client_id]
-                    enc_offset = encoder_offsets[client_id]  # 该客户端在 encoder_params 中的偏移
-
-                    for wm_local_idx, (param_name, global_idx) in enumerate(positions):
-                        enc_global_idx = enc_offset + wm_local_idx  # encoder_params 中的全局索引
-
-                        local_idx, actual_param_name = self._convert_global_to_local_idx(
-                            global_idx, param_name, w_avg, offset_map
-                        )
-
-                        if actual_param_name and local_idx is not None and enc_global_idx < len(encoder_params):
-                            w_avg[actual_param_name].view(-1)[local_idx] = encoder_params[enc_global_idx].item()
-
-        except Exception as e:
-            logging.warning(f"水印聚合失败: {e}")
-
-        return watermark_baseline
+        # 不做任何水印覆盖！所有水印位置保持 FedAvg 结果。
+        # 水印覆盖仅在 _generate_customized_model 中进行。
+        return None
 
     def _convert_global_to_local_idx(self, global_idx, param_name, model_state, offset_map):
         """将全局索引转换为局部索引"""
@@ -1804,8 +1746,6 @@ class FederatedLearningOnChestMNIST(Experiment):
             leaked_watermark_params = self._extract_single_client_watermark_params(
                 leaked_model_state, actual_leaked
             )
-            logging.info(f"[DEBUG] 第 {current_round} 轮: 泄漏者C{actual_leaked}水印长度={len(leaked_watermark_params)}, "
-                        f"均值={np.mean(leaked_watermark_params):.6f}, std={np.std(leaked_watermark_params):.6f}")
 
             # 对每个客户端进行检测：计算其定制模型的水印区域与泄漏模型中泄漏者水印的相似度
             for client_id in idxs_users:
@@ -1987,48 +1927,29 @@ class FederatedLearningOnChestMNIST(Experiment):
 
     def _log_watermark_detection(self, detection_result, sorted_similarities):
         """
-        打印水印相似度检测的日志
+        打印水印相似度检测的日志（精简版）
         """
-        logging.info("=" * 80)
-        logging.info(f"[水印相似度检测] 第 {detection_result['round']} 轮")
-        logging.info("=" * 80)
-        
-        # 打印每个客户端的相似度
+        # 一行汇总：检测 + 实际 + 正确性 + 阈值
+        det = detection_result.get('detected_malicious_client')
+        act = detection_result.get('actual_leaked_client')
+        is_correct = detection_result.get('is_detection_correct')
+        status = '✓' if is_correct else ('✗' if is_correct is False else '?')
+        th = detection_result['threshold_info']
+        logging.info(
+            f"[水印检测] 轮次{detection_result['round']} | "
+            f"实际C{act} | 检测C{det}(sim={sorted_similarities[0][1]:.4f}) {status} | "
+            f"阈值(th={th['threshold_2sigma']:.4f}, mean={th['mean']:.4f})"
+        )
+
+        # 仅打印可疑客户端
         for cid in detection_result['participating_clients']:
             assessment = detection_result['client_assessments'].get(cid, {})
-            sim = assessment.get('similarity')
-            rank = assessment.get('similarity_rank', '-')
-            is_susp = assessment.get('is_suspicious', False)
-            
-            if sim is not None:
-                status = "⚠️ 可疑" if is_susp else "正常"
-                marker = " ← 检测" if cid == detection_result.get('detected_malicious_client') else ""
-                actual_marker = " (实际泄漏者)" if cid == detection_result.get('actual_leaked_client') else ""
-                logging.info(
-                    f"  客户端 {cid}: 相似度={sim:.6f} (排名 {rank})  状态: {status}{marker}{actual_marker}"
-                )
-            else:
-                logging.info(f"  客户端 {cid}: 无法计算相似度")
-        
-        # 打印检测结果
-        if detection_result['detected_malicious_client'] is not None:
-            logging.info(
-                f"\n检测结果: 客户端 {detection_result['detected_malicious_client']} 可疑"
-            )
-        
-        # 打印实际泄漏者
-        if detection_result['actual_leaked_client'] is not None:
-            correct_str = "✓ 正确" if detection_result['is_detection_correct'] else "✗ 错误"
-            logging.info(f"实际泄漏者: 客户端 {detection_result['actual_leaked_client']}")
-            logging.info(f"检测正确性: {correct_str}")
-        
-        # 打印阈值信息
-        threshold_info = detection_result['threshold_info']
-        logging.info(
-            f"\n阈值信息: 均值={threshold_info['mean']:.6f}, "
-            f"标准差={threshold_info['std']:.6f}, 阈值={threshold_info['threshold_2sigma']:.6f}"
-        )
-        logging.info("=" * 80)
+            if assessment.get('is_suspicious') or cid in (det, act):
+                sim = assessment.get('similarity')
+                rank = assessment.get('similarity_rank', '-')
+                actual_marker = "(实际)" if cid == act else ""
+                det_marker = "[检测]" if cid == det else ""
+                logging.info(f"    客户端 {cid}: sim={sim:.4f} (排名{rank}) {det_marker}{actual_marker}")
 
 def main(args):
     logs = {'net_info': None,
