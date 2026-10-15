@@ -354,45 +354,9 @@ class AblationExperiment(Experiment):
             self.w_t[k] = w_avg[k]
 
     def _watermark_aggregation(self, local_ws, idxs_users, w_avg):
-        """
-        水印聚合：使用密钥矩阵的独占式聚合
-        消融实验保持此逻辑不变
-        """
-        try:
-            from utils.key_matrix_utils import KeyMatrixManager
-            
-            # 加载密钥矩阵管理器
-            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
-            
-            # 对每个客户端的水印位置进行独占式聚合
-            for i, client_id in enumerate(idxs_users):
-                try:
-                    # 获取该客户端的水印位置
-                    positions = key_manager.load_positions(client_id)
-                    
-                    # 对该客户端的水印位置使用独占式聚合
-                    for param_name, param_idx in positions:
-                        if param_name in local_ws[i] and param_name in w_avg:
-                            # 获取参数张量
-                            local_param = local_ws[i][param_name]
-                            avg_param = w_avg[param_name]
-                            
-                            # 确保参数形状一致
-                            if local_param.shape == avg_param.shape:
-                                # 将局部索引转换为扁平化索引
-                                param_flat = avg_param.view(-1)
-                                local_flat = local_param.view(-1)
-                                
-                                # 使用局部索引直接替换
-                                if param_idx < param_flat.numel():
-                                    param_flat[param_idx] = local_flat[param_idx]
-                                    
-                except Exception as e:
-                    logging.warning(f"Failed to apply watermark aggregation for client {client_id}: {e}")
-                    continue
-                    
-        except Exception as e:
-            logging.warning(f"Failed to load key matrix manager for watermark aggregation: {e}")
+        # 不做任何水印覆盖！所有水印位置保持 FedAvg 结果。
+        # 水印覆盖仅在 _generate_customized_model 中进行。
+        return None
 
 
 def main(args):

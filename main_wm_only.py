@@ -1,4 +1,4 @@
-﻿"""
+"""
 简化的联邦学习脚本（无泄漏追踪功能）
 保留水印嵌入和水印聚合功能，移除给每个客户端下发专有模型和追踪功能
 """
@@ -421,46 +421,9 @@ class FederatedLearningSimple(Experiment):
             self.w_t[k] = w_avg[k]
 
     def _watermark_aggregation(self, local_ws, idxs_users, w_avg):
-        """
-        水印聚合：使用密钥矩阵的独占式聚�?
-        每个客户端的水印区域保持其本地训练后的值，不参与平�?
-        """
-        try:
-            from utils.key_matrix_utils import KeyMatrixManager
-
-            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
-
-            # 对每个参与客户端的水印位置进行独占式聚合
-            for i, client_id in enumerate(idxs_users):
-                try:
-                    positions = key_manager.load_positions(client_id)
-
-                    for param_name, global_idx in positions:
-                        # 检查参数是否存�?
-                        if param_name not in local_ws[i] or param_name not in w_avg:
-                            continue
-
-                        local_param = local_ws[i][param_name]
-                        avg_param = w_avg[param_name]
-
-                        if local_param.shape != avg_param.shape:
-                            continue
-
-                        # 检查索引是否有�?
-                        param_flat = avg_param.view(-1)
-                        if global_idx >= param_flat.numel():
-                            continue
-
-                        # 将水印位置的值替换为本地训练后的�?
-                        local_flat = local_param.view(-1)
-                        param_flat[global_idx] = local_flat[global_idx]
-
-                except Exception as e:
-                    logging.warning(f"Failed to apply watermark aggregation for client {client_id}: {e}")
-                    continue
-
-        except Exception as e:
-            logging.warning(f"Failed to load key matrix manager for watermark aggregation: {e}")
+        # 不做任何水印覆盖！所有水印位置保持 FedAvg 结果。
+        # 水印覆盖仅在 _generate_customized_model 中进行。
+        return None
 
 
 def main(args):

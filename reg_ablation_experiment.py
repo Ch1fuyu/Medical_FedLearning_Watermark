@@ -1073,135 +1073,37 @@ class RegAblationExperiment(Experiment):
 
     def _watermark_aggregation(self, local_ws, idxs_users, w_avg):
         """
-        水印聚合：使用密钥矩阵的独占式聚合
+        水印聚合：不覆盖任何水印区域，保持 FedAvg 结果
+
+        设计意图：
+        - 聚合阶段：仅执行 FedAvg，所有水印位置和非水印位置都参与平均
+        - 覆盖阶段：仅在 _generate_customized_model 中，为每个客户端 k 单独覆盖其
+                   专属水印区域 P_k 为 encoder_params 权威值
+
+        因此聚合后的 w_t 中：
+        - 所有水印区域 P_k (k=0..N-1) = FedAvg 结果（每轮变化）
+        - 所有非水印区域 = FedAvg 结果
+
+        下发时为每个客户端 k 单独构造 M_k：
+        - M_k 的 P_k 区域 = encoder_params 权威值（每轮固定）
+        - M_k 的 P_j (j≠k) 区域 = w_t 的 FedAvg 结果（每轮变化）
+
+        这样追踪时：
+        - 客户端 k 泄漏 → M_k 的 P_k 区域为固定权威值
+        - 其他客户端 j ≠ k 的 P_j 区域是上一轮 FedAvg 后的不同值
+        - 因此客户端 k 的相似度显著高于其他客户端，能正确追踪
 
         Args:
             local_ws: 本地模型权重列表
             idxs_users: 参与训练的客户端ID列表
-            w_avg: 平均聚合后的权重字典
+            w_avg: 平均聚合后的权重字典（保持不变）
 
         Returns:
-            watermark_baseline: 其他客户端水印区域的聚合结果（用于追踪）
+            None
         """
-        watermark_baseline = {}
-        try:
-            from utils.key_matrix_utils import KeyMatrixManager
-
-            # 加载密钥矩阵管理器
-            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
-
-            # 构建参数偏移映射
-            offset_map, param_order = self._build_param_offset_map(local_ws[0])
-
-            # 初始化水印区域的聚合结果
-            watermark_param_names = set()
-            for i, client_id in enumerate(idxs_users):
-                positions = key_manager.load_positions(client_id)
-                for param_name, _ in positions:
-                    watermark_param_names.add(param_name)
-
-            # 为每个参数初始化聚合结果
-            for param_name in watermark_param_names:
-                if param_name in local_ws[0]:
-                    watermark_baseline[param_name] = torch.zeros_like(local_ws[0][param_name])
-
-            # 统计参与聚合的客户端数量
-            client_count = len(idxs_users)
-
-            # 对每个参与客户端的水印区域进行聚合
-            for i, client_id in enumerate(idxs_users):
-                try:
-                    positions = key_manager.load_positions(client_id)
-                    for param_name, global_idx in positions:
-                        # 尝试将全局索引转换为局部索引
-                        local_idx = None
-                        actual_param_name = None
-
-                        # 首先检查是否可以直接使用（局部索引）
-                        if param_name in local_ws[i]:
-                            param_size = local_ws[i][param_name].numel()
-                            if global_idx < param_size:
-                                actual_param_name = param_name
-                                local_idx = global_idx
-
-                        # 如果是全局索引，需要转换
-                        if actual_param_name is None and param_name in offset_map:
-                            param_offset = offset_map[param_name]
-                            param_size = local_ws[i][param_name].numel()
-                            if param_offset <= global_idx < param_offset + param_size:
-                                actual_param_name = param_name
-                                local_idx = global_idx - param_offset
-
-                        # 如果还是找不到，遍历找正确的参数
-                        if actual_param_name is None:
-                            for name, offset in offset_map.items():
-                                param_size = local_ws[i][name].numel()
-                                if offset <= global_idx < offset + param_size:
-                                    actual_param_name = name
-                                    local_idx = global_idx - offset
-                                    break
-
-                        if actual_param_name and local_idx is not None:
-                            if actual_param_name in local_ws[i] and actual_param_name in watermark_baseline:
-                                local_param = local_ws[i][actual_param_name].view(-1)
-                                watermark_baseline[actual_param_name].view(-1)[local_idx] += local_param[local_idx].item() / client_count
-
-                except Exception as e:
-                    logging.warning(f"Failed to aggregate watermark for client {client_id}: {e}")
-                    continue
-
-            # 对每个客户端的水印位置进行独占式聚合
-            for i, client_id in enumerate(idxs_users):
-                try:
-                    positions = key_manager.load_positions(client_id)
-
-                    for param_name, global_idx in positions:
-                        # 尝试将全局索引转换为局部索引
-                        local_idx = None
-                        actual_param_name = None
-
-                        # 首先检查是否可以直接使用
-                        if param_name in local_ws[i]:
-                            param_size = local_ws[i][param_name].numel()
-                            if global_idx < param_size:
-                                actual_param_name = param_name
-                                local_idx = global_idx
-
-                        # 如果是全局索引，需要转换
-                        if actual_param_name is None and param_name in offset_map:
-                            param_offset = offset_map[param_name]
-                            param_size = local_ws[i][param_name].numel()
-                            if param_offset <= global_idx < param_offset + param_size:
-                                actual_param_name = param_name
-                                local_idx = global_idx - param_offset
-
-                        # 如果还是找不到，遍历找正确的参数
-                        if actual_param_name is None:
-                            for name, offset in offset_map.items():
-                                param_size = local_ws[i][name].numel()
-                                if offset <= global_idx < offset + param_size:
-                                    actual_param_name = name
-                                    local_idx = global_idx - offset
-                                    break
-
-                        if actual_param_name and local_idx is not None:
-                            if actual_param_name in local_ws[i] and actual_param_name in w_avg:
-                                local_param = local_ws[i][actual_param_name]
-                                avg_param = w_avg[actual_param_name]
-
-                                if local_param.shape == avg_param.shape:
-                                    param_flat = avg_param.view(-1)
-                                    local_flat = local_param.view(-1)
-                                    param_flat[local_idx] = local_flat[local_idx]
-
-                except Exception as e:
-                    logging.warning(f"Failed to apply watermark aggregation for client {client_id}: {e}")
-                    continue
-
-        except Exception as e:
-            logging.warning(f"Failed to load key matrix manager for watermark aggregation: {e}")
-
-        return watermark_baseline
+        # 不做任何水印覆盖！所有水印位置保持 FedAvg 结果。
+        # 水印覆盖仅在 _generate_customized_model 中进行。
+        return None
 
 
 def main(args):
