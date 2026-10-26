@@ -309,7 +309,11 @@ def run_one_ratio(args, ratio, tag):
     if trace_path:
         with open(trace_path, 'r', encoding='utf-8') as f:
             tr = json.load(f)
-        trace_accuracy = tr.get('accuracy')
+        # 不同版本落盘字段名不一致，逐一兼容
+        for key in ('accuracy', 'overall_accuracy', 'trace_accuracy'):
+            if tr.get(key) is not None:
+                trace_accuracy = float(tr[key])
+                break
         nls = tr.get('noise_level_stats') or {}
         for level, stat in nls.items():
             if isinstance(stat, dict):
@@ -504,7 +508,11 @@ def main():
             trace_accuracy = None
             if trace_path:
                 with open(trace_path, 'r', encoding='utf-8') as f:
-                    trace_accuracy = json.load(f).get('accuracy')
+                    tr = json.load(f)
+                for key in ('accuracy', 'overall_accuracy', 'trace_accuracy'):
+                    if tr.get(key) is not None:
+                        trace_accuracy = float(tr[key])
+                        break
 
             excel_metrics = _read_excel_metrics(excel_path)
             r = {
