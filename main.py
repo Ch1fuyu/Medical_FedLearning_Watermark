@@ -927,8 +927,8 @@ class FederatedLearningOnChestMNIST(Experiment):
             for k in w_avg.keys():
                 w_avg[k] += local_ws[i][k] * normalized_weights[i]
 
-        # 水印聚合：服务器端 w_t 的所有水印区域 P_k (k=0..N-1)
-        # 覆盖为 encoder_params 权威值（固定不变），非水印区域保持 FedAvg 结果
+        # 水印聚合：保持纯 FedAvg（不做服务器端权威覆盖），
+        # 以保留客户端之间的水印区分性，保证训练前泄漏追踪可正确定位泄漏源。
         self._watermark_aggregation(local_ws, idxs_users, w_avg)
 
         # 更新全局模型权重
@@ -1631,73 +1631,61 @@ class FederatedLearningOnChestMNIST(Experiment):
 
     def _watermark_aggregation(self, local_ws, idxs_users, w_avg):
         """
-        服务器端水印聚合：聚合完成后，将 w_avg（水印区域）恢复为 encoder_params 权威值
+        服务器端水印聚合：**不做任何水印覆盖**（保持 FedAvg 结果）。
 
-        设计意图：
-        - 非水印区域：保持 FedAvg 结果
-        - 水印区域 P_k (k=0..N-1)：全部覆盖为 encoder_params 权威值（固定不变）
+        历史说明
+        --------
+        本函数曾在提交 4877a2c 中被改为：把 w_avg 中**所有**客户端的水印区域
+        P_k (k=0..N-1) 统一覆盖为 encoder_params 权威值。该改动引入了一个
+        训练前泄漏追踪的回归，现已回退，原因如下。
 
-        服务器端保存的 w_t：
-        - 所有水印区域 P_k = encoder_params 权威值（每轮重置为固定值）
-        - 非水印区域 = FedAvg 结果
+        回归机理
+        --------
+        定制模型 M_k 的水印区域内容由「w_t 的 P_j」决定：
 
-        下发时为每个客户端 k 单独构造 M_k：
-        - M_k 的 P_k 区域 = encoder_params 权威值
-        - M_k 的 P_j (j≠k) 区域 = w_t 的权威值（因为 w_t 全部水印区域都是权威值）
-        - M_k 的非水印区域 = w_t 的 FedAvg 结果
+        - 4877a2c 之前：w_t 的 P_j = FedAvg 结果（每轮变化，**各客户端不同**）
+          → M_k 的 P_j (j≠k) 是上一轮 FedAvg 的不同值
+          → 泄漏者 k 的定制模型中，只有 P_k 是权威值，P_j (j≠k) 是 FedAvg 值
+          → 追踪时「泄漏模型 P_k 分片 vs 客户端 k 权威水印」相似度 ≈ 1.0，
+            而其它客户端 j 的相似度很低 → 可区分，能正确定位泄漏者
+
+        - 4877a2c 之后：w_t 的 P_j = 权威值（对所有客户端完全相同）
+          → M_k 的所有水印区域 P_j 都是权威值
+          → 泄漏模型的每个 P_j 分片都等于对应的权威水印
+          → 所有客户端的相似度**全部并列在 1.0**，无法区分 → 退化为随机
+
+        实测证据（chestmnist / alexnet / K=5）：
+          - 4877a2c 之前（2026-10-21，150 轮）：追踪准确率 100%
+          - 4877a2c 之后（2026-10-26）：追踪准确率 3.33%（≈ 随机 1/K）
+            逐轮相似度：第 1 轮 0.9987（正确，第 1 轮 w_t 尚未被聚合覆盖），
+            第 2 轮起全部并列为 1.0000
+
+        为什么不需要服务器端覆盖
+        ----------------------
+        水印权威值**本来就在下发阶段被正确写入**：
+        `_generate_customized_model` 会把客户端 k 的 P_k 覆盖为权威值，
+        `_embed_watermark` 也会在本地训练前把权威值写回模型。
+
+        因此「训练后水印偏差检测」（`_watermark_deviation_detection`）
+        并不依赖服务器端聚合阶段的覆盖——它比较的是
+        「泄漏模型在 P_leaked 的分片」与「各客户端定制模型在 P_client 的分片」，
+        而定制模型的 P_client 恒为权威值。2026-10-21（覆盖之前）的历史结果
+        显示该指标当时同样是 100%。
+
+        结论：聚合阶段保持纯 FedAvg，可同时满足
+        「训练后偏差检测 100%」与「训练前泄漏追踪 100%」。
 
         Args:
             local_ws: 本地模型权重列表（仅用于签名，函数不修改）
             idxs_users: 参与训练的客户端ID列表
-            w_avg: FedAvg 聚合后的权重字典（in-place 修改）
+            w_avg: FedAvg 聚合后的权重字典（不做修改）
 
         Returns:
             None
         """
-        try:
-            from utils.key_matrix_utils import KeyMatrixManager
-            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
-
-            # 提取服务器端编码器参数作为权威水印源
-            encoder_params = self.trainer._extract_encoder_parameters()
-            if encoder_params is None:
-                logging.warning('_watermark_aggregation: 无法提取 encoder_params，跳过权威覆盖')
-                return None
-
-            # 构建参数偏移映射
-            offset_map, _ = self._build_param_offset_map(w_avg)
-
-            # 计算每个客户端在 encoder_params 中的偏移量（按 client_id 顺序）
-            all_position_lengths = {}
-            for cid in range(self.client_num):
-                positions = key_manager.load_positions(cid)
-                all_position_lengths[cid] = len(positions)
-
-            encoder_offsets = {}
-            cumulative_offset = 0
-            for cid in range(self.client_num):
-                encoder_offsets[cid] = cumulative_offset
-                cumulative_offset += all_position_lengths.get(cid, 0)
-
-            # 遍历所有客户端的水印区域 P_k，将 w_avg 中对应位置覆盖为 encoder_params 权威值
-            for cid in range(self.client_num):
-                positions = key_manager.load_positions(cid)
-                encoder_offset = encoder_offsets[cid]
-
-                for wm_local_idx, (param_name, global_idx) in enumerate(positions):
-                    local_idx, actual_param_name = self._convert_global_to_local_idx(
-                        global_idx, param_name, w_avg, offset_map
-                    )
-                    if local_idx is None or actual_param_name is None:
-                        continue
-
-                    enc_global_idx = encoder_offset + wm_local_idx
-                    if enc_global_idx < len(encoder_params):
-                        w_avg[actual_param_name].view(-1)[local_idx] = encoder_params[enc_global_idx].item()
-
-        except Exception as e:
-            logging.warning(f'_watermark_aggregation 失败: {e}')
-            return None
+        # 不做任何水印覆盖！所有水印位置保持 FedAvg 结果。
+        # 水印覆盖仅在 _generate_customized_model 中进行（对客户端自己的 P_k）。
+        return None
 
     def _convert_global_to_local_idx(self, global_idx, param_name, model_state, offset_map):
         """将全局索引转换为局部索引"""
