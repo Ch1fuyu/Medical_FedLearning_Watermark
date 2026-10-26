@@ -82,32 +82,43 @@ def _parse_wm_ratios(log_path):
     """
     从训练日志中解析梯度比例。
 
-    返回 (capping 前比例列表, capping 后比例列表, capping 触发次数)
+    每行日志形如：
+        wm/non_wm ratio:0.961 | wm/non_wm ratio(after cap):0.200 | cap_applied:True | ...
+
+    返回 (capping 前比例列表, capping 后比例列表, 触发了 capping 的次数,
+          仅在触发 capping 的那些行上的 capping 后比例列表)
     """
     before, after = [], []
+    after_when_applied = []
     cap_applied_count = 0
     if not os.path.exists(log_path):
-        return before, after, cap_applied_count
+        return before, after, cap_applied_count, after_when_applied
     with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
         for line in f:
-            m = _WM_RATIO_AFTER_CAP_RE.search(line)
-            if m:
+            # 注意：三个字段在**同一行**，必须各自独立解析，
+            # 不能在匹配到 after cap 后 continue，否则会漏掉该行的其它字段。
+            m_before = _WM_RATIO_RE.search(line)
+            m_after = _WM_RATIO_AFTER_CAP_RE.search(line)
+            m_cap = _CAP_APPLIED_RE.search(line)
+
+            if m_before:
                 try:
-                    after.append(float(m.group(1)))
+                    before.append(float(m_before.group(1)))
                 except ValueError:
                     pass
-                continue
-            m = _WM_RATIO_RE.search(line)
-            if m:
+            if m_after:
                 try:
-                    before.append(float(m.group(1)))
+                    val = float(m_after.group(1))
+                    after.append(val)
+                    # 只有真正触发了 capping 的行，其 after 值才应该等于目标值
+                    if m_cap and m_cap.group(1) == 'True':
+                        after_when_applied.append(val)
                 except ValueError:
                     pass
-            m = _CAP_APPLIED_RE.search(line)
-            if m:
-                if m.group(1) == 'True':
-                    cap_applied_count += 1
-    return before, after, cap_applied_count
+            if m_cap and m_cap.group(1) == 'True':
+                cap_applied_count += 1
+
+    return before, after, cap_applied_count, after_when_applied
 
 
 def _is_run_finished(log_path, expected_epochs):
@@ -300,7 +311,8 @@ def run_one_ratio(args, ratio, tag):
     duration = (datetime.now() - start).total_seconds()
 
     # ---- 收集指标 ----
-    wm_ratios, wm_ratios_after_cap, cap_applied_count = _parse_wm_ratios(log_file)
+    (wm_ratios, wm_ratios_after_cap, cap_applied_count,
+     wm_ratios_after_applied) = _parse_wm_ratios(log_file)
     log_detect_acc, log_trace_acc = _parse_acc_from_log(log_file)
 
     new_files = _diff_result_dirs(snapshot_before)
@@ -360,6 +372,8 @@ def run_one_ratio(args, ratio, tag):
         'wm_ratio_samples': len(wm_ratios),
         'wm_ratio_after_cap_mean': (sum(wm_ratios_after_cap) / len(wm_ratios_after_cap)) if wm_ratios_after_cap else None,
         'wm_ratio_after_cap_max': max(wm_ratios_after_cap) if wm_ratios_after_cap else None,
+        # 仅统计真正触发 capping 的那些行，用于校验 target_ratio 是否达成
+        'wm_ratio_after_applied_mean': (sum(wm_ratios_after_applied) / len(wm_ratios_after_applied)) if wm_ratios_after_applied else None,
         'cap_applied_count': cap_applied_count,
         'detection_file': det_path,
         'trace_file': trace_path,
@@ -388,7 +402,7 @@ def print_report(results, tag):
 
     header = (
         f"{'ratio':>6} | {'检测准确率%':>10} | {'追踪准确率%':>10} | "
-        f"{'最佳精度%':>9} | {'capping前':>9} | {'capping后':>9} | {'鲁棒性分':>8} | {'耗时s':>6}"
+        f"{'最佳精度%':>9} | {'capping前':>9} | {'capping后':>9} | {'达成比例':>9} | {'鲁棒性分':>8} | {'耗时s':>6}"
     )
     print(header)
     print('-' * 92)
@@ -404,12 +418,14 @@ def print_report(results, tag):
         obs = f"{obs:.3f}" if obs is not None else 'N/A'
         after = r.get('wm_ratio_after_cap_mean')
         after = f"{after:.3f}" if after is not None else 'N/A'
+        applied = r.get('wm_ratio_after_applied_mean')
+        applied = f"{applied:.3f}" if applied is not None else 'N/A'
         score = f"{r.get('robustness_score', 0):.2f}"
         dur = f"{r.get('duration_seconds', 0):.0f}"
         # 未跑完的实验加标记，避免用半程数据下结论
         mark = '' if r.get('finished', True) else ' *未完成'
         print(f"{r['target_ratio']:>6.2f} | {det:>10} | {tr:>10} | {acc:>9} | "
-              f"{obs:>9} | {after:>9} | {score:>8} | {dur:>6}{mark}")
+              f"{obs:>9} | {after:>9} | {applied:>9} | {score:>8} | {dur:>6}{mark}")
 
     print('-' * 92)
     if any(not r.get('finished', True) for r in results):
@@ -424,25 +440,24 @@ def print_report(results, tag):
     else:
         print('⚠️  没有成功的实验')
 
-    # capping 生效性检查：capping 之后的实际比例应贴合目标值
+    # capping 生效性检查：真正触发 capping 的那些行，其 after 值应贴合目标值
     print()
-    print('capping 生效性检查（capping 后的实际 wm/non_wm 比例 vs 目标值）:')
+    print('capping 生效性检查（触发 capping 时，实际 wm/non_wm 比例 vs 目标值）:')
     for r in sorted(results, key=lambda x: x['target_ratio']):
-        after = r.get('wm_ratio_after_cap_mean')
-        if after is None:
-            print(f"  ratio={r['target_ratio']:<5.2f} 无数据")
-            continue
         tgt = r['target_ratio']
         n_cap = r.get('cap_applied_count', 0)
+        applied = r.get('wm_ratio_after_applied_mean')
         if tgt <= 0:
             verdict = '已关闭 capping（梯度不缩放）'
         elif n_cap == 0:
             verdict = '未触发 capping（原比例本就低于目标）'
-        elif abs(after - tgt) <= max(0.05, tgt * 0.2):
-            verdict = f'OK（贴合目标，触发 {n_cap} 次）'
+        elif applied is None:
+            verdict = f'⚠️ 触发 {n_cap} 次但无 after 记录'
+        elif abs(applied - tgt) <= max(0.02, tgt * 0.1):
+            verdict = f'OK（达成 {applied:.3f}，触发 {n_cap} 次）'
         else:
-            verdict = f'⚠️ 偏离目标（触发 {n_cap} 次）'
-        print(f"  ratio={tgt:<5.2f} capping后均值={after:<8.3f} {verdict}")
+            verdict = f'⚠️ 偏离目标（实际 {applied:.3f}，触发 {n_cap} 次）'
+        print(f"  ratio={tgt:<5.2f} {verdict}")
 
     print('=' * 92)
 
@@ -516,7 +531,8 @@ def main():
             if not os.path.isdir(out_dir):
                 continue
             log_file = os.path.join(out_dir, 'train.log')
-            wm_ratios, wm_ratios_after_cap, cap_applied_count = _parse_wm_ratios(log_file)
+            (wm_ratios, wm_ratios_after_cap, cap_applied_count,
+             wm_ratios_after_applied) = _parse_wm_ratios(log_file)
             log_detect, log_trace = _parse_acc_from_log(log_file)
             # 只使用隔离目录中已归档的副本。
             # 注意：不能回退到全局 save/trace、save/detection —— 那里可能存在
@@ -560,6 +576,7 @@ def main():
                 'wm_ratio_samples': len(wm_ratios),
                 'wm_ratio_after_cap_mean': (sum(wm_ratios_after_cap) / len(wm_ratios_after_cap)) if wm_ratios_after_cap else None,
                 'wm_ratio_after_cap_max': max(wm_ratios_after_cap) if wm_ratios_after_cap else None,
+                'wm_ratio_after_applied_mean': (sum(wm_ratios_after_applied) / len(wm_ratios_after_applied)) if wm_ratios_after_applied else None,
                 'cap_applied_count': cap_applied_count,
             }
             r.update(excel_metrics)
