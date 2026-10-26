@@ -402,7 +402,7 @@ def print_report(results, tag):
 
     header = (
         f"{'ratio':>6} | {'检测准确率%':>10} | {'追踪准确率%':>10} | "
-        f"{'最佳精度%':>9} | {'capping前':>9} | {'capping后':>9} | {'达成比例':>9} | {'鲁棒性分':>8} | {'耗时s':>6}"
+        f"{'最佳精度%':>11} | {'capping前':>9} | {'capping后':>9} | {'达成比例':>9} | {'鲁棒性分':>8} | {'耗时s':>6}"
     )
     print(header)
     print('-' * 92)
@@ -413,7 +413,8 @@ def print_report(results, tag):
         tr = r.get('trace_accuracy')
         tr = f"{tr:.2f}" if tr is not None else 'N/A'
         acc = r.get('best_val_acc')
-        acc = f"{acc:.2f}" if acc is not None else 'N/A'
+        # 精度差异很小（ratio 越高，精度略高），保留 4 位小数才能看出差异
+        acc = f"{acc:.4f}" if acc is not None else 'N/A'
         obs = r.get('wm_ratio_observed_mean')
         obs = f"{obs:.3f}" if obs is not None else 'N/A'
         after = r.get('wm_ratio_after_cap_mean')
@@ -424,7 +425,7 @@ def print_report(results, tag):
         dur = f"{r.get('duration_seconds', 0):.0f}"
         # 未跑完的实验加标记，避免用半程数据下结论
         mark = '' if r.get('finished', True) else ' *未完成'
-        print(f"{r['target_ratio']:>6.2f} | {det:>10} | {tr:>10} | {acc:>9} | "
+        print(f"{r['target_ratio']:>6.2f} | {det:>10} | {tr:>10} | {acc:>11} | "
               f"{obs:>9} | {after:>9} | {applied:>9} | {score:>8} | {dur:>6}{mark}")
 
     print('-' * 92)
