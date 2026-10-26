@@ -50,6 +50,10 @@ class MultiLoss:
         self.current_wm_grad = 0.0
         self.current_non_wm_grad = 0.0
         self.current_wm_ratio = 1.0
+        # capping 之后水印区梯度的实际比例（用于验证 target_ratio 是否真的达成）
+        self.current_wm_ratio_after_cap = 1.0
+        self.cap_applied = False
+        self.cap_scale_factor = 1.0
 
         self._param_snapshot = None
         self._total_param_drift = 0.0
@@ -195,22 +199,25 @@ class MultiLoss:
         self.update_gradient_stats(gradients, watermark_grads, target_mask, encoder_mask, effective_mask)
 
         # 只有在非恶意客户端时才进行水印梯度缩放
+        self.cap_applied = False
+        self.cap_scale_factor = 1.0
+        corrected_gradients = gradients
         if not skip_gradient_scaling and getattr(self, 'target_ratio', 0.3) > 0 and wm_ratio > self.target_ratio:
             target_wm_grad = mean_non_watermark_grad.detach() * self.target_ratio
             current_wm_grad_val = mean_watermark_grad.detach()
 
             if current_wm_grad_val > 1e-10:
-                scale_factor = (target_wm_grad / current_wm_grad_val).clamp(0.1, 1.0)
+                # 缩放因子：把水印区梯度均值压到 target_ratio * 非水印区梯度均值。
+                # 下限不能设成 0.1，否则当原比例远大于 target_ratio 时
+                # 实际达成的比例会停在 0.1 * (wm/non_wm)，永远达不到目标值。
+                scale_factor = (target_wm_grad / current_wm_grad_val).clamp(min=0.0, max=1.0)
 
-                wm_sign = torch.sign(gradients * watermark_mask).clamp_min(0.0)
-                wm_negative_sign = torch.sign(gradients * watermark_mask).clamp_max(0.0)
-
-                scaled_wm_grad = torch.abs(gradients * watermark_mask) * scale_factor
-
+                # 只对水印区做等比缩放，保留原始梯度符号。
+                # 注意：不能用 sign() 拆分正负部分再重组，那样负梯度会被翻成正梯度。
+                watermark_grad_only = gradients * watermark_mask
                 corrected_gradients = (
                     gradients * non_watermark_mask
-                    + wm_sign * scaled_wm_grad
-                    - wm_negative_sign * scaled_wm_grad
+                    + watermark_grad_only * scale_factor
                 )
 
                 start_idx = 0
@@ -218,6 +225,16 @@ class MultiLoss:
                     numel = param.numel()
                     param.grad.view(-1).copy_(corrected_gradients[start_idx:start_idx + numel])
                     start_idx += numel
+
+                self.cap_applied = True
+                self.cap_scale_factor = float(scale_factor.item())
+
+        # 统计 capping 之后水印区梯度的实际比例，用于验证 target_ratio 是否真的达成
+        wm_after = torch.abs(corrected_gradients if self.cap_applied else gradients) * watermark_mask
+        wm_after_mean = wm_after.sum() / watermark_count
+        self.current_wm_ratio_after_cap = float(
+            (wm_after_mean / (mean_non_watermark_grad + 1e-8)).item()
+        )
 
         if not hasattr(self, '_epoch_printed'):
             self._epoch_printed = set()
@@ -227,6 +244,8 @@ class MultiLoss:
             print(
                 f"[MultiLoss] E{current_epoch} | loss:{main_loss.item():.4f} | "
                 f"reg_ratio:{ratio:.1f}% | wm/non_wm ratio:{self.current_wm_ratio:.3f} | "
+                f"wm/non_wm ratio(after cap):{self.current_wm_ratio_after_cap:.3f} | "
+                f"cap_applied:{self.cap_applied} | "
                 f"wm_grad:{self.current_wm_grad:.3e} | non_wm_grad:{self.current_non_wm_grad:.3e}"
             )
 
@@ -298,6 +317,9 @@ class MultiLoss:
             'current_wm_grad': self.current_wm_grad,
             'current_non_wm_grad': self.current_non_wm_grad,
             'current_wm_ratio': self.current_wm_ratio,
+            'current_wm_ratio_after_cap': self.current_wm_ratio_after_cap,
+            'cap_applied': self.cap_applied,
+            'cap_scale_factor': self.cap_scale_factor,
         }
 
     def reset_stats(self):
@@ -312,6 +334,9 @@ class MultiLoss:
         self.current_wm_grad = 0.0
         self.current_non_wm_grad = 0.0
         self.current_wm_ratio = 1.0
+        self.current_wm_ratio_after_cap = 1.0
+        self.cap_applied = False
+        self.cap_scale_factor = 1.0
         self._param_snapshot = None
         self._total_param_drift = 0.0
         self._wm_param_drift = 0.0
