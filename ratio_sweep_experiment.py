@@ -110,6 +110,26 @@ def _parse_wm_ratios(log_path):
     return before, after, cap_applied_count
 
 
+def _is_run_finished(log_path, expected_epochs):
+    """
+    判断训练是否已跑完。
+
+    依据：训练日志中出现 "Finish" 结束标记，或已出现最后一个 epoch 的记录。
+    用于避免在实验尚未完成时用半程数据下结论。
+    """
+    if not os.path.exists(log_path):
+        return False
+    try:
+        with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+    except Exception:
+        return False
+
+    if 'Finish' in content or '训练完成' in content:
+        return True
+    return f'Epoch: {expected_epochs} / {expected_epochs}' in content
+
+
 def _parse_acc_from_log(log_path):
     """从训练日志中解析检测准确率与追踪准确率"""
     detect_acc, trace_acc = None, None
@@ -386,10 +406,14 @@ def print_report(results, tag):
         after = f"{after:.3f}" if after is not None else 'N/A'
         score = f"{r.get('robustness_score', 0):.2f}"
         dur = f"{r.get('duration_seconds', 0):.0f}"
+        # 未跑完的实验加标记，避免用半程数据下结论
+        mark = '' if r.get('finished', True) else ' *未完成'
         print(f"{r['target_ratio']:>6.2f} | {det:>10} | {tr:>10} | {acc:>9} | "
-              f"{obs:>9} | {after:>9} | {score:>8} | {dur:>6}")
+              f"{obs:>9} | {after:>9} | {score:>8} | {dur:>6}{mark}")
 
     print('-' * 92)
+    if any(not r.get('finished', True) for r in results):
+        print('注: 标记 *未完成 的实验数据仅供参考，不参与最优 ratio 评选。')
 
     ok = [r for r in results if r.get('success')]
     if ok:
@@ -494,12 +518,18 @@ def main():
             log_file = os.path.join(out_dir, 'train.log')
             wm_ratios, wm_ratios_after_cap, cap_applied_count = _parse_wm_ratios(log_file)
             log_detect, log_trace = _parse_acc_from_log(log_file)
-            # 优先使用隔离目录中已归档的副本
+            # 只使用隔离目录中已归档的副本。
+            # 注意：不能回退到全局 save/trace、save/detection —— 那里可能存在
+            # 其它实验（甚至本 sweep 其它 ratio）的产物，会把不相关的指标
+            # 错误地归到当前 ratio 上。
             det_copies = sorted(glob.glob(os.path.join(out_dir, 'watermark_deviation_detection_*.json')))
             trace_copies = sorted(glob.glob(os.path.join(out_dir, 'trace_results_*.json')))
-            det_path = det_copies[-1] if det_copies else _latest_detection_json(out_dir, args.model_name, args.dataset)
-            trace_path = trace_copies[-1] if trace_copies else _latest_trace_json(out_dir, args.model_name, args.dataset)
+            det_path = det_copies[-1] if det_copies else None
+            trace_path = trace_copies[-1] if trace_copies else None
             excel_path = _latest_excel(out_dir)
+
+            # 训练是否已跑完（用于标记未完成的实验，避免用半程数据下结论）
+            finished = _is_run_finished(log_file, args.epochs)
 
             detection_accuracy = None
             if det_path:
@@ -516,7 +546,10 @@ def main():
 
             excel_metrics = _read_excel_metrics(excel_path)
             r = {
-                'target_ratio': ratio, 'tag': tag, 'success': True,
+                'target_ratio': ratio, 'tag': tag,
+                # 未跑完的实验不参与"最优 ratio"评选，避免半程数据误导
+                'success': bool(finished),
+                'finished': bool(finished),
                 'out_dir': out_dir, 'log_file': log_file,
                 'detection_accuracy': detection_accuracy,
                 'trace_accuracy': trace_accuracy,
