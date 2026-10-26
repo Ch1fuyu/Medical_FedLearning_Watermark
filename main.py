@@ -927,15 +927,13 @@ class FederatedLearningOnChestMNIST(Experiment):
             for k in w_avg.keys():
                 w_avg[k] += local_ws[i][k] * normalized_weights[i]
 
-        # 水印聚合：客户端 k 的 P_k 区域覆盖为 encoder_params 权威值，
-        # 其余水印区域与非水印区域保持 FedAvg 结果
+        # 水印聚合：服务器端 w_t 的所有水印区域 P_k (k=0..N-1)
+        # 覆盖为 encoder_params 权威值（固定不变），非水印区域保持 FedAvg 结果
         self._watermark_aggregation(local_ws, idxs_users, w_avg)
 
         # 更新全局模型权重
         for k in w_avg.keys():
             self.w_t[k] = w_avg[k]
-
-        return None
 
     def _generate_all_customized_models(self, global_model, idxs_users, epoch):
         """
@@ -1633,40 +1631,73 @@ class FederatedLearningOnChestMNIST(Experiment):
 
     def _watermark_aggregation(self, local_ws, idxs_users, w_avg):
         """
-        水印聚合：
-
-        ⚠️ 重要：水印覆盖 **不在此处** 进行！
+        服务器端水印聚合：聚合完成后，将 w_avg（水印区域）恢复为 encoder_params 权威值
 
         设计意图：
-        - 聚合阶段：仅执行 FedAvg，所有水印位置和非水印位置都参与平均
-        - 覆盖阶段：仅在 _generate_customized_model 中，为每个客户端 k 单独覆盖其
-                   专属水印区域 P_k 为 encoder_params 权威值
+        - 非水印区域：保持 FedAvg 结果
+        - 水印区域 P_k (k=0..N-1)：全部覆盖为 encoder_params 权威值（固定不变）
 
-        因此聚合后的 w_t 中：
-        - 所有水印区域 P_k (k=0..N-1) = FedAvg 结果（每轮变化）
-        - 所有非水印区域 = FedAvg 结果
+        服务器端保存的 w_t：
+        - 所有水印区域 P_k = encoder_params 权威值（每轮重置为固定值）
+        - 非水印区域 = FedAvg 结果
 
         下发时为每个客户端 k 单独构造 M_k：
-        - M_k 的 P_k 区域 = encoder_params 权威值（每轮固定）
-        - M_k 的 P_j (j≠k) 区域 = w_t 的 FedAvg 结果（每轮变化）
+        - M_k 的 P_k 区域 = encoder_params 权威值
+        - M_k 的 P_j (j≠k) 区域 = w_t 的权威值（因为 w_t 全部水印区域都是权威值）
         - M_k 的非水印区域 = w_t 的 FedAvg 结果
 
-        这样追踪时：
-        - 客户端 0 泄漏 → M_0 的 P_0 区域为固定权威值
-        - 其他客户端 j ≠ 0 的 P_j 区域是上一轮 FedAvg 后的不同值
-        - 因此客户端 0 的相似度显著高于其他客户端，能正确追踪
-
         Args:
-            local_ws: 本地模型权重列表
+            local_ws: 本地模型权重列表（仅用于签名，函数不修改）
             idxs_users: 参与训练的客户端ID列表
-            w_avg: FedAvg 聚合后的权重字典 (in-place 修改)
+            w_avg: FedAvg 聚合后的权重字典（in-place 修改）
 
         Returns:
             None
         """
-        # 不做任何水印覆盖！所有水印位置保持 FedAvg 结果。
-        # 水印覆盖仅在 _generate_customized_model 中进行。
-        return None
+        try:
+            from utils.key_matrix_utils import KeyMatrixManager
+            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
+
+            # 提取服务器端编码器参数作为权威水印源
+            encoder_params = self.trainer._extract_encoder_parameters()
+            if encoder_params is None:
+                logging.warning('_watermark_aggregation: 无法提取 encoder_params，跳过权威覆盖')
+                return None
+
+            # 构建参数偏移映射
+            offset_map, _ = self._build_param_offset_map(w_avg)
+
+            # 计算每个客户端在 encoder_params 中的偏移量（按 client_id 顺序）
+            all_position_lengths = {}
+            for cid in range(self.client_num):
+                positions = key_manager.load_positions(cid)
+                all_position_lengths[cid] = len(positions)
+
+            encoder_offsets = {}
+            cumulative_offset = 0
+            for cid in range(self.client_num):
+                encoder_offsets[cid] = cumulative_offset
+                cumulative_offset += all_position_lengths.get(cid, 0)
+
+            # 遍历所有客户端的水印区域 P_k，将 w_avg 中对应位置覆盖为 encoder_params 权威值
+            for cid in range(self.client_num):
+                positions = key_manager.load_positions(cid)
+                encoder_offset = encoder_offsets[cid]
+
+                for wm_local_idx, (param_name, global_idx) in enumerate(positions):
+                    local_idx, actual_param_name = self._convert_global_to_local_idx(
+                        global_idx, param_name, w_avg, offset_map
+                    )
+                    if local_idx is None or actual_param_name is None:
+                        continue
+
+                    enc_global_idx = encoder_offset + wm_local_idx
+                    if enc_global_idx < len(encoder_params):
+                        w_avg[actual_param_name].view(-1)[local_idx] = encoder_params[enc_global_idx].item()
+
+        except Exception as e:
+            logging.warning(f'_watermark_aggregation 失败: {e}')
+            return None
 
     def _convert_global_to_local_idx(self, global_idx, param_name, model_state, offset_map):
         """将全局索引转换为局部索引"""
