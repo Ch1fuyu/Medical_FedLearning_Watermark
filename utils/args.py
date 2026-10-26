@@ -17,7 +17,7 @@ def parser_args():
     parser.add_argument('--override', type=str, default=None, help='comma-separated key=value overrides')
 
     # ========================= 联邦学习核心参数 ========================
-    parser.add_argument('--epochs', type=int, default=100, help='total communication rounds')
+    parser.add_argument('--epochs', type=int, default=150, help='total communication rounds')
     parser.add_argument('--local_ep', type=int, default=2, help='local epochs per client: E')
     parser.add_argument('--batch_size', type=int, default=128, help='local batch size: B')
     parser.add_argument('--client_num', type=int, default=5, help='number of clients: K')
@@ -25,7 +25,7 @@ def parser_args():
     parser.add_argument('--iid', action='store_true', default=True, help='IID data distribution')
 
     # ========================= 优化器参数 ========================
-    parser.add_argument('--optim', type=str, default='sgd', choices=['sgd', 'adam'], help='optimizer type')
+    parser.add_argument('--optim', type=str, default='adam', choices=['sgd', 'adam'], help='optimizer type')
     parser.add_argument('--lr', type=float, default=0.001, help='learning rate for local updates')
     parser.add_argument('--wd', type=float, default=1e-5, help='weight decay (L2 regularization)')
     parser.add_argument('--use_lr_scheduler', action='store_true', default=False, help='use cosine annealing learning rate scheduler')
