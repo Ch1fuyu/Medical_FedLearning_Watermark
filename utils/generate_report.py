@@ -26,6 +26,16 @@ import re
 import sys
 from datetime import datetime
 
+# --------------------------------------------------------------------------- #
+# 重要: 必须在 import numpy 之前设置
+#   本机 anaconda 环境自带的 MKL 在 AVX2 路径上会触发 "Windows fatal exception
+#   0xc06d007e" (缺失 DLL), 表现为 numpy.dot / matplotlib 绘制时进程直接崩溃
+#   且无 Python 异常。禁用 MKL 多线程调度即可绕开。
+#   如在别的机器上运行, 该设置无副作用, 可安全保留。
+# --------------------------------------------------------------------------- #
+os.environ.setdefault('MKL_THREADING_LAYER', 'SEQUENTIAL')
+os.environ.setdefault('MKL_ENABLE_INSTRUCTIONS', 'SSE4_2')
+
 
 # ============================================================
 # 路径与数据加载
@@ -50,22 +60,218 @@ def load_latest_data():
     return diag, surv, diag_path, surv_path
 
 
+def check_data_freshness(diag_path, surv_path):
+    """
+    对比诊断/存活数据与最新实验结果的时间戳, 过旧则明确告警。
+    返回 (diag_ok, surv_ok)
+    """
+    root = get_project_root()
+    latest_exp = _latest_experiment_time(root)
+    if latest_exp is None:
+        print("[WARN] 找不到实验结果文件, 无法校验诊断数据新鲜度")
+        return True, True
+
+    ok = True
+    for label, path in (('梯度诊断', diag_path), ('水印存活', surv_path)):
+        if not path:
+            continue
+        t = os.path.getmtime(path)
+        if t < latest_exp:
+            age_days = (latest_exp - t) / 86400.0
+            print(f"[WARN] {label}数据过期: {relpath(path, root)} "
+                  f"比最新实验结果旧 {age_days:.1f} 天, "
+                  f"建议重跑 {'watermark_diagnostics.py' if '诊断' in label else 'watermark_survival_analysis.py'}")
+            ok = False
+    return ok, ok
+
+
+def _latest_experiment_time(root):
+    """最新一次实验结果 (trace/detection/aggregate) 的修改时间"""
+    candidates = []
+    for sub, pattern in (('trace', 'trace_results_*.json'),
+                          ('detection', 'watermark_deviation_detection_*.json')):
+        d = os.path.join(root, 'save', sub)
+        for p in glob.glob(os.path.join(d, pattern)):
+            candidates.append(os.path.getmtime(p))
+    agg = os.path.join(root, 'save', 'aggregate', 'summary_by_experiment.csv')
+    if os.path.exists(agg):
+        candidates.append(os.path.getmtime(agg))
+    return max(candidates) if candidates else None
+
+
 def relpath(p, root):
     return os.path.relpath(p, root) if p else 'N/A'
 
 
 # ============================================================
-# 追踪准确率数据（来自论文已发表结果，保持稳定）
+# 追踪准确率数据
 # ============================================================
+# 优先从 aggregate_results.py 产出的 summary_by_experiment.csv 读取真实实验结果;
+# 若该文件不存在, 再回退到 save/trace 与 save/detection 下最新 18 个结果文件。
+# 严禁硬编码: 历史版本在此写死了 AlexNet+CIFAR 在 target_ratio=0.3 下
+# 失败时的旧数据 (0.31/0.25/0.17), 导致与实际 100% 的结果不符。
 
-TRACKING_ACCURACY = {
-    'AlexNet + ChestMNIST':  {'K=5': 1.0000, 'K=10': 0.9933, 'K=20': 0.9666},
-    'AlexNet + CIFAR-10':    {'K=5': 0.3133, 'K=10': 0.2533, 'K=20': 0.1733},
-    'AlexNet + CIFAR-100':   {'K=5': 0.3133, 'K=10': 0.3000, 'K=20': 0.3000},
-    'ResNet18 + ChestMNIST': {'K=5': 1.0000, 'K=10': 0.9866, 'K=20': 1.0000},
-    'ResNet18 + CIFAR-10':   {'K=5': 0.9866, 'K=10': 0.9933, 'K=20': 0.9933},
-    'ResNet18 + CIFAR-100':  {'K=5': 0.9933, 'K=10': 0.9800, 'K=20': 1.0000},
+DATASET_LABEL = {
+    'chestmnist': 'ChestMNIST',
+    'cifar10': 'CIFAR-10',
+    'cifar100': 'CIFAR-100',
 }
+MODEL_LABEL = {
+    'alexnet': 'AlexNet',
+    'resnet': 'ResNet18',
+}
+
+
+def _norm_dataset(ds):
+    return DATASET_LABEL.get(str(ds).strip().lower(), str(ds))
+
+
+def _norm_model(md):
+    m = str(md).strip().lower()
+    if m in ('resnet18', 'resnet18_', 'resnet'):
+        return 'ResNet18'
+    return MODEL_LABEL.get(m, md)
+
+
+def load_tracking_accuracy():
+    """
+    读取 (model, dataset, K) -> 追踪准确率(0~1) 的真实实验结果。
+
+    数据源优先级 (全部来自真实实验产物, 不含任何硬编码):
+      1. save/aggregate/aggregate_results.xlsx 的 Summary 表
+      2. save/aggregate/summary_by_experiment.csv
+      3. save/figures/plot_data_for_redo.xlsx 的 Fig1a_Accuracy 表
+      4. 回退: 直接扫描 save/trace 与 save/detection 的原始结果文件
+
+    返回 dict: { 'AlexNet + CIFAR-10': {'K=5': 1.0, ...}, ... }
+    """
+    root = get_project_root()
+
+    rows, src = [], None
+
+    # 1) aggregate Excel (与用户手动查看的 Excel 同源)
+    xlsx = os.path.join(root, 'save', 'aggregate', 'aggregate_results.xlsx')
+    if os.path.exists(xlsx):
+        try:
+            import pandas as pd
+            df = pd.read_excel(xlsx, sheet_name='Summary')
+            rows = df.to_dict('records')
+            src = relpath(xlsx, root)
+        except Exception as e:  # noqa: BLE001
+            print(f"[WARN] 读取 {xlsx} 失败: {e}")
+            rows = []
+
+    # 2) summary CSV
+    if not rows:
+        csv_path = os.path.join(root, 'save', 'aggregate', 'summary_by_experiment.csv')
+        if os.path.exists(csv_path):
+            try:
+                import csv as _csv
+                with open(csv_path, 'r', encoding='utf-8-sig', newline='') as f:
+                    rows = list(_csv.DictReader(f))
+                src = relpath(csv_path, root)
+            except Exception as e:  # noqa: BLE001
+                print(f"[WARN] 读取 {csv_path} 失败: {e}")
+                rows = []
+
+    # 3) 绘图数据 Excel (Fig1a_Accuracy)
+    if not rows:
+        pdx = os.path.join(root, 'save', 'figures', 'plot_data_for_redo.xlsx')
+        if os.path.exists(pdx):
+            try:
+                import pandas as pd
+                df = pd.read_excel(pdx, sheet_name='Fig1a_Accuracy')
+                df = df.rename(columns={'trace_accuracy_pct': 'trace_accuracy'})
+                rows = df.to_dict('records')
+                src = relpath(pdx, root)
+            except Exception as e:  # noqa: BLE001
+                print(f"[WARN] 读取 {pdx} 失败: {e}")
+                rows = []
+
+    # 4) 回退: 原始结果文件
+    if not rows:
+        rows = _tracking_accuracy_from_raw_results(root)
+        src = 'save/trace + save/detection'
+
+    result = {}
+    for r in rows:
+        try:
+            acc = float(r.get('trace_accuracy', r.get('trace_accuracy_pct')))
+        except (TypeError, ValueError):
+            continue
+        if acc > 1.0:
+            acc = acc / 100.0
+        key = f"{_norm_model(r.get('model'))} + {_norm_dataset(r.get('dataset'))}"
+        try:
+            k = int(float(r.get('client_num')))
+        except (TypeError, ValueError):
+            continue
+        result.setdefault(key, {})[f'K={k}'] = acc
+
+    if result:
+        print(f"[OK] 追踪准确率: 从 {src} 加载 "
+              f"{sum(len(v) for v in result.values())} 个配置")
+    else:
+        print("[!] 未找到真实追踪准确率数据")
+    return result
+
+
+def _tracking_accuracy_from_raw_results(root):
+    """直接扫描 save/trace 与 save/detection, 按 (model, dataset, K) 取最新文件配对。"""
+    import glob
+    import re
+    from datetime import datetime
+
+    trace_dir = os.path.join(root, 'save', 'trace')
+    det_dir = os.path.join(root, 'save', 'detection')
+    re_trace = re.compile(r'trace_results_(?P<m>.+?)_(?P<d>chestmnist|cifar10|cifar100)_'
+                          r'(?P<ts>\d{14})\.json$')
+    re_det = re.compile(r'watermark_deviation_detection_(?P<m>.+?)_(?P<d>chestmnist|cifar10|cifar100)_'
+                        r'(?P<ts>\d{14})\.json$')
+
+    def collect(d, rx):
+        out = []
+        for p in glob.glob(os.path.join(d, '*.json')):
+            m = rx.match(os.path.basename(p))
+            if not m:
+                continue
+            out.append({'path': p, 'model': m.group('m'), 'dataset': m.group('d'),
+                        'ts': m.group('ts'),
+                        'dt': datetime.strptime(m.group('ts'), '%Y%m%d%H%M%S')})
+        out.sort(key=lambda x: x['dt'], reverse=True)
+        return out
+
+    traces = collect(trace_dir, re_trace)[:18]
+    dets = collect(det_dir, re_det)[:18]
+    det_by_key = {}
+    for d in dets:
+        det_by_key.setdefault((d['model'], d['dataset']), []).append(d)
+
+    rows = []
+    for t in traces:
+        try:
+            data = json.load(open(t['path'], encoding='utf-8'))
+        except Exception:  # noqa: BLE001
+            continue
+        acc = data.get('overall_accuracy')
+        if acc is None:
+            continue
+        if acc > 1.0:
+            acc = acc / 100.0
+        k = _infer_client_num(data)
+        rows.append({'model': t['model'], 'dataset': t['dataset'],
+                     'client_num': k, 'trace_accuracy': acc})
+    return rows
+
+
+def _infer_client_num(trace_data):
+    """从 similarity_rankings 长度推断客户端数量"""
+    for d in (trace_data.get('details') or []):
+        rk = d.get('similarity_rankings') or []
+        if rk:
+            return len(rk)
+    return None
+
 
 COLOR_MAP = {
     'AlexNet':   '#E74C3C',
@@ -100,300 +306,42 @@ def _arch_color(name):
     return COLOR_MAP['AlexNet'] if 'AlexNet' in name else COLOR_MAP['ResNet18']
 
 
-def fig1_tracking_accuracy(figures_dir):
-    """图1: 追踪准确率柱状图（来自 TRACKING_ACCURACY 常量）"""
-    plt = _setup_matplotlib()
-    import numpy as np
-
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
-    fig.suptitle('Watermark Tracking Accuracy (target_ratio=0.3)',
-                 fontsize=14, fontweight='bold')
-
-    datasets = ['ChestMNIST', 'CIFAR-10', 'CIFAR-100']
-    x = np.arange(len(datasets))
-    bar_width = 0.35
-
-    for idx, k in enumerate(['K=5', 'K=10', 'K=20']):
-        ax = axes[idx]
-        alex_vals = [TRACKING_ACCURACY[f'AlexNet + {d}'][k] for d in datasets]
-        resnet_vals = [TRACKING_ACCURACY[f'ResNet18 + {d}'][k] for d in datasets]
-
-        b1 = ax.bar(x - bar_width/2, alex_vals, bar_width,
-                    color=COLOR_MAP['AlexNet'], alpha=0.85, label='AlexNet',
-                    edgecolor='black', linewidth=0.5)
-        b2 = ax.bar(x + bar_width/2, resnet_vals, bar_width,
-                    color=COLOR_MAP['ResNet18'], alpha=0.85, label='ResNet18',
-                    edgecolor='black', linewidth=0.5)
-        for bars in [b1, b2]:
-            for bar in bars:
-                ax.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.015,
-                        f'{bar.get_height():.2f}', ha='center', va='bottom', fontsize=8)
-
-        ax.set_xticks(x)
-        ax.set_xticklabels(datasets, fontsize=10)
-        ax.set_ylim(0, 1.15)
-        ax.set_ylabel('Tracking Accuracy')
-        ax.set_title(k, fontsize=12, fontweight='bold')
-        ax.legend(loc='lower right', fontsize=9)
-        ax.grid(axis='y', alpha=0.3, linestyle='--')
-        ax.axhline(y=0.5, color='gray', linestyle=':', alpha=0.5)
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(figures_dir, '01_tracking_accuracy.png'),
-                dpi=150, bbox_inches='tight', facecolor='white')
-    plt.close()
-    print(f"[OK] 01_tracking_accuracy.png")
+def _avg_tracking(acc_map):
+    """对某配置的 {K: acc} 求平均; 空字典返回 0"""
+    vals = [v for v in acc_map.values() if v is not None]
+    return sum(vals) / len(vals) if vals else 0
 
 
-def fig2_capacity_analysis(diag, figures_dir):
-    """图2: 容量竞争分析（自动从 diag JSON 读取）"""
-    plt = _setup_matplotlib()
-    import numpy as np
 
-    if not diag:
-        print("[!] 无梯度诊断数据，跳过图2")
-        return
+def generate_all_figures(figures_dir, diag, surv, tracking_accuracy=None):
+    """
+    图表统一由 ``python -m utils.plot_paper_figures`` 生成 (两种攻击模式分开绘制):
+        fig1_perturbation_accuracy.png    水印区域扰动的追踪准确率
+        fig2_finetune_accuracy.png   本地微调的检测准确率
+        fig3_perturbation_similarity.png   水印区域扰动的 top-1/top-2 相似度与 gap
+        fig4_finetune_similarity.png  本地微调的 top-1/top-2 相似度与 gap
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle('Model Capacity Analysis (Auto from diagnostics JSON)',
-                 fontsize=14, fontweight='bold')
-
-    names = list(diag.keys())
-    short = [n.replace(' + ', '\n') for n in names]
-    colors = [_arch_color(n) for n in names]
-
-    # (a) 总梯度范数
-    grad_norms = [diag[n]['total_grad_norm'] for n in names]
-    bars = axes[0, 0].bar(short, grad_norms, color=colors, edgecolor='black', linewidth=0.5)
-    for bar, v in zip(bars, grad_norms):
-        axes[0, 0].text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.5,
-                         f'{v:.2f}', ha='center', va='bottom', fontsize=9, fontweight='bold')
-    axes[0, 0].set_ylabel('Total Gradient Norm')
-    axes[0, 0].set_title('(a) Main Task Gradient Strength', fontweight='bold')
-    axes[0, 0].grid(axis='y', alpha=0.3, linestyle='--')
-
-    # (b) 单位参数负载
-    loads = [diag[n]['total_grad_norm'] / diag[n]['total_params'] for n in names]
-    bars = axes[0, 1].bar(short, loads, color=colors, edgecolor='black', linewidth=0.5)
-    for bar, v in zip(bars, loads):
-        axes[0, 1].text(bar.get_x() + bar.get_width()/2., bar.get_height() + v*0.02,
-                         f'{v:.2e}', ha='center', va='bottom', fontsize=8, fontweight='bold')
-    axes[0, 1].set_ylabel('Gradient / Params')
-    axes[0, 1].set_title('(b) Gradient Load per Parameter', fontweight='bold')
-    axes[0, 1].grid(axis='y', alpha=0.3, linestyle='--')
-
-    # (c) 活跃参数比例
-    active = [diag[n]['active_grad_ratio'] for n in names]
-    bars = axes[1, 0].bar(short, active, color=colors, edgecolor='black', linewidth=0.5)
-    for bar, v in zip(bars, active):
-        axes[1, 0].text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.005,
-                         f'{v:.4f}', ha='center', va='bottom', fontsize=9, fontweight='bold')
-    axes[1, 0].set_ylabel('Active Ratio')
-    axes[1, 0].set_title('(c) Active Parameter Ratio', fontweight='bold')
-    axes[1, 0].set_ylim(0.99, 1.005)
-    axes[1, 0].grid(axis='y', alpha=0.3, linestyle='--')
-
-    # (d) 负载 vs 追踪准确率
-    avg_tracking = {n: sum(TRACKING_ACCURACY.get(n, {}).values()) / 3 for n in names}
-    for i, n in enumerate(names):
-        x = diag[n]['total_grad_norm'] / diag[n]['total_params']
-        y = avg_tracking.get(n, 0)
-        axes[1, 1].scatter(x, y, s=200, c=colors[i], edgecolor='black', linewidth=1.5, zorder=3)
-        axes[1, 1].annotate(n.replace(' + ', '\n'), (x, y),
-                             textcoords="offset points", xytext=(8, 5), fontsize=8)
-    axes[1, 1].set_xlabel('Gradient Load per Parameter')
-    axes[1, 1].set_ylabel('Avg Tracking Accuracy')
-    axes[1, 1].set_title('(d) Load vs Tracking Accuracy', fontweight='bold')
-    axes[1, 1].grid(alpha=0.3, linestyle='--')
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(figures_dir, '02_capacity_analysis.png'),
-                dpi=150, bbox_inches='tight', facecolor='white')
-    plt.close()
-    print(f"[OK] 02_capacity_analysis.png")
-
-
-def fig3_survival_curves(surv, figures_dir):
-    """图3: 水印存活曲线（自动从 surv JSON 读取）"""
-    plt = _setup_matplotlib()
-    import numpy as np
-
-    if not surv:
-        print("[!] 无水印存活数据，跳过图3")
-        return
-
-    fig, axes = plt.subplots(1, 2, figsize=(15, 5))
-    fig.suptitle('Watermark Survival Over Training Rounds', fontsize=14, fontweight='bold')
-
-    # 子图 (a): L2 变化
-    for name, s in surv.items():
-        rounds = (s.get('history', {}).get('round') or
-                  s.get('round_indices') or
-                  list(range(1, len(s.get('wm_l2_change', s.get('history', {}).get('wm_l2_change', []))) + 1)))
-        wm = s.get('history', {}).get('wm_l2_change') or s.get('wm_l2_change') or []
-        if wm:
-            axes[0].plot(rounds[:len(wm)], wm, 'o-',
-                         label=name, color=_arch_color(name), linewidth=2, markersize=5)
-    axes[0].set_xlabel('Round')
-    axes[0].set_ylabel('Watermark L2 Change')
-    axes[0].set_title('(a) Watermark Region Drift', fontweight='bold')
-    axes[0].legend(loc='upper left', fontsize=8)
-    axes[0].grid(alpha=0.3, linestyle='--')
-    axes[0].set_yscale('log')
-
-    # 子图 (b): 保护比
-    for name, s in surv.items():
-        rounds = (s.get('history', {}).get('round') or
-                  s.get('round_indices') or
-                  list(range(1, len(s.get('wm_l2_change', s.get('history', {}).get('wm_l2_change', []))) + 1)))
-        wm = s.get('history', {}).get('wm_l2_change') or s.get('wm_l2_change') or []
-        nwm = s.get('history', {}).get('nonwm_l2_change') or s.get('nonwm_l2_change') or []
-        if wm and nwm:
-            ratios = [w/n if n > 0 else 0 for w, n in zip(wm, nwm)]
-            axes[1].plot(rounds[:len(ratios)], ratios, 'o-',
-                         label=name, color=_arch_color(name), linewidth=2, markersize=5)
-    axes[1].set_xlabel('Round')
-    axes[1].set_ylabel('WM / Non-WM L2')
-    axes[1].set_title('(b) Watermark Protection Ratio', fontweight='bold')
-    axes[1].legend(loc='upper left', fontsize=8)
-    axes[1].grid(alpha=0.3, linestyle='--')
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(figures_dir, '03_survival_curves.png'),
-                dpi=150, bbox_inches='tight', facecolor='white')
-    plt.close()
-    print(f"[OK] 03_survival_curves.png")
-
-
-def fig4_hypothesis_heatmap(diag, figures_dir):
-    """图4: 假设验证热力图"""
-    plt = _setup_matplotlib()
-    import numpy as np
-
-    if not diag:
-        print("[!] 无诊断数据，跳过图4")
-        return
-
-    names = list(diag.keys())
-    short = [n.replace(' + ', '\n') for n in names]
-
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    fig.suptitle('Hypothesis Validation: Metrics Heatmap', fontsize=14, fontweight='bold')
-
-    # (a) 追踪准确率热力图
-    matrix = np.zeros((len(names), 3))
-    for i, n in enumerate(names):
-        for j, k in enumerate(['K=5', 'K=10', 'K=20']):
-            matrix[i, j] = TRACKING_ACCURACY.get(n, {}).get(k, 0)
-    im1 = axes[0].imshow(matrix, cmap='RdYlGn', vmin=0, vmax=1, aspect='auto')
-    axes[0].set_xticks([0, 1, 2])
-    axes[0].set_xticklabels(['K=5', 'K=10', 'K=20'])
-    axes[0].set_yticks(range(len(names)))
-    axes[0].set_yticklabels(short)
-    axes[0].set_title('(a) Tracking Accuracy', fontweight='bold')
-    for i in range(len(names)):
-        for j in range(3):
-            color = 'white' if matrix[i, j] < 0.5 else 'black'
-            axes[0].text(j, i, f'{matrix[i, j]:.3f}', ha='center', va='center',
-                         color=color, fontsize=9, fontweight='bold')
-    plt.colorbar(im1, ax=axes[0])
-
-    # (b) 容量诊断热力图（归一化）
-    metrics_keys = ['total_grad_norm', 'active_grad_ratio']
-    metrics_names = ['Grad Norm', 'Active Ratio']
-    matrix2 = np.zeros((len(names), len(metrics_keys)))
-    for i, n in enumerate(names):
-        for j, k in enumerate(metrics_keys):
-            matrix2[i, j] = diag[n].get(k, 0)
-    matrix2_norm = matrix2.copy()
-    for j in range(len(metrics_keys)):
-        col_min, col_max = matrix2[:, j].min(), matrix2[:, j].max()
-        if col_max > col_min:
-            matrix2_norm[:, j] = (matrix2[:, j] - col_min) / (col_max - col_min)
-    im2 = axes[1].imshow(matrix2_norm, cmap='coolwarm', vmin=0, vmax=1, aspect='auto')
-    axes[1].set_xticks(range(len(metrics_keys)))
-    axes[1].set_xticklabels(metrics_names, rotation=15, ha='right')
-    axes[1].set_yticks(range(len(names)))
-    axes[1].set_yticklabels(short)
-    axes[1].set_title('(b) Capacity Metrics (Normalized)', fontweight='bold')
-    for i in range(len(names)):
-        for j in range(len(metrics_keys)):
-            axes[1].text(j, i, f'{matrix2[i, j]:.3f}', ha='center', va='center',
-                         color='black', fontsize=8)
-    plt.colorbar(im2, ax=axes[1])
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(figures_dir, '04_hypothesis_heatmap.png'),
-                dpi=150, bbox_inches='tight', facecolor='white')
-    plt.close()
-    print(f"[OK] 04_hypothesis_heatmap.png")
-
-
-def fig5_recommendations(diag, surv, figures_dir):
-    """图5: 推荐配置"""
-    plt = _setup_matplotlib()
-    import numpy as np
-
-    if not diag:
-        print("[!] 无诊断数据，跳过图5")
-        return
-
-    names = list(diag.keys())
-    short = [n.replace(' + ', '\n') for n in names]
-    current = [0.3] * len(names)
-    recommended = [0.55 if 'AlexNet' in n and 'CIFAR' in n else
-                   0.40 if 'ResNet18' in n and 'CIFAR' in n else
-                   0.3 for n in names]
-    current_acc = [sum(TRACKING_ACCURACY.get(n, {}).values()) / 3 for n in names]
-    expected_acc = [0.85 if 'AlexNet' in n and 'CIFAR' in n else 0.99 for n in names]
-
-    x = np.arange(len(names))
-    width = 0.35
-    fig, ax = plt.subplots(figsize=(14, 6))
-
-    b1 = ax.bar(x - width/2, current_acc, width, label='Current (ratio=0.3)',
-                color='#E74C3C', alpha=0.7, edgecolor='black')
-    b2 = ax.bar(x + width/2, expected_acc, width, label='Expected (recommended)',
-                color='#2ECC71', alpha=0.7, edgecolor='black')
-    for bars in [b1, b2]:
-        for bar in bars:
-            ax.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.01,
-                    f'{bar.get_height():.3f}', ha='center', va='bottom', fontsize=9)
-    for i, (c, r) in enumerate(zip(current, recommended)):
-        ax.text(i, -0.08, f'cur={c}\nrec={r}', ha='center', va='top', fontsize=9,
-                bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow', edgecolor='gray'))
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(short)
-    ax.set_ylabel('Avg Tracking Accuracy')
-    ax.set_title('Recommended Target Ratio Adjustments', fontsize=13, fontweight='bold')
-    ax.legend(loc='lower right')
-    ax.set_ylim(-0.15, 1.15)
-    ax.axhline(y=0.5, color='gray', linestyle=':', alpha=0.5)
-    ax.grid(axis='y', alpha=0.3, linestyle='--')
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(figures_dir, '05_recommendations.png'),
-                dpi=150, bbox_inches='tight', facecolor='white')
-    plt.close()
-    print(f"[OK] 05_recommendations.png")
-
-
-def generate_all_figures(figures_dir, diag, surv):
+    这里只确认这四张图存在, 不重复绘图 (避免两套口径不一致)。
+    """
     os.makedirs(figures_dir, exist_ok=True)
-    fig1_tracking_accuracy(figures_dir)
-    fig2_capacity_analysis(diag, figures_dir)
-    fig3_survival_curves(surv, figures_dir)
-    fig4_hypothesis_heatmap(diag, figures_dir)
-    fig5_recommendations(diag, surv, figures_dir)
+    for fname in ('fig1_perturbation_accuracy.png',
+                  'fig2_finetune_accuracy.png',
+                  'fig3_perturbation_similarity.png',
+                  'fig4_finetune_similarity.png'):
+        if os.path.exists(os.path.join(figures_dir, fname)):
+            print(f"[OK] {fname} (由 utils.plot_paper_figures 生成)")
+        else:
+            print(f"[WARN] 缺少 {fname}, 请先运行: python -m utils.plot_paper_figures")
 
 
 # ============================================================
 # Markdown 报告生成
 # ============================================================
 
-def build_markdown(diag, surv, diag_path, surv_path):
+def build_markdown(diag, surv, diag_path, surv_path, tracking_accuracy=None):
     md = []
+    if tracking_accuracy is None:
+        tracking_accuracy = load_tracking_accuracy()
     md.append("# 水印追踪准确率异常分析报告\n")
     md.append(f"> **报告生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  ")
     md.append("> **目标水印比率**: K = 0.3 (默认值)  ")
@@ -402,16 +350,27 @@ def build_markdown(diag, surv, diag_path, surv_path):
 
     # 1. 实验现象
     md.append("## 1. 实验现象总览\n")
-    md.append("### 1.1 追踪准确率（论文已发表结果）\n")
+    md.append("### 1.1 追踪准确率（自动读取真实实验结果）\n")
     md.append("| 配置 | K=5 | K=10 | K=20 | 平均 |")
     md.append("|------|-----|------|------|------|")
-    for name, acc in TRACKING_ACCURACY.items():
-        avg = sum(acc.values()) / 3
+    for name, acc in tracking_accuracy.items():
+        avg = _avg_tracking(acc)
         warn = " ⚠️" if avg < 0.5 else ""
-        md.append(f"| {name} | {acc['K=5']*100:.2f}% | {acc['K=10']*100:.2f}% | {acc['K=20']*100:.2f}% | {avg*100:.2f}%{warn} |")
+        cells = []
+        for k in ('K=5', 'K=10', 'K=20'):
+            v = acc.get(k)
+            cells.append(f"{v*100:.2f}%" if v is not None else "N/A")
+        md.append(f"| {name} | {cells[0]} | {cells[1]} | {cells[2]} | "
+                  f"{avg*100:.2f}%{warn} |")
     md.append("")
-    md.append("**关键观察**: 仅 AlexNet + CIFAR-10/100 出现严重退化，其余配置均 ≥98%\n")
-    md.append("![追踪准确率对比](figures/01_tracking_accuracy.png)\n")
+    md.append("### 1.2 水印区域扰动：追踪准确率\n")
+    md.append("![水印区域扰动追踪准确率](figures/fig1_perturbation_accuracy.png)\n")
+    md.append("### 1.3 本地微调：检测准确率\n")
+    md.append("![本地微调检测准确率](figures/fig2_finetune_accuracy.png)\n")
+    md.append("### 1.4 水印区域扰动：相似度与判别 gap\n")
+    md.append("![水印区域扰动相似度与gap](figures/fig3_perturbation_similarity.png)\n")
+    md.append("### 1.5 本地微调：相似度与判别 gap\n")
+    md.append("![本地微调相似度与gap](figures/fig4_finetune_similarity.png)\n")
     md.append("---\n")
 
     # 2. 假设
@@ -439,7 +398,6 @@ def build_markdown(diag, surv, diag_path, surv_path):
             md.append(f"**核心发现**: AlexNet + CIFAR-10 的梯度强度是 AlexNet + ChestMNIST 的 **{ratio_a:.1f} 倍**\n")
     else:
         md.append("> ⚠️ 未找到 `save/diagnostics/*.json` 数据，请先运行 `python watermark_diagnostics.py`\n")
-    md.append("![容量竞争分析](figures/02_capacity_analysis.png)\n")
 
     md.append("### 3.2 水印存活能力\n")
     if surv:
@@ -458,10 +416,7 @@ def build_markdown(diag, surv, diag_path, surv_path):
         md.append("")
     else:
         md.append("> ⚠️ 未找到 `save/survival_analysis/*.json` 数据，请先运行 `python watermark_survival_analysis.py`\n")
-    md.append("![水印存活曲线](figures/03_survival_curves.png)\n")
-    md.append("![假设验证热力图](figures/04_hypothesis_heatmap.png)\n")
     md.append("---\n")
-
     # 4. 机理
     md.append("## 4. 深层机理分析\n")
     md.append("### 4.1 模型训练公式\n")
@@ -491,7 +446,6 @@ def build_markdown(diag, surv, diag_path, surv_path):
     md.append("target_ratio = base_ratio × f(unit_load)")
     md.append("f(unit_load) = sigmoid(unit_load - threshold)")
     md.append("```\n")
-    md.append("![推荐配置](figures/05_recommendations.png)\n")
     md.append("---\n")
 
     # 6. 结论
@@ -617,14 +571,18 @@ def main():
     diag, surv, diag_path, surv_path = load_latest_data()
     print(f"[*] 梯度诊断: {relpath(diag_path, root)}")
     print(f"[*] 水印存活: {relpath(surv_path, root)}")
+    check_data_freshness(diag_path, surv_path)
+
+    # 追踪准确率统一从真实实验结果加载 (不再硬编码)
+    tracking_accuracy = load_tracking_accuracy()
 
     if args.all or args.figures:
         print(f"\n[*] 生成图表到 {os.path.relpath(fig_dir, root)}/")
-        generate_all_figures(fig_dir, diag, surv)
+        generate_all_figures(fig_dir, diag, surv, tracking_accuracy)
 
     md_content = None
     if any([args.all, args.md, args.docx, args.pdf]):
-        md_content = build_markdown(diag, surv, diag_path, surv_path)
+        md_content = build_markdown(diag, surv, diag_path, surv_path, tracking_accuracy)
         md_path = os.path.join(out_dir, 'WATERMARK_ANALYSIS_REPORT.md')
         with open(md_path, 'w', encoding='utf-8') as f:
             f.write(md_content)
