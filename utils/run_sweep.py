@@ -24,164 +24,27 @@ MAIN_PY_PATH = PROJECT_ROOT / 'main.py'
 # 优化器和学习率建议:
 # - CIFAR-10/100 + AlexNet: Adam, lr=0.003 (小学习率适合复杂模型)
 # - CIFAR-10/100 + ResNet: SGD, lr=0.01 (SGD在大数据集上泛化更好)
+
+# ---- 当前调查: watermark_grad_target_ratio 对水印鲁棒性的影响 ----
+# 固定配置 (alexnet + cifar10 + K=10)，只变化梯度比例阈值
+BASE_CONFIG = {
+    '--dataset': 'cifar10',
+    '--model_name': 'alexnet',
+    '--optim': 'sgd',
+    '--lr': '0.001',
+    '--client_num': '10',
+}
+
+# 待扫描的梯度比例阈值 (0 表示关闭 capping)
+TARGET_RATIOS = ['0', '0.1', '0.3', '0.5', '0.7', '0.9']
+
 EXPERIMENTS = [
-    # 实验配置：CIFAR × 2网络 × 3客户端数 = 12个实验
-
-    # cifar10 + alexnet
     {
-        'name': 'cifar10_alexnet_5clients',
-        '--dataset': 'cifar10',
-        '--model_name': 'alexnet',
-        '--optim': 'sgd',
-        '--lr': '0.001',
-        '--client_num': '5',
-    },
-    {
-        'name': 'cifar10_alexnet_10clients',
-        '--dataset': 'cifar10',
-        '--model_name': 'alexnet',
-        '--optim': 'sgd',
-        '--lr': '0.001',
-        '--client_num': '10',
-    },
-    {
-        'name': 'cifar10_alexnet_20clients',
-        '--dataset': 'cifar10',
-        '--model_name': 'alexnet',
-        '--optim': 'sgd',
-        '--lr': '0.001',
-        '--client_num': '20',
-    },
-
-    # cifar10 + resnet
-    {
-        'name': 'cifar10_resnet_5clients',
-        '--dataset': 'cifar10',
-        '--model_name': 'resnet',
-        '--optim': 'sgd',
-        '--lr': '0.001',
-        '--client_num': '5',
-    },
-    {
-        'name': 'cifar10_resnet_10clients',
-        '--dataset': 'cifar10',
-        '--model_name': 'resnet',
-        '--optim': 'sgd',
-        '--lr': '0.001',
-        '--client_num': '10',
-    },
-    {
-        'name': 'cifar10_resnet_20clients',
-        '--dataset': 'cifar10',
-        '--model_name': 'resnet',
-        '--optim': 'sgd',
-        '--lr': '0.001',
-        '--client_num': '20',
-    },
-
-    # cifar100 + alexnet
-    {
-        'name': 'cifar100_alexnet_5clients',
-        '--dataset': 'cifar100',
-        '--model_name': 'alexnet',
-        '--optim': 'sgd',
-        '--lr': '0.001',
-        '--client_num': '5',
-    },
-    {
-        'name': 'cifar100_alexnet_10clients',
-        '--dataset': 'cifar100',
-        '--model_name': 'alexnet',
-        '--optim': 'sgd',
-        '--lr': '0.001',
-        '--client_num': '10',
-    },
-    {
-        'name': 'cifar100_alexnet_20clients',
-        '--dataset': 'cifar100',
-        '--model_name': 'alexnet',
-        '--optim': 'sgd',
-        '--lr': '0.001',
-        '--client_num': '20',
-    },
-
-    # cifar100 + resnet
-    {
-        'name': 'cifar100_resnet_5clients',
-        '--dataset': 'cifar100',
-        '--model_name': 'resnet',
-        '--optim': 'sgd',
-        '--lr': '0.001',
-        '--client_num': '5',
-    },
-    {
-        'name': 'cifar100_resnet_10clients',
-        '--dataset': 'cifar100',
-        '--model_name': 'resnet',
-        '--optim': 'sgd',
-        '--lr': '0.001',
-        '--client_num': '10',
-    },
-    {
-        'name': 'cifar100_resnet_20clients',
-        '--dataset': 'cifar100',
-        '--model_name': 'resnet',
-        '--optim': 'sgd',
-        '--lr': '0.001',
-        '--client_num': '20',
-    },
-
-    # chestmnist + alexnet
-    {
-        'name': 'chestmnist_alexnet_5clients',
-        '--dataset': 'chestmnist',
-        '--model_name': 'alexnet',
-        '--optim': 'sgd',
-        '--lr': '0.001',
-        '--client_num': '5',
-    },
-    {
-        'name': 'chestmnist_alexnet_10clients',
-        '--dataset': 'chestmnist',
-        '--model_name': 'alexnet',
-        '--optim': 'sgd',
-        '--lr': '0.001',
-        '--client_num': '10',
-    },
-    {
-        'name': 'chestmnist_alexnet_20clients',
-        '--dataset': 'chestmnist',
-        '--model_name': 'alexnet',
-        '--optim': 'sgd',
-        '--lr': '0.001',
-        '--client_num': '20',
-    },
-
-    # chestmnist + resnet
-    {
-        'name': 'chestmnist_resnet_5clients',
-        '--dataset': 'chestmnist',
-        '--model_name': 'resnet',
-        '--optim': 'sgd',
-        '--lr': '0.001',
-        '--client_num': '5',
-    },
-    {
-        'name': 'chestmnist_resnet_10clients',
-        '--dataset': 'chestmnist',
-        '--model_name': 'resnet',
-        '--optim': 'sgd',
-        '--lr': '0.001',
-        '--client_num': '10',
-    },
-    {
-        'name': 'chestmnist_resnet_20clients',
-        '--dataset': 'chestmnist',
-        '--model_name': 'resnet',
-        '--optim': 'sgd',
-        '--lr': '0.001',
-        '--client_num': '20',
-    },
+        'name': f'cifar10_alexnet_10clients_wmratio_{r}',
+        **BASE_CONFIG,
+        '--watermark_grad_target_ratio': r,
+    }
+    for r in TARGET_RATIOS
 ]
 # =======================================================================
 
