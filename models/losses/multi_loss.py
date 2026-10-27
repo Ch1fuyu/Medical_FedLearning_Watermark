@@ -208,9 +208,10 @@ class MultiLoss:
 
             if current_wm_grad_val > 1e-10:
                 # 缩放因子：把水印区梯度均值压到 target_ratio * 非水印区梯度均值。
-                # 下限不能设成 0.1，否则当原比例远大于 target_ratio 时
-                # 实际达成的比例会停在 0.1 * (wm/non_wm)，永远达不到目标值。
-                scale_factor = (target_wm_grad / current_wm_grad_val).clamp(min=0.0, max=1.0)
+                # 下限 0.1 是有意设计：最多把水印区梯度压到原来的 10%，
+                # 避免过度削弱水印信号（因此当原比例远大于 target_ratio 时，
+                # 实际达成的比例会是 0.1 * 原比例，而非严格的 target_ratio）。
+                scale_factor = (target_wm_grad / current_wm_grad_val).clamp(min=0.1, max=1.0)
 
                 # 只对水印区做等比缩放，保留原始梯度符号。
                 # 注意：不能用 sign() 拆分正负部分再重组，那样负梯度会被翻成正梯度。
