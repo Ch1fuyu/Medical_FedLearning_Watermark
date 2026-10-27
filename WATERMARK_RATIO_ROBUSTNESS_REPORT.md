@@ -8,16 +8,34 @@
 
 ## 0. 结论速览
 
-排查过程中发现 `watermark_grad_target_ratio` 的**保护机制本身存在两个严重 bug**，
+排查过程中发现 `watermark_grad_target_ratio` 的**保护机制本身存在一个严重 bug**，
 使得该参数在修复前**几乎完全不起作用**：
 
 | # | Bug | 位置 | 后果 |
 |---|-----|------|------|
 | 1 | 水印区**负梯度被翻转为正梯度** | `models/losses/multi_loss.py` | 方向反转，等价于在主任务梯度上叠加随机噪声，水印信号被破坏 |
-| 2 | `scale_factor` 下限 `clamp(0.1)` | `models/losses/multi_loss.py` | 实际达成比例停在 `0.1 × (wm/non_wm)`，**永远压不到目标值** |
+| 2 | ~~`scale_factor` 下限 `clamp(0.1)`~~ | `models/losses/multi_loss.py` | **非 bug** —— 下限 0.1 是有意设计，保留不变（见 3.3） |
 
-> **关键推论**: 在此之前所有关于「ratio 取多少合适」的结论都建立在**未真正生效**的
-> capping 之上，需要在修复后重新评估。
+> **关键推论**: 在此之前所有关于「ratio 取多少合适」的结论都建立在
+> **梯度方向被反向**的 capping 之上，需要在修复后重新评估。
+>
+> ⚠️ 注意：`clamp(0.1)` 下限保留后，capping **不再精确达成** `target_ratio`。
+> 当原始 `wm/non_wm` 比例 R 满足 `target_ratio / R < 0.1`（即 R > 10 × target_ratio）时，
+> 缩放系数被截断到 0.1，实际达成比例 = `0.1 × R`。
+> 这意味着**当前实测配置（capping 前比例约 1.0）中，只要 target_ratio ≥ 0.1，
+> clamp 就不生效，目标仍能被精确达成**（见 6.2）。
+
+### 修复后的实测结论（chestmnist / alexnet / K=5 / 30 轮 × 6 个 ratio）
+
+| 结论 | 说明 |
+|------|------|
+| capping **精确生效** | 触发 capping 时的实际比例与目标值吻合到 0.001 以内（0.100/0.200/0.299/0.399/0.499） |
+| capping **确有必要** | 未缩放时水印区梯度约为非水印区的 1.0 倍，30 轮中触发 25 次 |
+| 对精度 **影响极小** | 最佳精度 94.7880% ~ 94.7940%（极差 0.006 个百分点） |
+| 检测指标 **已饱和** | 所有 ratio 下检测准确率均为 100%，**本配置无法区分 ratio 优劣** |
+
+> 因此：**不能**据此调整 `--watermark_grad_target_ratio` 的默认值。
+> 详见第 6.1 / 6.2 节。
 
 ### 修复后的实测结论（chestmnist / alexnet / K=5 / 30 轮 × 6 个 ratio）
 
@@ -50,13 +68,24 @@
 
 | 分支 | 符号处理 | `scale_factor` 下限 | 说明 |
 |------|---------|-------------------|------|
-| `grad_redu_exact_detect`（本分支基线） | ❌ 翻转 | ❌ `0.1` | 两个 bug 都在 |
-| `grad_redu` | ❌ 翻转 | ❌ `0.1` | 与基线一致 |
-| `only_margin` | ✅ 正确（`-torch.sign(...)`） | ❌ `0.1` | 符号处理是对的，回归发生在之后的 `grad_redu` |
+| `grad_redu_exact_detect`（本分支基线） | ❌ 翻转 | ✅ `0.1`（有意） | 符号 bug 在 |
+| `grad_redu` | ❌ 翻转 | ✅ `0.1` | 与基线一致 |
+| `only_margin` | ✅ 正确（`-torch.sign(...)`） | ✅ `0.1` | 符号处理是对的，回归发生在之后的 `grad_redu` |
 | `grad_2_zero` / `with_3_regs` / `pure3regs` | — | — | 无 capping 代码，走了别的实现路线 |
 
 `only_margin` 分支中的写法证明**正确的符号处理方式在本仓库中曾被实现过**，
 只是没有被正确地迁移到当前分支。这也印证了 Bug 1 是无意的实现错误而非有意设计。
+
+进一步核查 git 历史，符号 bug 的来源可精确定位：
+
+| 提交 | 符号写法 | 判定 |
+|------|---------|------|
+| `83d00eb`（重构 autograd） | `wm_sign_neg = torch.clamp(-torch.sign(wm_grads), 0, 1)` | ✅ **正确**，且作者注释写明「Preserve sign of original watermark gradients」 |
+| `aef3212` | `wm_negative_sign = torch.sign(g * mask).clamp_max(0.0)` | ❌ 退化为翻转 |
+| `abbd939`（当前基线来源） | `wm_negative_sign = torch.sign(g * mask).clamp_max(0.0)` | ❌ 沿用了退化写法 |
+
+即：作者在 `83d00eb` 明确实现了「保留符号」并写了注释，
+后续两次重构中不慎退化为 `clamp_max(0.0)`，符号被翻转。
 
 ---
 
@@ -126,46 +155,49 @@ corrected_gradients = (
 
 ---
 
-## 3. Bug 2：`clamp(0.1)` 下限导致 capping 永远达不到目标
+## 3. `clamp(0.1)` 下限：有意设计，保留不变
 
-### 3.1 问题代码
+### 3.1 语义
 
 ```python
 scale_factor = (target_wm_grad / current_wm_grad_val).clamp(0.1, 1.0)
 ```
 
-当原始 `wm/non_wm` 比例远大于 `target_ratio` 时，理论所需的
-`scale_factor` 远小于 `0.1`，但被下限截断在 `0.1`。
+设原始 `wm/non_wm` 比例为 R，所需缩放系数 = `target_ratio / R`。
 
-于是实际达成的比例为：
+- 若 `target_ratio / R ≥ 0.1`（即 **R ≤ 10 × target_ratio**）：clamp 不生效，
+  **精确达成** `target_ratio`。
+- 若 `target_ratio / R < 0.1`（即 R > 10 × target_ratio）：系数被截断到 `0.1`，
+  实际达成比例 = `0.1 × R` > `target_ratio`。
 
-```
-实际比例 = 0.1 × (原始 wm/non_wm 比例)
-```
+### 3.2 这是有意的设计（已与作者确认）
 
-**永远不可能等于 `target_ratio`**。
+下限 `0.1` 的含义是：**最多把水印区梯度压到原来的 10%**，
+即不允许出现「水印信号被压得几乎消失」的极端情况。
+这是一个**保护水印信号强度**的设计，而非 bug，故**保留不变**。
 
-### 3.2 实测验证
+### 3.3 对实际结论的影响
 
-水印区梯度 `[10.0]×108`、非水印区 `[1.0]×16`（原始比例 = 10.0）：
+当前实测配置下，capping 前的原始比例 R ≈ **1.0**（见 6.2 结论 2），
+因此只要 `target_ratio ≥ 0.1`，就满足 `R ≤ 10 × target_ratio`，clamp 不生效，
+**目标仍被精确达成**——这解释了为什么 6.1 的扫描中 ratio=0.1~0.5 都能精确命中目标。
 
-| `target_ratio` | 期望达成 | 实际达成（修复前） | 判定 |
-|---------------|---------|------------------|------|
-| 0.5 | 0.5 | **1.0000** | 未达成 |
-| 0.3 | 0.3 | **1.0000** | 未达成 |
-| 0.1 | 0.1 | **1.0000** | 未达成 |
-| 0.05 | 0.05 | **1.0000** | 未达成 |
+只有当**原始比例远大于 10 倍目标值**时，下限才会截断。
+例如 R = 50.0、target = 0.1：所需系数 0.002 被截断到 0.1，
+实际达成 5.0（而非 0.1）。
 
-注意实际达成比例恒为 `1.0`——因为 `0.1 × 10.0 = 1.0`，
-即**缩放被完全抵消**，梯度几乎原样保留，capping 等于没做。
+> **推论**：在当前 `wm/non_wm ≈ 1.0` 的训练场景下，`clamp(0.1)` **几乎不影响** capping 的实际效果。
+> 它只在「原始比例被推到极端高」时起保护作用。保留它不会损害 ratio 扫描的有效性。
 
-### 3.3 修复
+### 3.4 对应测试
 
-```python
-scale_factor = (target_wm_grad / current_wm_grad_val).clamp(min=0.0, max=1.0)
-```
+`tests/test_watermark_grad_capping.py` 中已加入显式覆盖该行为的用例：
 
-下限改为 `0.0`（数学上所需缩放系数必然 ≥ 0，截断到 0 只在梯度为 0 时发生）。
+| 用例 | 验证内容 |
+|------|---------|
+| `test_scale_factor_lower_bound_is_0p1` | 系数被截断到 0.1，达成比例 = 0.1 × R |
+| `test_achieved_ratio_is_floor_times_original_when_floor_active` | 三组手工推算的 floor 生效场景 |
+| `test_after_cap_ratio_may_exceed_target_when_floor_active` | floor 生效时达成比例可高于目标（已知后果） |
 
 ---
 
@@ -206,9 +238,12 @@ python tests/test_watermark_grad_capping.py
 | `test_watermark_gradient_sign_is_preserved` | 符号保持（Bug 1） |
 | `test_negative_gradient_stays_negative` | 负梯度不为正（Bug 1） |
 | `test_scaling_is_proportional` | 缩放等比（Bug 1） |
-| `test_target_ratio_is_actually_achieved` | 目标达成（Bug 2） |
-| `test_achieved_ratio_tracks_target_across_range` | 多目标扫描（Bug 2） |
-| `test_after_cap_ratio_not_exceed_target` | 不超目标 |
+| `test_target_ratio_is_actually_achieved` | clamp 不生效时精确达成目标 |
+| `test_achieved_ratio_tracks_target_across_range` | 多目标扫描（clamp 不生效区间） |
+| `test_scale_factor_lower_bound_is_0p1` | 下限 0.1 生效（有意设计） |
+| `test_achieved_ratio_is_floor_times_original_when_floor_active` | floor 生效时达成比例 = 0.1 × R |
+| `test_after_cap_ratio_not_exceed_target` | clamp 不生效时不超目标 |
+| `test_after_cap_ratio_may_exceed_target_when_floor_active` | floor 生效时可超目标（已知后果） |
 | `test_after_cap_ratio_field_is_tracked` | 新统计字段 |
 | `test_after_cap_ratio_when_cap_disabled` | 关闭时记录一致 |
 | `test_non_watermark_region_is_untouched` | 非水印区不受影响 |
@@ -216,8 +251,8 @@ python tests/test_watermark_grad_capping.py
 | `test_target_ratio_zero_disables_capping` | `0` 关闭 capping |
 | `test_malicious_client_skips_scaling` | 恶意客户端跳过 |
 
-**验证测试有效性**：在修复前的代码上运行，**5 个用例会失败**
-（符号相关 3 个 + 目标达成相关 2 个）；修复后 **12/12 通过**。
+**验证测试有效性**：在修复前的代码上运行，**符号相关的 3 个用例会失败**；
+修复后 **15/15 通过**。
 
 ---
 
@@ -439,6 +474,7 @@ $env:PYTHONUTF8 = '1'
    （capping 修复）+ `fix/pre-training-tracing-regression`（追踪修复），
    在 `cifar10`/`cifar100`/`chestmnist` × `alexnet`/`resnet` 上重跑，
    重新评估第 3 点的历史结论。
+
 
 ---
 

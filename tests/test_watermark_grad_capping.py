@@ -7,14 +7,16 @@
 ``compute_loss_and_backward`` 的水印梯度 capping 逻辑，验证：
 
 1. **符号保持**：缩放后水印区梯度符号不得被翻转
-   （历史 bug：用 sign() 拆分正负再重组，导致负梯度变正）
-2. **目标达成**：实际达成的 wm/non_wm 比例应等于 target_ratio
-   （历史 bug：scale_factor 下限 clamp(0.1) 导致目标永远达不到）
-3. **非水印区不受影响**：非水印区梯度必须原样保留
-4. **未超阈值时不缩放**：wm_ratio <= target_ratio 时梯度不变
-5. **target_ratio=0 关闭 capping**：梯度完全不变
-6. **恶意客户端跳过缩放**：skip_gradient_scaling=True 时梯度不变
-7. **缩放等比**：水印区所有元素乘以同一系数
+    （历史 bug：用 sign() 拆分正负再重组，导致负梯度变正）
+2. **目标达成**：当缩放系数落在 [0.1, 1.0] 区间内时，
+   实际达成的 wm/non_wm 比例应精确等于 target_ratio
+3. **缩放下限**：scale_factor 下限为 0.1（有意设计），
+   当目标比例远低于原比例时，实际达成比例 = 0.1 × 原比例
+4. **非水印区不受影响**：非水印区梯度必须原样保留
+5. **未超阈值时不缩放**：wm_ratio <= target_ratio 时梯度不变
+6. **target_ratio=0 关闭 capping**：梯度完全不变
+7. **恶意客户端跳过缩放**：skip_gradient_scaling=True 时梯度不变
+8. **缩放等比**：水印区所有元素乘以同一系数
 
 运行（无需安装 pytest，兼容 pytest）:
     python tests/test_watermark_grad_capping.py
@@ -145,30 +147,99 @@ def test_negative_gradient_stays_negative():
 # --------------------------------------------------------------------------- #
 
 def test_target_ratio_is_actually_achieved():
-    """实际达成的 wm/non_wm 比例应等于 target_ratio"""
-    wm = [10.0] * N_WM
+    """
+    当所需缩放系数落在 [0.1, 1.0] 内时，实际达成的比例应精确等于 target_ratio。
+
+    scale_factor = (target_ratio * non_wm_mean / wm_mean).clamp(0.1, 1.0)
+    即：原比例 R = wm_mean / non_wm_mean，所需 scale = target_ratio / R。
+    当 target_ratio / R >= 0.1 时 clamp 不生效，目标被精确达成。
+    """
+    wm = [2.0] * N_WM          # 原比例 R = 2.0
     nonwm = [1.0] * N_NON
 
-    for target_ratio in [0.5, 0.3, 0.1, 0.05]:
-        original, corrected, _ = _run_capping(wm, nonwm, target_ratio=target_ratio)
+    # target_ratio / 2.0 >= 0.1  =>  target_ratio >= 0.2
+    for target_ratio in [0.5, 0.4, 0.3, 0.2]:
+        original, corrected, ml = _run_capping(wm, nonwm, target_ratio=target_ratio)
 
         new_wm_mean = corrected[:N_WM].abs().mean().item()
         new_nonwm_mean = corrected[N_WM:].abs().mean().item()
         achieved = new_wm_mean / new_nonwm_mean
 
+        assert abs(ml.cap_scale_factor - target_ratio / 2.0) < 1e-6, (
+            f"target_ratio={target_ratio} 时 scale 应为 {target_ratio / 2.0:.4f}，"
+            f"实际={ml.cap_scale_factor:.6f}"
+        )
         assert abs(achieved - target_ratio) < 0.01, (
             f"target_ratio={target_ratio} 期望达成该比例，实际={achieved:.4f}"
         )
 
 
-def test_achieved_ratio_tracks_target_across_range():
-    """扫过一组 target_ratio，验证达成比例随目标变化且精确"""
+def test_achieved_ratio_is_floor_times_original_when_floor_active():
+    """
+    当 clamp 下限 0.1 生效时，实际达成比例 = 0.1 × 原比例。
+
+    手工推算：
+      - R = 10.0，target = 0.5  => 所需 scale = 0.05 < 0.1 => 截断为 0.1 => 达成 1.0
+      - R = 10.0，target = 0.1  => 所需 scale = 0.01 < 0.1 => 截断为 0.1 => 达成 1.0
+      - R =  2.0，target = 0.1  => 所需 scale = 0.05 < 0.1 => 截断为 0.1 => 达成 0.2
+    """
+    cases = [
+        ([10.0] * N_WM, [1.0] * N_NON, 0.5, 1.0),
+        ([10.0] * N_WM, [1.0] * N_NON, 0.1, 1.0),
+        ([2.0] * N_WM, [1.0] * N_NON, 0.1, 0.2),
+    ]
+
+    for wm, nonwm, target_ratio, expected in cases:
+        _, corrected, ml = _run_capping(wm, nonwm, target_ratio=target_ratio)
+
+        new_wm_mean = corrected[:N_WM].abs().mean().item()
+        new_nonwm_mean = corrected[N_WM:].abs().mean().item()
+        achieved = new_wm_mean / new_nonwm_mean
+
+        assert ml.cap_applied is True, "capping 应已应用"
+        assert abs(ml.cap_scale_factor - 0.1) < 1e-6, (
+            f"scale_factor 应被 clamp 到 0.1，实际={ml.cap_scale_factor:.6f}"
+        )
+        assert abs(achieved - expected) < 0.01, (
+            f"target_ratio={target_ratio} 期望达成 {expected}，实际={achieved:.4f}"
+        )
+
+
+def test_scale_factor_lower_bound_is_0p1():
+    """
+    scale_factor 下限 0.1 是有意设计：最多把水印区梯度压到原来的 10%。
+
+    当目标远低于原比例时，clamp 生效，实际达成比例 = 0.1 × 原比例。
+    """
     wm = [10.0] * N_WM
     nonwm = [1.0] * N_NON
 
-    for target_ratio in [0.6, 0.4, 0.2, 0.1]:
-        _, corrected, _ = _run_capping(wm, nonwm, target_ratio=target_ratio)
+    _, _, ml = _run_capping(wm, nonwm, target_ratio=0.05)
+
+    assert ml.cap_applied is True
+    assert abs(ml.cap_scale_factor - 0.1) < 1e-6, (
+        f"scale_factor 应被 clamp 到下限 0.1，实际={ml.cap_scale_factor:.6f}"
+    )
+    # 原比例 10.0，被压到 10% => 1.0
+    assert abs(ml.current_wm_ratio_after_cap - 1.0) < 0.01, (
+        f"实际达成比例应为 1.0，实际={ml.current_wm_ratio_after_cap:.4f}"
+    )
+
+
+def test_achieved_ratio_tracks_target_across_range():
+    """
+    在 clamp 不生效的区间内，达成比例随目标线性变化且精确。
+
+    原比例固定为 2.0，所需 scale = target_ratio / 2；
+    target_ratio >= 0.2 时 scale >= 0.1，clamp 不生效。
+    """
+    wm = [2.0] * N_WM
+    nonwm = [1.0] * N_NON
+
+    for target_ratio in [0.6, 0.4, 0.3, 0.2]:
+        _, corrected, ml = _run_capping(wm, nonwm, target_ratio=target_ratio)
         achieved = corrected[:N_WM].abs().mean().item() / corrected[N_WM:].abs().mean().item()
+        assert ml.cap_scale_factor >= 0.1 - 1e-9, "前提不成立：clamp 下限应未生效"
         assert abs(achieved - target_ratio) < 0.01, (
             f"target_ratio={target_ratio} 未达成，实际={achieved:.4f}"
         )
@@ -257,7 +328,7 @@ def test_scaling_is_proportional():
 
 def test_after_cap_ratio_field_is_tracked():
     """MultiLoss 应记录 capping 之后的实际 wm/non_wm 比例"""
-    wm = [10.0] * N_WM
+    wm = [2.0] * N_WM
     nonwm = [1.0] * N_NON
 
     _, _, ml = _run_capping(wm, nonwm, target_ratio=0.3)
@@ -284,15 +355,45 @@ def test_after_cap_ratio_when_cap_disabled():
 
 
 def test_after_cap_ratio_not_exceed_target():
-    """capping 之后的水印比例不应超过目标值"""
-    wm = [50.0] * N_WM
+    """
+    当 clamp 下限不生效时，capping 之后的水印比例不应超过目标值。
+
+    原比例 2.0，所需 scale = target_ratio / 2 >= 0.1（即 target_ratio >= 0.2），
+    此时 clamp 不生效，达成比例精确等于 target_ratio。
+    """
+    wm = [2.0] * N_WM
     nonwm = [1.0] * N_NON
 
-    for target_ratio in [0.1, 0.3, 0.5]:
+    for target_ratio in [0.2, 0.3, 0.5]:
         _, _, ml = _run_capping(wm, nonwm, target_ratio=target_ratio)
+        assert ml.cap_scale_factor >= 0.1 - 1e-9, "前提不成立：clamp 下限应未生效"
         assert ml.current_wm_ratio_after_cap <= target_ratio * 1.02, (
             f"capping 后比例 {ml.current_wm_ratio_after_cap:.4f} 超过目标 {target_ratio}"
         )
+
+
+def test_after_cap_ratio_may_exceed_target_when_floor_active():
+    """
+    当 clamp 下限生效时，实际达成比例可能高于 target_ratio（这是下限 0.1 的已知后果）。
+
+    原比例 10.0，目标 0.1 所需 scale = 0.01 < 0.1，被截断到 0.1，
+    实际达成比例 = 0.1 × 10.0 = 1.0 > 0.1。
+    """
+    wm = [10.0] * N_WM
+    nonwm = [1.0] * N_NON
+
+    _, _, ml = _run_capping(wm, nonwm, target_ratio=0.1)
+
+    assert ml.cap_applied is True
+    assert abs(ml.cap_scale_factor - 0.1) < 1e-6, (
+        f"scale_factor 应被 clamp 到 0.1，实际={ml.cap_scale_factor:.6f}"
+    )
+    assert ml.current_wm_ratio_after_cap > 0.1, (
+        "下限生效时达成比例应高于目标（本例为 1.0）"
+    )
+    assert abs(ml.current_wm_ratio_after_cap - 1.0) < 0.01, (
+        f"实际达成比例应为 1.0，实际={ml.current_wm_ratio_after_cap:.4f}"
+    )
 
 
 # --------------------------------------------------------------------------- #
