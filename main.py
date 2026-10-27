@@ -104,6 +104,21 @@ class FederatedLearningOnChestMNIST(Experiment):
         self.construct_model()
         self.w_t = copy.deepcopy(self.model.state_dict())
 
+        # ========== 服务器端权威模型（与下发模型完全分离） ==========
+        # server_authoritative_model: 仅保存在服务器端，带有所有客户端的完整水印
+        #   （每个水印位置 P_k 均为该客户端的 encoder 权威值）。
+        #   用途：训练结束后/训练中用于水印鲁棒性检测、存活分析、权威性验证等。
+        #   它**不会**下发给任何客户端。
+        #
+        # w_t: 联邦学习中实际参与训练与下发的全局模型。
+        #   其水印区域 P_k 保持纯 FedAvg 结果（每轮变动），
+        #   只有在生成定制模型 M_k 时才把客户端 k 自己的 P_k 覆盖为权威值。
+        #
+        # 两者是**不同的对象**：服务器端权威模型满足「完整水印」，
+        # 下发模型满足「客户端之间可区分」，从而同时支持
+        # 「训练后偏差检测」与「训练前泄漏追踪」两个指标。
+        self.server_authoritative_model = None
+
         # 根据参数选择水印模式
         self.random_positions = {}
         # 设置密钥矩阵目录
@@ -488,13 +503,23 @@ class FederatedLearningOnChestMNIST(Experiment):
                 self.logs['acc_when_highest_auc'] = acc_val_label_mean
 
             # 模型选择标准：ChestMNIST 按 AUC；否则按准确率
+            #
+            # 保存内容：使用**服务器端权威模型**（带所有客户端的完整水印）。
+            # 该模型仅存服务器端，用于后续水印鲁棒性检测 / 存活分析等实验。
+            # 若权威模型不可用，则回退到当前的 FedAvg 模型。
+            save_state = self.server_authoritative_model
+            if save_state is None:
+                save_state = self.model.state_dict()
+            else:
+                save_state = {k: v.clone() for k, v in save_state.items()}
+
             if select_by_auc:
                 if self.logs['best_model_auc'] < auc_val:
                     self.logs['best_model_acc'] = acc_val_label_mean
                     self.logs['best_model_loss'] = loss_val_mean
                     self.logs['best_model_auc'] = auc_val
                     # 优化模型存储，减少内存占用
-                    optimized_state = self._optimize_model_storage(self.model.state_dict())
+                    optimized_state = self._optimize_model_storage(save_state)
                     self.logs['best_model'] = [optimized_state]
                     logging.info(f'🌟 最佳模型已保存! AUC↑{auc_val:.4f}')
             else:
@@ -502,7 +527,7 @@ class FederatedLearningOnChestMNIST(Experiment):
                     self.logs['best_model_acc'] = acc_val_label_mean
                     self.logs['best_model_loss'] = loss_val_mean
                     self.logs['best_model_auc'] = auc_val
-                    optimized_state = self._optimize_model_storage(self.model.state_dict())
+                    optimized_state = self._optimize_model_storage(save_state)
                     self.logs['best_model'] = [optimized_state]
                     logging.info(f'🌟 最佳模型已保存! ACC↑{acc_val_label_mean:.4f}')
 
@@ -903,6 +928,71 @@ class FederatedLearningOnChestMNIST(Experiment):
         return self.logs, best_metric_value, best_metric_name
 
 
+    def _build_server_authoritative_model(self, base_model):
+        """
+        构建服务器端权威模型：带所有客户端完整水印的模型副本。
+
+        与下发模型严格分离：
+        - 下发模型 `w_t` 的水印区域保持纯 FedAvg（每轮变动），客户端之间可区分；
+        - 权威模型的每个水印位置 P_k 都是客户端 k 的 encoder 权威值，
+          即「服务器端持有完整水印信息」。
+
+        权威模型**不会**下发给客户端，仅用于服务器端的
+        水印鲁棒性检测 / 存活分析 / 权威性验证等实验。
+
+        Args:
+            base_model: 基础模型权重字典（通常为 FedAvg 聚合结果）
+
+        Returns:
+            权威模型权重字典；若无法构建则返回 None
+        """
+        try:
+            from utils.key_matrix_utils import KeyMatrixManager
+            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
+
+            encoder_params = self.trainer._extract_encoder_parameters()
+            if encoder_params is None:
+                logging.warning('[权威模型] 无法提取 encoder_params，无法构建权威模型')
+                return None
+
+            # 复制基础模型（非水印区域沿用 FedAvg 结果）
+            auth_model = {k: v.clone() for k, v in base_model.items()}
+
+            # 构建参数偏移映射（用于全局/局部索引转换）
+            offset_map, _ = self._build_param_offset_map(auth_model)
+
+            # encoder_params 按 client_id 顺序连续存储各客户端水印
+            # 权威水印区间: encoder_params[offset_k : offset_k + len(P_k)]
+            encoder_offsets = {}
+            cumulative_offset = 0
+            for cid in range(self.client_num):
+                encoder_offsets[cid] = cumulative_offset
+                cumulative_offset += len(key_manager.load_positions(cid))
+
+            # 将所有客户端的水印区域 P_k 覆盖为权威值
+            for cid in range(self.client_num):
+                positions = key_manager.load_positions(cid)
+                encoder_offset = encoder_offsets[cid]
+
+                for wm_local_idx, (param_name, global_idx) in enumerate(positions):
+                    local_idx, actual_param_name = self._convert_global_to_local_idx(
+                        global_idx, param_name, auth_model, offset_map
+                    )
+                    if local_idx is None or actual_param_name is None:
+                        continue
+
+                    enc_global_idx = encoder_offset + wm_local_idx
+                    if enc_global_idx < len(encoder_params):
+                        auth_model[actual_param_name].view(-1)[local_idx] = \
+                            encoder_params[enc_global_idx].item()
+
+            logging.info('[权威模型] 已构建：包含全部客户端的完整水印信息')
+            return auth_model
+
+        except Exception as e:
+            logging.warning(f'[权威模型] 构建失败: {e}')
+            return None
+
     def _fed_avg(self, local_ws, client_weights, idxs_users):
         """联邦平均算法，FedAvg with exclusive watermark aggregation"""
         # 计算参与训练的客户端权重总和
@@ -927,13 +1017,16 @@ class FederatedLearningOnChestMNIST(Experiment):
             for k in w_avg.keys():
                 w_avg[k] += local_ws[i][k] * normalized_weights[i]
 
-        # 水印聚合：保持纯 FedAvg（不做服务器端权威覆盖），
+        # 水印聚合：下发用的全局模型 w_t 保持纯 FedAvg（不做服务器端权威覆盖），
         # 以保留客户端之间的水印区分性，保证训练前泄漏追踪可正确定位泄漏源。
         self._watermark_aggregation(local_ws, idxs_users, w_avg)
 
-        # 更新全局模型权重
+        # 更新全局模型权重（下发用）
         for k in w_avg.keys():
             self.w_t[k] = w_avg[k]
+
+        # 构建服务器端权威模型（与下发模型分离，带完整水印，仅存服务器端）
+        self.server_authoritative_model = self._build_server_authoritative_model(w_avg)
 
     def _generate_all_customized_models(self, global_model, idxs_users, epoch):
         """
@@ -1674,6 +1767,17 @@ class FederatedLearningOnChestMNIST(Experiment):
 
         结论：聚合阶段保持纯 FedAvg，可同时满足
         「训练后偏差检测 100%」与「训练前泄漏追踪 100%」。
+
+        与服务器端权威模型的关系
+        ------------------------
+        「服务器端持有完整水印」这一需求由**独立对象**
+        `self.server_authoritative_model` 满足（见 `_build_server_authoritative_model`）：
+        它是 FedAvg 结果叠加全部客户端权威水印的模型副本，
+        **不下发给任何客户端**，仅用于服务器端的水印鲁棒性实验。
+
+        因此本函数不需要（也不应该）修改下发用的 `w_t`：
+        权威水印写入下发模型的工作由 `_generate_customized_model` 完成
+        （只写客户端 k 自己的 P_k），其余区域保持 FedAvg。
 
         Args:
             local_ws: 本地模型权重列表（仅用于签名，函数不修改）
