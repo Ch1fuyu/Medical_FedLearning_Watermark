@@ -55,6 +55,17 @@ class MultiLoss:
         self.cap_applied = False
         self.cap_scale_factor = 1.0
 
+        # ---- 运行时诊断：capping 触发情况（供 Excel 记录）----
+        # 累计触发次数 / 累计 batch 数（用于计算触发率）
+        self.cap_trigger_count = 0
+        self.cap_batch_count = 0
+        # 本轮（epoch）内的瞬时统计
+        self._epoch_cap_trigger = 0
+        self._epoch_batch_count = 0
+        self._epoch_ratio_sum = 0.0
+        self._epoch_ratio_after_cap_sum = 0.0
+        self._epoch_scale_sum = 0.0
+
         self._param_snapshot = None
         self._total_param_drift = 0.0
         self._wm_param_drift = 0.0
@@ -237,6 +248,18 @@ class MultiLoss:
             (wm_after_mean / (mean_non_watermark_grad + 1e-8)).item()
         )
 
+        # ---- 运行时诊断：累计 capping 触发情况（供 Excel 记录）----
+        # 恶意客户端跳过了缩放，不计入触发率统计（否则会稀释真实触发率）
+        if not skip_gradient_scaling:
+            self.cap_batch_count += 1
+            self._epoch_batch_count += 1
+            self._epoch_ratio_sum += self.current_wm_ratio
+            self._epoch_ratio_after_cap_sum += self.current_wm_ratio_after_cap
+            if self.cap_applied:
+                self.cap_trigger_count += 1
+                self._epoch_cap_trigger += 1
+                self._epoch_scale_sum += self.cap_scale_factor
+
         if not hasattr(self, '_epoch_printed'):
             self._epoch_printed = set()
         if current_epoch not in self._epoch_printed:
@@ -305,7 +328,50 @@ class MultiLoss:
             'drift_ratio': drift_ratio,
         }
 
+    def get_epoch_cap_stats(self):
+        """
+        返回本轮（epoch）内 capping 的汇总统计。
+
+        这些量直接反映 --watermark_grad_target_ratio 的实际作用强度：
+        - cap_trigger_rate：本轮有多少比例的 batch 真正触发了 capping
+          （=1 说明该阈值下 capping 恒定生效，是"强压制"而非"平衡"）
+        - wm_ratio_mean：capping 之前的原始 wm/non-wm 梯度比例均值
+        - wm_ratio_after_cap_mean：capping 之后的实际比例均值
+          （用于验证 target_ratio 是否真的达成）
+        - cap_scale_mean：平均缩放系数（1.0 表示未触发）
+        """
+        n = self._epoch_batch_count
+        if n == 0:
+            # 本轮没有进入对比正则化分支（例如第 1 轮只做主任务训练），
+            # 此时返回 None 表示"无数据"，避免被误读成"比例为 0"。
+            return {
+                'cap_trigger_rate': None,
+                'wm_ratio_mean': None,
+                'wm_ratio_after_cap_mean': None,
+                'cap_scale_mean': None,
+                'cap_batch_count': 0,
+                'cap_trigger_count': 0,
+            }
+        return {
+            'cap_trigger_rate': self._epoch_cap_trigger / n,
+            'wm_ratio_mean': self._epoch_ratio_sum / n,
+            'wm_ratio_after_cap_mean': self._epoch_ratio_after_cap_sum / n,
+            'cap_scale_mean': (self._epoch_scale_sum / self._epoch_cap_trigger
+                               if self._epoch_cap_trigger else 1.0),
+            'cap_batch_count': n,
+            'cap_trigger_count': self._epoch_cap_trigger,
+        }
+
+    def reset_epoch_cap_stats(self):
+        """重置本轮（epoch）内的 capping 统计（在每轮训练开始时调用）。"""
+        self._epoch_cap_trigger = 0
+        self._epoch_batch_count = 0
+        self._epoch_ratio_sum = 0.0
+        self._epoch_ratio_after_cap_sum = 0.0
+        self._epoch_scale_sum = 0.0
+
     def get_stats(self):
+        epoch_cap = self.get_epoch_cap_stats()
         return {
             'prevGM': self._ema_gm,
             'prevGH': self._ema_gh,
@@ -321,6 +387,15 @@ class MultiLoss:
             'current_wm_ratio_after_cap': self.current_wm_ratio_after_cap,
             'cap_applied': self.cap_applied,
             'cap_scale_factor': self.cap_scale_factor,
+            # ---- 新增：capping 运行时诊断 ----
+            'cap_trigger_rate': epoch_cap['cap_trigger_rate'],
+            'wm_ratio_mean': epoch_cap['wm_ratio_mean'],
+            'wm_ratio_after_cap_mean': epoch_cap['wm_ratio_after_cap_mean'],
+            'cap_scale_mean': epoch_cap['cap_scale_mean'],
+            'cap_batch_count': epoch_cap['cap_batch_count'],
+            'cap_trigger_count': epoch_cap['cap_trigger_count'],
+            'cap_trigger_count_cumulative': self.cap_trigger_count,
+            'cap_batch_count_cumulative': self.cap_batch_count,
         }
 
     def reset_stats(self):
@@ -338,6 +413,9 @@ class MultiLoss:
         self.current_wm_ratio_after_cap = 1.0
         self.cap_applied = False
         self.cap_scale_factor = 1.0
+        self.cap_trigger_count = 0
+        self.cap_batch_count = 0
+        self.reset_epoch_cap_stats()
         self._param_snapshot = None
         self._total_param_drift = 0.0
         self._wm_param_drift = 0.0

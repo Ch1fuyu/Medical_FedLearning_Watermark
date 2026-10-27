@@ -24,6 +24,20 @@ import pandas as pd
 
 set_seed()
 
+
+def _to_float_or_none(value):
+    """安全地把统计量转成 float；None / NaN 保持为 None（写入 Excel 为空单元格）。"""
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if np.isnan(f) or np.isinf(f):
+        return None
+    return f
+
+
 # 配置 logging
 args = parser_args()
 log_file_name = args.log_file
@@ -413,7 +427,11 @@ class FederatedLearningOnChestMNIST(Experiment):
             
             # ========== 第四步：本地训练（使用下发的定制模型） ==========
             local_ws, local_losses = [], []
-            
+
+            # 重置本轮 capping 统计（用于 Excel 运行时诊断）
+            if hasattr(self.trainer, 'multi_loss') and hasattr(self.trainer.multi_loss, 'reset_epoch_cap_stats'):
+                self.trainer.multi_loss.reset_epoch_cap_stats()
+
             # 确定本轮的恶意客户端（用于模拟泄漏）
             self.current_malicious_client = self._get_current_malicious_client(epoch, idxs_users)
             if self.current_malicious_client is not None:
@@ -487,6 +505,8 @@ class FederatedLearningOnChestMNIST(Experiment):
             stats_row = {
                 'round': epoch + 1,
                 'lr': self.lr,
+                # 记录当前生效的梯度比例阈值，便于跨实验对照
+                'wm_grad_target_ratio': float(getattr(self.args, 'watermark_grad_target_ratio', 0.3)),
             }
 
             self.logs['val_acc'].append(acc_val_label_mean)
@@ -545,6 +565,16 @@ class FederatedLearningOnChestMNIST(Experiment):
             if hasattr(self.trainer, 'multi_loss'):
                 stats = self.trainer.multi_loss.get_stats()
                 logging.info(f"MultiLoss - GM:{stats['prevGM']:.6f} GH:{stats['prevGH']:.6f} Ratio:{stats['prevRatio']:.6f}")
+                # capping 运行时诊断（受 watermark_grad_target_ratio 直接影响）
+                cap_rate = stats.get('cap_trigger_rate')
+                if cap_rate is not None:
+                    logging.info(
+                        f"  [Capping] 目标比例:{getattr(self.args, 'watermark_grad_target_ratio', 0.3):.3f} | "
+                        f"触发率:{cap_rate:.2%} | 缩放系数:{stats.get('cap_scale_mean', 1.0):.4f} | "
+                        f"梯度比例:{stats.get('wm_ratio_mean', 0.0):.4f} -> {stats.get('wm_ratio_after_cap_mean', 0.0):.4f}"
+                    )
+                else:
+                    logging.info('  [Capping] 本轮未进入对比正则化分支（第 1 轮仅主任务训练），无 capping 数据')
             
             # 更新评估指标到记录行
             stats_row.update({
@@ -617,6 +647,47 @@ class FederatedLearningOnChestMNIST(Experiment):
                 'current_var_M': float(multi_loss_stats['current_var_M']),
                 'current_var_H': float(multi_loss_stats['current_var_H']),
             })
+
+            # ---- 运行时诊断：受 watermark_grad_target_ratio 直接影响的量 ----
+            # 1) capping 行为：触发率 / 缩放系数 / 前后梯度比例
+            if hasattr(self.trainer, 'multi_loss'):
+                # 自检：MultiLoss.get_stats() 必须提供这些键，否则下面的 .get() 会静默变 None
+                _expected = (
+                    'wm_ratio_mean', 'wm_ratio_after_cap_mean',
+                    'cap_trigger_rate', 'cap_scale_mean',
+                    'cap_trigger_count', 'cap_batch_count',
+                    'cap_trigger_count_cumulative', 'cap_batch_count_cumulative',
+                )
+                _missing = [k for k in _expected if k not in multi_loss_stats]
+                if _missing:
+                    logging.warning(f'[诊断] MultiLoss.get_stats() 缺少字段: {_missing}')
+                stats_row.update({
+                    'wm_grad_ratio_mean': _to_float_or_none(multi_loss_stats.get('wm_ratio_mean')),
+                    'wm_grad_ratio_after_cap_mean': _to_float_or_none(multi_loss_stats.get('wm_ratio_after_cap_mean')),
+                    'cap_trigger_rate': _to_float_or_none(multi_loss_stats.get('cap_trigger_rate')),
+                    'cap_scale_mean': _to_float_or_none(multi_loss_stats.get('cap_scale_mean')),
+                    'cap_trigger_count': int(multi_loss_stats.get('cap_trigger_count', 0)),
+                    'cap_batch_count': int(multi_loss_stats.get('cap_batch_count', 0)),
+                    'cap_trigger_count_cum': int(multi_loss_stats.get('cap_trigger_count_cumulative', 0)),
+                    'cap_batch_count_cum': int(multi_loss_stats.get('cap_batch_count_cumulative', 0)),
+                })
+
+            # 2) 水印区参数漂移：相对权威水印的偏差（决定抗微调能力的核心量）
+            wm_region = self._compute_watermark_region_metrics(self.w_t)
+            if wm_region is not None:
+                stats_row.update({
+                    'wm_cos_to_auth': float(wm_region['wm_cos_to_auth']),
+                    'wm_dev_norm': float(wm_region['wm_dev_norm']),
+                    'wm_dev_rel': float(wm_region['wm_dev_rel']),
+                    'wm_norm': float(wm_region['wm_norm']),
+                    'wm_rms': float(wm_region['wm_rms']),
+                    'auth_norm': float(wm_region['auth_norm']),
+                })
+            else:
+                stats_row.update({
+                    'wm_cos_to_auth': None, 'wm_dev_norm': None, 'wm_dev_rel': None,
+                    'wm_norm': None, 'wm_rms': None, 'auth_norm': None,
+                })
 
             # 添加三种噪声等级的泄露检测详细记录
             current_round = epoch + 1
@@ -895,12 +966,21 @@ class FederatedLearningOnChestMNIST(Experiment):
             columns = [
                 # 基础信息
                 'round', 'lr', 'train_loss', 'val_loss',
+                'wm_grad_target_ratio',
                 'train_acc_label', 'train_auc', 'val_acc_label', 'val_auc',
                 'best_val_acc_so_far', 'best_val_auc_so_far',
                 'train_acc_sample', 'val_acc_sample',
                 # 增强水印系统统计
                 'prevGM', 'prevGH', 'prevRatio',
                 'current_grad_M', 'current_grad_H', 'current_var_M', 'current_var_H',
+                # 运行时诊断：watermark_grad_target_ratio 的实际作用
+                'wm_grad_ratio_mean', 'wm_grad_ratio_after_cap_mean',
+                'cap_trigger_rate', 'cap_scale_mean',
+                'cap_trigger_count', 'cap_batch_count',
+                'cap_trigger_count_cum', 'cap_batch_count_cum',
+                # 水印区相对权威水印的偏差（抗微调鲁棒性的核心指标）
+                'wm_cos_to_auth', 'wm_dev_norm', 'wm_dev_rel',
+                'wm_norm', 'wm_rms', 'auth_norm',
                 # 自编码器性能
                 'autoencoder_performance',
                 # 泄露检测与三种噪声等级详细记录
@@ -1153,6 +1233,82 @@ class FederatedLearningOnChestMNIST(Experiment):
             return {k: v.clone() for k, v in global_model.items()}
 
         return customized_model
+
+    def _compute_watermark_region_metrics(self, model_state):
+        """
+        计算模型「水印区域」相对于服务器端权威水印的偏差指标。
+
+        这是判断 ``--watermark_grad_target_ratio`` 是否真的影响水印抗微调能力的
+        核心依据：该超参压制水印区梯度 -> 水印区参数被任务梯度推动得更少
+        -> 水印区更贴近权威值 -> 微调攻击时越难把水印冲掉。
+
+        Args:
+            model_state: 模型参数字典
+
+        Returns:
+            指标字典；无法计算时返回 None
+        """
+        try:
+            from utils.key_matrix_utils import KeyMatrixManager
+            key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
+
+            encoder_params = self.trainer._extract_encoder_parameters()
+            if encoder_params is None:
+                return None
+
+            if torch.is_tensor(encoder_params):
+                enc_flat = encoder_params.detach().view(-1).float()
+            else:
+                enc_flat = torch.as_tensor(encoder_params, dtype=torch.float32).view(-1)
+
+            offset_map, _ = self._build_param_offset_map(model_state)
+
+            # encoder_params 按 client_id 顺序连续存储各客户端水印
+            encoder_offsets = {}
+            cumulative = 0
+            for cid in range(self.client_num):
+                encoder_offsets[cid] = cumulative
+                cumulative += len(key_manager.load_positions(cid))
+
+            cur_vals, auth_vals = [], []
+            for cid in range(self.client_num):
+                positions = key_manager.load_positions(cid)
+                enc_off = encoder_offsets[cid]
+                for i, (param_name, global_idx) in enumerate(positions):
+                    local_idx, actual_name = self._convert_global_to_local_idx(
+                        global_idx, param_name, model_state, offset_map
+                    )
+                    if actual_name is None or local_idx is None:
+                        continue
+                    if actual_name not in model_state:
+                        continue
+                    flat = model_state[actual_name].view(-1)
+                    if local_idx >= flat.numel():
+                        continue
+                    cur_vals.append(flat[local_idx].detach().float().item())
+                    enc_idx = enc_off + i
+                    auth_vals.append(enc_flat[enc_idx].item() if enc_idx < enc_flat.numel() else 0.0)
+
+            if not cur_vals:
+                return None
+
+            cur = torch.tensor(cur_vals, dtype=torch.float32)
+            auth = torch.tensor(auth_vals, dtype=torch.float32)
+            dev = cur - auth
+
+            return {
+                'wm_cos_to_auth': float(torch.nn.functional.cosine_similarity(
+                    cur.unsqueeze(0), auth.unsqueeze(0)).item()),
+                'wm_dev_norm': float(dev.norm().item()),
+                'wm_dev_rel': float(dev.norm().item() / (auth.norm().item() + 1e-12)),
+                'wm_norm': float(cur.norm().item()),
+                'wm_rms': float(cur.pow(2).mean().sqrt().item()),
+                'auth_norm': float(auth.norm().item()),
+                'wm_count': len(cur_vals),
+            }
+        except Exception as e:
+            logging.warning(f'_compute_watermark_region_metrics 失败: {e}')
+            return None
 
     def _cosine_similarity(self, vec1, vec2):
         """
