@@ -21,30 +21,32 @@ MAIN_PY_PATH = PROJECT_ROOT / 'main.py'
 # 每个字典代表一次实验，按顺序执行
 # 只需填写需要变化的参数，其他自动使用 args.py 的默认值
 #
-# 优化器和学习率建议:
-# - CIFAR-10/100 + AlexNet: Adam, lr=0.003 (小学习率适合复杂模型)
-# - CIFAR-10/100 + ResNet: SGD, lr=0.01 (SGD在大数据集上泛化更好)
+# 当前调查: watermark_grad_target_ratio 对水印鲁棒性的影响
+# 固定 optim=adam / lr=0.001 / ratio=0.3，遍历数据集 × 模型 × 客户端数
 
-# ---- 当前调查: watermark_grad_target_ratio 对水印鲁棒性的影响 ----
-# 固定配置 (alexnet + cifar10 + K=10)，只变化梯度比例阈值
+# ---- 所有实验共享的固定配置 ----
 BASE_CONFIG = {
-    '--dataset': 'cifar10',
-    '--model_name': 'alexnet',
-    '--optim': 'sgd',
+    '--optim': 'adam',
     '--lr': '0.001',
-    '--client_num': '10',
+    '--watermark_grad_target_ratio': '0.3',
 }
 
-# 待扫描的梯度比例阈值 (0 表示关闭 capping)
-TARGET_RATIOS = ['0', '0.1', '0.3', '0.5', '0.7', '0.9']
+# ---- 遍历维度: 数据集 × 模型 × 客户端数量 ----
+DATASETS = ['cifar10', 'cifar100']
+MODELS = ['alexnet', 'resnet']
+CLIENT_NUMS = ['5', '10', '20']
 
 EXPERIMENTS = [
     {
-        'name': f'cifar10_alexnet_10clients_wmratio_{r}',
+        'name': f'{ds}_{model}_{k}clients',
         **BASE_CONFIG,
-        '--watermark_grad_target_ratio': r,
+        '--dataset': ds,
+        '--model_name': model,
+        '--client_num': k,
     }
-    for r in TARGET_RATIOS
+    for ds in DATASETS
+    for model in MODELS
+    for k in CLIENT_NUMS
 ]
 # =======================================================================
 
