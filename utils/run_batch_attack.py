@@ -89,7 +89,7 @@ def has_full_weights(model_path):
     训练脚本 main.py 的 _optimize_model_storage(watermark_only=True) 会把模型
     保存成"仅水印参数"格式（只含 _watermark_only / watermark_values /
     client_watermark_values），这类文件不含任何网络权重，
-    无法用于剪枝 / 微调攻击，必须跳过。
+    无法用于剪枝 / 微调攻击。
 
     这里直接扫描 pkl 二进制内容判断，避免依赖 torch（批量脚本本身无需 torch）。
 
@@ -115,66 +115,78 @@ def has_full_weights(model_path):
     return any(k in data for k in weight_keys)
 
 
-def resolve_model_path(exp_config, verbose=True):
+def check_model_usable(model_path, exp_config):
     """
-    解析模型文件路径。
+    校验配置指定的模型是否可用于攻击实验。
 
-    优先使用配置中硬编码的 pkl 文件名；若该文件不存在或只含水印参数
-    （训练产物被清理 / 被覆盖 / 保存格式变更），则在
-    save/{model}/{dataset}/ 下按客户端数自动挑选最合适的候选模型。
+    **不做任何模型替换**：配置里指定哪个模型就用哪个。
+    若该模型不可用，直接报错并说明原因与解决办法。
 
-    挑选规则:
-      1. 必须包含 '_cn_{clients}_'
-      2. 必须包含完整网络权重（排除"仅水印参数"格式的 checkpoint）
-      3. 优先水印模型 ('wm_enhanced')
-      4. 训练轮数越多越好 (ep_150 > ep_100 > ...)
-      5. 同条件下取时间戳最新的一个
+    Args:
+        model_path: 配置指定的模型完整路径
+        exp_config: 实验配置字典
+
+    Returns:
+        str or None: None 表示可用；否则为错误说明
     """
-    model_path = get_model_path(exp_config)
-    if os.path.exists(model_path) and has_full_weights(model_path):
-        return model_path, None
+    if not os.path.exists(model_path):
+        return (
+            f"模型文件不存在: {model_path}\n"
+            f"    该模型由训练脚本生成，需重新训练后才能用于攻击实验。"
+        )
 
-    model_type = exp_config["model"]
-    dataset = exp_config["dataset"]
-    clients = exp_config["clients"]
-    model_dir = os.path.join(PROJECT_ROOT, "save", model_type, dataset)
+    if not has_full_weights(model_path):
+        return (
+            f"模型文件仅含水印参数、不含网络权重，无法用于攻击实验: {model_path}\n"
+            f"    原因: 训练时 main.py 的 _optimize_model_storage(watermark_only=True)\n"
+            f"          只落盘了水印区域参数（commit 0a901ec 引入的保存格式变更）。\n"
+            f"    解决办法: 用已修复的 main.py 重新训练该模型（watermark_only=False，\n"
+            f"              会保存完整权重），再重跑批量攻击脚本。"
+        )
 
-    if not os.path.isdir(model_dir):
-        return model_path, f"模型目录不存在: {model_dir}"
+    return None
 
-    cn_tag = f"_cn_{clients}_"
-    candidates = [f for f in os.listdir(model_dir)
-                  if f.endswith(".pkl") and cn_tag in f]
 
-    if not candidates:
-        return model_path, (f"在 {model_dir} 下找不到客户端数为 {clients} 的模型 "
-                            f"(匹配 '{cn_tag}')")
+def preflight_check(start_idx=0, end_idx=None):
+    """
+    运行前预检：检查所有实验指定的模型是否可用。
 
-    # 过滤掉只含水印参数、无法用于攻击的 checkpoint
-    usable = [f for f in candidates if has_full_weights(os.path.join(model_dir, f))]
-    if not usable:
-        return model_path, (
-            f"{model_dir} 下客户端数为 {clients} 的模型均只含水印参数、"
-            f"不含网络权重，无法用于攻击实验（共 {len(candidates)} 个候选）")
+    **不做任何模型替换** —— 配置里指定哪个模型就用哪个。
+    若有模型不可用，直接列出并中止，避免跑到一半才失败。
 
-    def sort_key(name):
-        is_wm = 1 if "wm_enhanced" in name else 0
-        ep_match = re.search(r"_ep_(\d+)_", name)
-        epochs = int(ep_match.group(1)) if ep_match else -1
-        # 训练脚本的时间戳格式为 %Y%m%d%H%M (12位)
-        ts_match = re.match(r"(\d{12})", name)
-        ts = ts_match.group(1) if ts_match else ""
-        return (is_wm, epochs, ts)
+    Args:
+        start_idx: 起始实验索引
+        end_idx: 结束实验索引
 
-    best = max(usable, key=sort_key)
-    resolved = os.path.join(model_dir, best)
+    Returns:
+        list: 不可用的实验列表（[(index, name, error), ...]）
+    """
+    if end_idx is None:
+        end_idx = len(EXPERIMENTS)
 
-    note = (f"配置中的模型不可用（不存在或仅含水印参数），已自动回退到: {best}\n"
-            f"    原配置: {exp_config['pkl']}\n"
-            f"    当前使用: {resolved}")
-    if verbose:
-        print(f"  ⚠️ {note}")
-    return resolved, note
+    unusable = []
+    for i, exp in enumerate(EXPERIMENTS[start_idx:end_idx], start=start_idx+1):
+        model_path = get_model_path(exp)
+        error = check_model_usable(model_path, exp)
+        if error:
+            unusable.append((i, exp, error))
+
+    if not unusable:
+        return []
+
+    print(f"\n{'!'*80}")
+    print(f"❌ 预检失败：{len(unusable)}/{end_idx - start_idx} 个实验的模型不可用")
+    print(f"{'!'*80}")
+    for i, exp, error in unusable:
+        print(f"\n[{i}] {exp['model']}/{exp['dataset']}/K={exp['clients']}")
+        print(f"    模型: {exp['pkl']}")
+        for line in error.split("\n"):
+            print(f"    {line}")
+    print(f"\n{'!'*80}")
+    print("请先解决上述问题（重新训练对应模型）后再重跑批量攻击脚本。")
+    print("批量攻击脚本不会自动替换模型，实验结果必须对应配置中指定的模型。")
+    print(f"{'!'*80}")
+    return unusable
 
 
 def run_pruning_attack(model_path, model_type, client_num, autoencoder_dir):
@@ -243,19 +255,19 @@ def run_all_pruning_experiments(autoencoder_dir=None, start_idx=0, end_idx=None)
     results = []
 
     for i, exp in enumerate(EXPERIMENTS[start_idx:end_idx], start=start_idx+1):
-        model_path, note = resolve_model_path(exp)
+        model_path = get_model_path(exp)
         exp_name = f"{exp['model']}_{exp['dataset']}_{exp['clients']}clients"
 
         print(f"\n[{i}/{len(EXPERIMENTS)}] {exp_name}")
 
-        if not os.path.exists(model_path):
-            print(f"  警告: 模型文件不可用: {model_path}")
-            print(f"        原因: {note}")
+        error = check_model_usable(model_path, exp)
+        if error:
+            print(f"  ❌ {error}")
             results.append({
                 "index": i, "name": exp_name, "model": exp["model"],
                 "dataset": exp["dataset"], "clients": exp["clients"],
                 "pkl": exp["pkl"], "success": False,
-                "result": f"模型文件不可用: {note or '文件不存在'}"
+                "result": error
             })
             continue
 
@@ -296,19 +308,19 @@ def run_all_finetune_experiments(autoencoder_dir=None,
     results = []
 
     for i, exp in enumerate(EXPERIMENTS[start_idx:end_idx], start=start_idx+1):
-        model_path, note = resolve_model_path(exp)
+        model_path = get_model_path(exp)
         exp_name = f"{exp['model']}_{exp['dataset']}_{exp['clients']}clients"
 
         print(f"\n[{i}/{len(EXPERIMENTS)}] {exp_name}")
 
-        if not os.path.exists(model_path):
-            print(f"  警告: 模型文件不可用: {model_path}")
-            print(f"        原因: {note}")
+        error = check_model_usable(model_path, exp)
+        if error:
+            print(f"  ❌ {error}")
             results.append({
                 "index": i, "name": exp_name, "model": exp["model"],
                 "dataset": exp["dataset"], "clients": exp["clients"],
                 "pkl": exp["pkl"], "success": False,
-                "result": f"模型文件不可用: {note or '文件不存在'}"
+                "result": error
             })
             continue
 
@@ -467,6 +479,12 @@ def run_batch(args):
         print(f"  批次大小: {args.batch_size}")
         print(f"  保存模式: {args.save_mode}")
     print(f"  实验范围: {args.start_idx} ~ {args.end_idx if args.end_idx else len(EXPERIMENTS)-1}")
+
+    # 运行前预检：确认所有模型可用（不做模型替换）
+    unusable = preflight_check(start_idx=args.start_idx, end_idx=args.end_idx)
+    if unusable:
+        print(f"\n批量实验中止：{len(unusable)} 个模型不可用。")
+        return
 
     # 运行剪枝攻击
     if args.attack_type in ['pruning', 'both']:
