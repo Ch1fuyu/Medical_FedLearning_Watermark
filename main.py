@@ -186,13 +186,18 @@ class FederatedLearningOnChestMNIST(Experiment):
             torch.cuda.empty_cache()
         gc.collect()
 
-    def _optimize_model_storage(self, model_state, watermark_only=True, compress=True):
+    def _optimize_model_storage(self, model_state, watermark_only=False, compress=False):
         """
         优化模型状态存储，减少内存和磁盘占用
 
         优化策略：
         1. watermark_only=True: 只保存水印区域的参数（非水印区域对检测无意义）
         2. compress=True: 使用 float16 压缩（精度损失可接受）
+
+        默认 (watermark_only=False, compress=False) 保存**完整模型权重**：
+        剪枝/微调攻击等实验需要完整权重才能加载模型；
+        水印元信息 (_watermark_only/_watermark_count/watermark_values/
+        client_watermark_values) 会一并保留，兼容旧的下游读取逻辑。
 
         Args:
             model_state: 模型参数字典
@@ -253,6 +258,35 @@ class FederatedLearningOnChestMNIST(Experiment):
                 if compress:
                     tensor = tensor.half()  # float32 → float16
                 optimized_state[key] = tensor
+
+            # 同时保留水印元信息（不覆盖任何模型参数键），便于后验泄露检测等下游场景
+            try:
+                from utils.key_matrix_utils import KeyMatrixManager
+                key_manager = KeyMatrixManager(self.args.key_matrix_path, args=self.args)
+                offset_map, _ = self._build_param_offset_map(model_state)
+
+                client_watermark_values = {}
+                all_values = []
+                for client_id in range(self.client_num):
+                    positions = key_manager.load_positions(client_id)
+                    client_values = []
+                    for param_name, global_idx in positions:
+                        local_idx, actual_param_name = self._convert_global_to_local_idx(
+                            global_idx, param_name, model_state, offset_map
+                        )
+                        if actual_param_name and local_idx is not None:
+                            if actual_param_name in model_state:
+                                param_flat = model_state[actual_param_name].view(-1)
+                                if local_idx < param_flat.numel():
+                                    client_values.append(param_flat[local_idx].item())
+                    client_watermark_values[client_id] = client_values
+                    all_values.extend(client_values)
+
+                optimized_state['_watermark_count'] = len(all_values)
+                optimized_state['watermark_values'] = all_values
+                optimized_state['client_watermark_values'] = client_watermark_values
+            except Exception as e:
+                logging.warning(f"[存储优化] 水印元信息提取失败（不影响完整模型保存）: {e}")
 
         return optimized_state
 

@@ -288,6 +288,66 @@ def load_cifar100_data(batch_size: int = 128, data_root: str = './data'):
     return train_loader, test_loader
 
 
+def load_model_weights(model, checkpoint, model_path):
+    """
+    从 checkpoint 中加载模型权重，并给出明确的错误提示。
+
+    历史遗留问题：某些训练脚本会把模型保存为 "仅水印参数" 格式
+    (只含 _watermark_only / watermark_values / client_watermark_values)，
+    这类 checkpoint 不含任何网络权重，无法用于剪枝/微调攻击。
+    这里显式识别并报错，避免抛出难以定位的 state_dict 异常。
+
+    Args:
+        model: 目标模型实例
+        checkpoint: 已加载的 checkpoint 字典
+        model_path: 模型文件路径（用于错误提示）
+
+    Raises:
+        RuntimeError: checkpoint 不含可用权重时
+    """
+    net_info = checkpoint.get('net_info', {}) or {}
+    best_model = net_info.get('best_model') or []
+    if not best_model:
+        raise RuntimeError(
+            f"❌ checkpoint 中缺少 net_info.best_model，无法加载模型: {model_path}\n"
+            f"   该文件可能不是有效的训练产物，或已被损坏。"
+        )
+
+    state = best_model[0]
+    if not isinstance(state, dict):
+        raise RuntimeError(
+            f"❌ checkpoint 的 best_model[0] 类型异常 (期望 dict，实际 {type(state).__name__}): {model_path}"
+        )
+
+    # 检测 "仅水印参数" 格式：不含任何网络权重
+    if state.get('_watermark_only', False) and 'features.0.conv.weight' not in state \
+            and 'conv1.weight' not in state and 'fc.weight' not in state:
+        wm_keys = sorted(k for k in state.keys() if not k.startswith('_')
+                         and k not in ('watermark_values', 'client_watermark_values'))
+        raise RuntimeError(
+            f"❌ 该 checkpoint 仅保存了水印参数，不含网络权重，无法用于攻击实验: {model_path}\n"
+            f"   原因: 训练时 _optimize_model_storage(watermark_only=True) 只落盘了水印区域。\n"
+            f"   解决方案: 重新训练并保存完整权重（main.py 中 watermark_only=False），\n"
+            f"             或改用 save/ 下同组的完整权重模型。\n"
+            f"   该文件的键: {wm_keys if wm_keys else '(仅水印元信息)'}"
+        )
+
+    # 浮点16位压缩的权重需要转回 float32
+    state = {k: (v.float() if torch.is_floating_point(v) else v)
+             for k, v in state.items()}
+
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if missing:
+        raise RuntimeError(
+            f"❌ 加载模型权重失败，缺少参数: {missing}\n"
+            f"   模型文件: {model_path}"
+        )
+    if unexpected:
+        print(f"⚠️  权重中存在多余键（已忽略）: {unexpected}")
+
+    return model
+
+
 def load_main_task_model(model_path: str, device: str = 'cuda'):
     """
     加载主任务模型，自动从checkpoint推断数据集参数
@@ -374,7 +434,7 @@ def load_main_task_model(model_path: str, device: str = 'cuda'):
         model = resnet18(num_classes=num_classes, in_channels=in_channels, input_size=input_size)
 
     # 加载模型权重
-    model.load_state_dict(checkpoint['net_info']['best_model'][0])
+    load_model_weights(model, checkpoint, model_path)
     print(f"✓ 已加载主任务模型: {model_path}")
 
     model = model.to(device)
