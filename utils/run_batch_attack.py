@@ -82,45 +82,12 @@ def get_model_path(exp_config):
     return os.path.join(PROJECT_ROOT, "save", model_type, dataset, pkl)
 
 
-def has_full_weights(model_path):
-    """
-    检测 checkpoint 是否包含完整网络权重。
-
-    训练脚本 main.py 的 _optimize_model_storage(watermark_only=True) 会把模型
-    保存成"仅水印参数"格式（只含 _watermark_only / watermark_values /
-    client_watermark_values），这类文件不含任何网络权重，
-    无法用于剪枝 / 微调攻击。
-
-    这里直接扫描 pkl 二进制内容判断，避免依赖 torch（批量脚本本身无需 torch）。
-
-    Args:
-        model_path: 模型文件路径
-
-    Returns:
-        bool: True 表示含完整权重
-    """
-    try:
-        with open(model_path, 'rb') as f:
-            data = f.read()
-    except OSError:
-        return False
-
-    if b'_watermark_only' not in data:
-        # 没有水印标记，视为完整权重
-        return True
-
-    # 含水印标记：必须同时含至少一个网络权重键
-    weight_keys = (b'features.0.conv.weight', b'conv1.weight', b'fc.weight',
-                   b'classifier.weight')
-    return any(k in data for k in weight_keys)
-
-
 def check_model_usable(model_path, exp_config):
     """
-    校验配置指定的模型是否可用于攻击实验。
+    校验配置指定的模型文件是否存在。
 
     **不做任何模型替换**：配置里指定哪个模型就用哪个。
-    若该模型不可用，直接报错并说明原因与解决办法。
+    找不到就是找不到，直接报错并中止。
 
     Args:
         model_path: 配置指定的模型完整路径
@@ -132,16 +99,8 @@ def check_model_usable(model_path, exp_config):
     if not os.path.exists(model_path):
         return (
             f"模型文件不存在: {model_path}\n"
-            f"    该模型由训练脚本生成，需重新训练后才能用于攻击实验。"
-        )
-
-    if not has_full_weights(model_path):
-        return (
-            f"模型文件仅含水印参数、不含网络权重，无法用于攻击实验: {model_path}\n"
-            f"    原因: 训练时 main.py 的 _optimize_model_storage(watermark_only=True)\n"
-            f"          只落盘了水印区域参数（commit 0a901ec 引入的保存格式变更）。\n"
-            f"    解决办法: 用已修复的 main.py 重新训练该模型（watermark_only=False，\n"
-            f"              会保存完整权重），再重跑批量攻击脚本。"
+            f"    配置指定的模型: {exp_config['pkl']}\n"
+            f"    批量攻击脚本不会自动替换模型，请确认该文件是否已被删除或移动。"
         )
 
     return None
@@ -149,10 +108,10 @@ def check_model_usable(model_path, exp_config):
 
 def preflight_check(start_idx=0, end_idx=None):
     """
-    运行前预检：检查所有实验指定的模型是否可用。
+    运行前预检：检查所有实验指定的模型文件是否存在。
 
     **不做任何模型替换** —— 配置里指定哪个模型就用哪个。
-    若有模型不可用，直接列出并中止，避免跑到一半才失败。
+    若有模型缺失，直接列出并中止，避免跑到一半才失败。
 
     Args:
         start_idx: 起始实验索引
@@ -175,16 +134,14 @@ def preflight_check(start_idx=0, end_idx=None):
         return []
 
     print(f"\n{'!'*80}")
-    print(f"❌ 预检失败：{len(unusable)}/{end_idx - start_idx} 个实验的模型不可用")
+    print(f"❌ 预检失败：{len(unusable)}/{end_idx - start_idx} 个实验的模型文件不存在")
     print(f"{'!'*80}")
     for i, exp, error in unusable:
         print(f"\n[{i}] {exp['model']}/{exp['dataset']}/K={exp['clients']}")
-        print(f"    模型: {exp['pkl']}")
         for line in error.split("\n"):
             print(f"    {line}")
     print(f"\n{'!'*80}")
-    print("请先解决上述问题（重新训练对应模型）后再重跑批量攻击脚本。")
-    print("批量攻击脚本不会自动替换模型，实验结果必须对应配置中指定的模型。")
+    print("批量攻击脚本不会自动替换模型，请自行确认模型文件后重跑。")
     print(f"{'!'*80}")
     return unusable
 
@@ -281,8 +238,7 @@ def run_all_pruning_experiments(autoencoder_dir=None, start_idx=0, end_idx=None)
         results.append({
             "index": i, "name": exp_name, "model": exp["model"],
             "dataset": exp["dataset"], "clients": exp["clients"],
-            "pkl": exp["pkl"], "success": success, "result": result,
-            "used_pkl": os.path.basename(model_path)
+            "pkl": exp["pkl"], "success": success, "result": result
         })
 
     return results
@@ -339,8 +295,7 @@ def run_all_finetune_experiments(autoencoder_dir=None,
         results.append({
             "index": i, "name": exp_name, "model": exp["model"],
             "dataset": exp["dataset"], "clients": exp["clients"],
-            "pkl": exp["pkl"], "success": success, "result": result,
-            "used_pkl": os.path.basename(model_path)
+            "pkl": exp["pkl"], "success": success, "result": result
         })
 
     return results
@@ -392,9 +347,7 @@ def save_results_to_file(results, attack_type, save_dir=None, extra_config=None)
             f.write(f"  模型类型: {r['model']}\n")
             f.write(f"  数据集: {r['dataset']}\n")
             f.write(f"  客户端数: {r['clients']}\n")
-            f.write(f"  配置模型文件: {r['pkl']}\n")
-            if r.get("used_pkl") and r["used_pkl"] != r["pkl"]:
-                f.write(f"  实际使用文件: {r['used_pkl']} (自动回退)\n")
+            f.write(f"  模型文件: {r['pkl']}\n")
             f.write(f"  状态: {status}\n\n")
 
     print(f"\n结果已保存到: {filepath}")
