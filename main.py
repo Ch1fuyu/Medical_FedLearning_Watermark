@@ -186,7 +186,7 @@ class FederatedLearningOnChestMNIST(Experiment):
             torch.cuda.empty_cache()
         gc.collect()
 
-    def _optimize_model_storage(self, model_state, watermark_only=True, compress=True):
+    def _optimize_model_storage(self, model_state, watermark_only=None, compress=None):
         """
         优化模型状态存储，减少内存和磁盘占用
 
@@ -194,14 +194,27 @@ class FederatedLearningOnChestMNIST(Experiment):
         1. watermark_only=True: 只保存水印区域的参数（非水印区域对检测无意义）
         2. compress=True: 使用 float16 压缩（精度损失可接受）
 
+        watermark_only / compress 默认为 None，表示读取 args 中的配置：
+        - args.save_full_weights (默认 True): 保存**完整模型权重**，
+          剪枝 / 微调攻击等下游实验需要完整权重才能 load_state_dict 加载模型；
+          水印元信息可由完整权重按位置反推
+          （见 _extract_client_watermark 的优先级2分支），不会丢失。
+        - args.compress_model (默认 False): 不做 float16 压缩，
+          剪枝攻击依赖精确的 0/非0 判定，半精度会引入数值误差。
+
         Args:
             model_state: 模型参数字典
-            watermark_only: 是否只保存水印区域参数
-            compress: 是否使用 float16 压缩
+            watermark_only: 是否只保存水印区域参数；None 表示读取 args 配置
+            compress: 是否使用 float16 压缩；None 表示读取 args 配置
 
         Returns:
             optimized_state: 优化后的字典
         """
+        if watermark_only is None:
+            watermark_only = not getattr(self.args, 'save_full_weights', True)
+        if compress is None:
+            compress = getattr(self.args, 'compress_model', False)
+
         optimized_state = {}
 
         if watermark_only:
@@ -2247,6 +2260,8 @@ def main(args):
                 'epochs': args.epochs,
                 'client_num': args.client_num,
                 'console_log': os.path.basename(log_file_name),
+                'save_full_weights': getattr(args, 'save_full_weights', True),
+                'compress_model': getattr(args, 'compress_model', False),
             }
             }
     fl = FederatedLearningOnChestMNIST(args)

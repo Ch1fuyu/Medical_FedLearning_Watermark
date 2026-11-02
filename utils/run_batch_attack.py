@@ -13,6 +13,7 @@
 
 import os
 import sys
+import re
 import subprocess
 import argparse
 from datetime import datetime
@@ -79,6 +80,70 @@ def get_model_path(exp_config):
     model_type = exp_config["model"]
     dataset = exp_config["dataset"]
     return os.path.join(PROJECT_ROOT, "save", model_type, dataset, pkl)
+
+
+def check_model_usable(model_path, exp_config):
+    """
+    校验配置指定的模型文件是否存在。
+
+    **不做任何模型替换**：配置里指定哪个模型就用哪个。
+    找不到就是找不到，直接报错并中止。
+
+    Args:
+        model_path: 配置指定的模型完整路径
+        exp_config: 实验配置字典
+
+    Returns:
+        str or None: None 表示可用；否则为错误说明
+    """
+    if not os.path.exists(model_path):
+        return (
+            f"模型文件不存在: {model_path}\n"
+            f"    配置指定的模型: {exp_config['pkl']}\n"
+            f"    批量攻击脚本不会自动替换模型，请确认该文件是否已被删除或移动。"
+        )
+
+    return None
+
+
+def preflight_check(start_idx=0, end_idx=None):
+    """
+    运行前预检：检查所有实验指定的模型文件是否存在。
+
+    **不做任何模型替换** —— 配置里指定哪个模型就用哪个。
+    若有模型缺失，直接列出并中止，避免跑到一半才失败。
+
+    Args:
+        start_idx: 起始实验索引
+        end_idx: 结束实验索引
+
+    Returns:
+        list: 不可用的实验列表（[(index, name, error), ...]）
+    """
+    if end_idx is None:
+        end_idx = len(EXPERIMENTS)
+
+    unusable = []
+    for i, exp in enumerate(EXPERIMENTS[start_idx:end_idx], start=start_idx+1):
+        model_path = get_model_path(exp)
+        error = check_model_usable(model_path, exp)
+        if error:
+            unusable.append((i, exp, error))
+
+    if not unusable:
+        return []
+
+    print(f"\n{'!'*80}")
+    print(f"❌ 预检失败：{len(unusable)}/{end_idx - start_idx} 个实验的模型文件不存在")
+    print(f"{'!'*80}")
+    for i, exp, error in unusable:
+        print(f"\n[{i}] {exp['model']}/{exp['dataset']}/K={exp['clients']}")
+        for line in error.split("\n"):
+            print(f"    {line}")
+    print(f"\n{'!'*80}")
+    print("批量攻击脚本不会自动替换模型，请自行确认模型文件后重跑。")
+    print(f"{'!'*80}")
+    return unusable
 
 
 def run_pruning_attack(model_path, model_type, client_num, autoencoder_dir):
@@ -152,12 +217,14 @@ def run_all_pruning_experiments(autoencoder_dir=None, start_idx=0, end_idx=None)
 
         print(f"\n[{i}/{len(EXPERIMENTS)}] {exp_name}")
 
-        if not os.path.exists(model_path):
-            print(f"  警告: 模型文件不存在: {model_path}")
+        error = check_model_usable(model_path, exp)
+        if error:
+            print(f"  ❌ {error}")
             results.append({
                 "index": i, "name": exp_name, "model": exp["model"],
                 "dataset": exp["dataset"], "clients": exp["clients"],
-                "pkl": exp["pkl"], "success": False, "result": "模型文件不存在"
+                "pkl": exp["pkl"], "success": False,
+                "result": error
             })
             continue
 
@@ -202,12 +269,14 @@ def run_all_finetune_experiments(autoencoder_dir=None,
 
         print(f"\n[{i}/{len(EXPERIMENTS)}] {exp_name}")
 
-        if not os.path.exists(model_path):
-            print(f"  警告: 模型文件不存在: {model_path}")
+        error = check_model_usable(model_path, exp)
+        if error:
+            print(f"  ❌ {error}")
             results.append({
                 "index": i, "name": exp_name, "model": exp["model"],
                 "dataset": exp["dataset"], "clients": exp["clients"],
-                "pkl": exp["pkl"], "success": False, "result": "模型文件不存在"
+                "pkl": exp["pkl"], "success": False,
+                "result": error
             })
             continue
 
@@ -307,8 +376,25 @@ def collect_paper_results(data_dir=None):
 
     for filepath in paper_files:
         filename = os.path.basename(filepath)
-        match = re.search(r'finetune_attack_\d+_\d+_(\w+)_paper\.csv', filename)
-        dataset = match.group(1) if match else "unknown"
+        # 文件名格式: finetune_attack_{YYYYMMDDHHMMSS}_{dataset}_paper.csv
+        match = re.search(r'finetune_attack_\d{14}_(\w+)_paper\.csv', filename)
+        if match:
+            dataset = match.group(1)
+        else:
+            # 回退: 从CSV头注释 "# Finetune Attack Results - DATASET" 解析
+            dataset = "unknown"
+            try:
+                with open(filepath, 'r', encoding='utf-8-sig') as fh:
+                    for line in fh:
+                        if line.startswith('#'):
+                            m2 = re.search(r'-\s*([A-Za-z0-9]+)\s*$', line.strip())
+                            if m2:
+                                dataset = m2.group(1).lower()
+                                break
+                        else:
+                            break
+            except Exception:
+                pass
 
         try:
             df = pd.read_csv(filepath, comment='#', encoding='utf-8-sig')
@@ -346,6 +432,12 @@ def run_batch(args):
         print(f"  批次大小: {args.batch_size}")
         print(f"  保存模式: {args.save_mode}")
     print(f"  实验范围: {args.start_idx} ~ {args.end_idx if args.end_idx else len(EXPERIMENTS)-1}")
+
+    # 运行前预检：确认所有模型可用（不做模型替换）
+    unusable = preflight_check(start_idx=args.start_idx, end_idx=args.end_idx)
+    if unusable:
+        print(f"\n批量实验中止：{len(unusable)} 个模型不可用。")
+        return
 
     # 运行剪枝攻击
     if args.attack_type in ['pruning', 'both']:
@@ -395,7 +487,7 @@ def run_batch(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='批量攻击实验脚本')
-    parser.add_argument('--attack_type', type=str, required=True,
+    parser.add_argument('--attack_type', type=str, default='both',
                        choices=['pruning', 'finetune', 'both', 'collect'],
                        help='pruning(剪枝)/finetune(微调)/both(两者)/collect(收集论文数据)')
     parser.add_argument('--autoencoder_dir', type=str,
