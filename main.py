@@ -186,13 +186,18 @@ class FederatedLearningOnChestMNIST(Experiment):
             torch.cuda.empty_cache()
         gc.collect()
 
-    def _optimize_model_storage(self, model_state, watermark_only=True, compress=True):
+    def _optimize_model_storage(self, model_state, watermark_only=False, compress=False):
         """
         优化模型状态存储，减少内存和磁盘占用
 
         优化策略：
         1. watermark_only=True: 只保存水印区域的参数（非水印区域对检测无意义）
         2. compress=True: 使用 float16 压缩（精度损失可接受）
+
+        默认 (watermark_only=False, compress=False) 保存**完整模型权重**：
+        剪枝 / 微调攻击等下游实验需要完整权重才能 load_state_dict 加载模型；
+        水印元信息可由完整权重按位置反推
+        （见 _get_client_watermark_values 的优先级2分支），不会丢失。
 
         Args:
             model_state: 模型参数字典
