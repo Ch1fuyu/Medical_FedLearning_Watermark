@@ -76,6 +76,16 @@ def parser_args():
     parser.add_argument('--log_file', type=str, default='./logs/console.logs', help='log file path')
     parser.add_argument('--data_root', type=str, default='./data', help='dataset root directory for downloads and cache')
 
+    # ========================= 模型存档格式参数 ========================
+    parser.add_argument('--save_full_weights', action='store_true', default=True,
+                        help='save full network weights in the checkpoint (required by pruning/finetune attacks)')
+    parser.add_argument('--no_save_full_weights', action='store_false', dest='save_full_weights',
+                        help='save only watermark-region params in the checkpoint (much smaller, NOT loadable by attacks)')
+    parser.add_argument('--compress_model', action='store_true', default=False,
+                        help='compress saved weights to float16 (saves space, but pruning attacks need exact 0/non-zero values)')
+    parser.add_argument('--no_compress_model', action='store_false', dest='compress_model',
+                        help='save weights in float32 without compression')
+
     args = parser.parse_args()
 
     from .key_matrix_utils import get_key_matrix_path
