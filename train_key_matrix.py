@@ -36,20 +36,25 @@ DATASET_PRESETS = {
 class KeyMatrixGenerator:
     """密钥矩阵生成器"""
     
-    def __init__(self, model, client_num, watermark_strategy='equal', seed=42):
+    def __init__(self, model, client_num, watermark_strategy='equal', seed=42,
+                 collusion_K=3, enable_witness=True):
         """
         初始化密钥矩阵生成器
-        
+
         Args:
             model: 主任务模型
             client_num: 客户端数量
             watermark_strategy: 水印分配策略 ('equal', 'proportional', 'custom')
             seed: 随机种子
+            collusion_K: 抗合谋设计抵抗的最大合谋规模
+            enable_witness: 是否生成见证点布局（抗合谋水印）
         """
         self.model = model
         self.client_num = client_num
         self.watermark_strategy = watermark_strategy
         self.seed = seed
+        self.collusion_K = collusion_K
+        self.enable_witness = enable_witness
         
         # 设置随机种子
         np.random.seed(seed)
@@ -160,7 +165,72 @@ class KeyMatrixGenerator:
             start_idx = end_idx
         
         return key_matrices, position_dict
-    
+
+    def generate_witness_layout(self, position_dict, all_positions=None):
+        """生成见证点布局（抗合谋水印）。
+
+        见证点位置必须是**跨客户端共享**的，否则合谋者各自的水印区域
+        互不相交，无法通过参数平均反推合谋集合。
+
+        位置来源：所有 conv 位置中**未被任何客户端分配**的那些。
+        这样见证点与现有"每客户端一段独占切片"的水印机制
+        **完全不重叠**，不需要改动任何现有 offset 计算逻辑。
+
+        Args:
+            position_dict: {client_id: [(param_name, local_idx), ...]}
+            all_positions: 全部可用 conv 位置 [(param_name, local_idx), ...]；
+                None 时由本类内部重建。
+
+        Returns:
+            WitnessLayout 或 None（未启用见证点 / 位置不足）
+        """
+        if not self.enable_witness:
+            return None
+
+        from utils.collusion_resistant import build_witness_layout
+
+        # 重建全部可用位置
+        if all_positions is None:
+            all_positions = []
+            for param_info in self.model_param_info:
+                for i in range(param_info['numel']):
+                    all_positions.append((param_info['name'], i))
+
+        # 已被客户端占用的位置
+        used = set()
+        for cid in range(self.client_num):
+            for pos in position_dict[cid]:
+                used.add((pos[0], pos[1]))
+
+        # 未被占用的位置 -> 见证点共享池
+        free_pool = [p for p in all_positions if p not in used]
+
+        # 现有切片的单客户端长度
+        slice_size = len(position_dict[0]) if self.client_num > 0 else 0
+
+        try:
+            layout = build_witness_layout(
+                n_clients=self.client_num,
+                K=self.collusion_K,
+                encoder_params=self.encoder_params,
+                positions=free_pool,
+                slice_size=slice_size,
+                verbose=False,
+            )
+        except ValueError as e:
+            print(f"⚠️ 见证点布局生成失败: {e}")
+            return None
+
+        print(f"见证点布局: v={layout.v} k={layout.design.k} G={layout.G} "
+              f"见证点位置={len(layout.positions)} "
+              f"(取自 {len(free_pool)} 个未分配位置)")
+        print(f"  见证点权威值区 = [{layout.witness_offset}, "
+              f"{layout.witness_offset + layout.v * layout.G})  "
+              f"(复用 encoder 前段，与切片区值空间重叠但位置不相交)")
+        print(f"  独占切片区 = [{layout.slice_offset}, {layout.slice_end})  "
+              f"({layout.slice_size}/客户端，offset 不变)")
+        return layout
+
     def _create_key_matrix(self, positions):
         """为指定位置创建密钥矩阵"""
         key_matrix = {}
@@ -194,27 +264,36 @@ class KeyMatrixGenerator:
         
         return key_matrix
     
-    def save_key_matrices(self, key_matrices, position_dict, save_dir, model_type, client_num):
+    def save_key_matrices(self, key_matrices, position_dict, save_dir, model_type, client_num,
+                          witness_layout=None):
         """保存密钥矩阵到文件"""
         # 创建新的目录结构: save_dir/model_type/client{client_num}/
         model_dir = os.path.join(save_dir, model_type)
         client_dir = os.path.join(model_dir, f'client{client_num}')
         os.makedirs(client_dir, exist_ok=True)
-        
+
         # 保存每个客户端的密钥矩阵
         for client_id, key_matrix in key_matrices.items():
             client_subdir = os.path.join(client_dir, f'client_{client_id}')
             os.makedirs(client_subdir, exist_ok=True)
-            
+
             # 保存密钥矩阵
             key_matrix_path = os.path.join(client_subdir, 'key_matrix.pth')
             torch.save(key_matrix, key_matrix_path)
-            
+
             # 保存位置信息
             position_path = os.path.join(client_subdir, 'positions.json')
             with open(position_path, 'w') as f:
                 json.dump(position_dict[client_id], f, indent=2)
-        
+
+        # 保存见证点布局（抗合谋水印）
+        witness_path = None
+        if witness_layout is not None:
+            from utils.collusion_resistant import save_witness_layout
+            witness_path = os.path.join(client_dir, 'witness_layout.json')
+            save_witness_layout(witness_layout, witness_path)
+            print(f"见证点布局已保存到: {witness_path}")
+
         # 保存总体信息
         info = {
             'client_num': self.client_num,
@@ -224,13 +303,20 @@ class KeyMatrixGenerator:
             'encoder_params': self.encoder_params,
             'model_type': self.model.__class__.__name__,
             'created_time': datetime.now().isoformat(),
-            'seed': self.seed
+            'seed': self.seed,
+            'enable_witness': witness_layout is not None,
         }
-        
+        if witness_layout is not None:
+            info['collusion_K'] = witness_layout.design.K
+            info['witness_v'] = witness_layout.v
+            info['witness_k'] = witness_layout.design.k
+            info['witness_G'] = witness_layout.G
+            info['witness_positions'] = len(witness_layout.positions)
+
         info_path = os.path.join(client_dir, 'key_matrix_info.json')
         with open(info_path, 'w') as f:
             json.dump(info, f, indent=2)
-        
+
         print(f"密钥矩阵已保存到: {client_dir}")
         return info_path
 
@@ -261,16 +347,33 @@ def main():
     parser.add_argument('--client_num', type=int, default=5, help='客户端数量')
     parser.add_argument('--watermark_strategy', type=str, default='equal',
                        choices=['equal', 'proportional'], help='水印分配策略')
-    parser.add_argument('--save_dir', type=str, default='./save/key_matrix', 
-                       help='保存目录')
+    parser.add_argument('--save_dir', type=str, default=None,
+                       help='保存目录（默认按 profile 自动决定）')
+    parser.add_argument('--profile', type=str, default='default',
+                       choices=['default', 'collusion'],
+                       help='配置档案：default=save/key_matrix（传统水印基线），'
+                            'collusion=save/key_matrix_collusion（抗合谋分支）')
     parser.add_argument('--seed', type=int, default=42, help='随机种子')
     parser.add_argument('--dataset', type=str, default='cifar10',
-                       choices=['chestmnist', 'dermamnist', 'octmnist', 'pneumoniamnist', 'retinamnist', 
+                       choices=['chestmnist', 'dermamnist', 'octmnist', 'pneumoniamnist', 'retinamnist',
                                'cifar10', 'cifar100', 'imagenet'],
                        help='数据集类型')
+    parser.add_argument('--collusion_K', type=int, default=3,
+                       help='抗合谋设计抵抗的最大合谋规模（见证点设计用）')
+    parser.add_argument('--disable_witness', action='store_true',
+                       help='禁用见证点布局（只生成传统的独占切片水印）')
     
     args = parser.parse_args()
-    
+
+    # 保存目录：优先 --save_dir，否则按 profile 决定
+    # profile 让不同实验分支（传统水印基线 / 抗合谋）使用互不干扰的目录，
+    # 避免来回切分支时 key_matrix 与 witness_layout 不匹配。
+    if args.save_dir is None:
+        args.save_dir = ('./save/key_matrix_collusion'
+                         if args.profile == 'collusion'
+                         else './save/key_matrix')
+    print(f'配置档案: {args.profile} -> 保存目录: {args.save_dir}')
+
     # 使用预设配置获取数据集参数
     dataset_key = args.dataset.lower()
     if dataset_key in DATASET_PRESETS:
@@ -323,13 +426,21 @@ def main():
         model=model,
         client_num=args.client_num,
         watermark_strategy=args.watermark_strategy,
-        seed=args.seed
+        seed=args.seed,
+        collusion_K=args.collusion_K,
+        enable_witness=not args.disable_witness,
     )
-    
+
     key_matrices, position_dict = generator.generate_key_matrices()
-    
+
+    # 生成见证点布局（抗合谋水印）
+    witness_layout = generator.generate_witness_layout(position_dict)
+
     # 保存密钥矩阵
-    info_path = generator.save_key_matrices(key_matrices, position_dict, args.save_dir, args.model_type, args.client_num)
+    info_path = generator.save_key_matrices(key_matrices, position_dict,
+                                            args.save_dir, args.model_type,
+                                            args.client_num,
+                                            witness_layout=witness_layout)
     
     # 显示统计信息
     print("\n=== 密钥矩阵生成完成 ===")

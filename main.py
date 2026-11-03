@@ -148,6 +148,11 @@ class FederatedLearningOnChestMNIST(Experiment):
         self.trace_results = []  # [{round, actual_leaked, detected_leaked, similarity_rankings}]
         # 用于存储用于追踪的基准值（其他客户端水印区域的聚合结果）
         self.watermark_baseline = {}  # {client_id: aggregated_watermark_params}
+
+        # ========== 抗合谋检测（见证点）功能初始化 ==========
+        # 记录每次合谋归因的结果
+        # [{round, actual_colluders, detected_colluders, is_correct, estimated_size, ...}]
+        self.collusion_detection_results = []
         
         # ========== 水印偏差检测功能初始化 ==========
         # 用于记录每次水印偏差检测的结果
@@ -171,6 +176,37 @@ class FederatedLearningOnChestMNIST(Experiment):
             self.autoencoder_finetuner = None
             
         self.tester = TesterPrivate(self.model, self.device, args=self.args)
+
+        self._log_leak_mode_summary()
+
+    def _log_leak_mode_summary(self):
+        """打印泄漏/追踪模式的配置摘要。
+
+        单客户端泄漏与合谋泄漏是两种互斥的威胁模型，混跑会让日志
+        和指标含义混乱，所以启动时明确打印当前生效的模式。
+        """
+        single_disabled = self._single_client_leak_disabled()
+        collusion_on = bool(getattr(self.args, 'enable_collusion_detection', False))
+        tracing_on = bool(getattr(self.args, 'enable_source_tracing', True))
+
+        if single_disabled:
+            mode = '仅合谋泄漏（单客户端泄漏已关闭）'
+        elif collusion_on:
+            mode = '合谋泄漏 + 单客户端泄漏（混合）'
+        else:
+            mode = '单客户端泄漏追踪' if tracing_on else '无泄漏仿真'
+
+        logging.info('=' * 60)
+        logging.info(f'==> 泄漏评测模式: {mode}')
+        logging.info(f'    单客户端泄漏仿真: {"关闭" if single_disabled else "开启"}'
+                     f' | 泄漏源追踪: {"开启" if tracing_on else "关闭"}'
+                     f' | 合谋检测: {"开启" if collusion_on else "关闭"}')
+        if collusion_on:
+            logging.info(f'    合谋规模 K={getattr(self.args, "collusion_size", 2)}'
+                         f' | 阶段={getattr(self.args, "collusion_leak_stage", "?")}'
+                         f' | 攻击={getattr(self.args, "collusion_attack_mode", "?")}')
+        logging.info(f'    密钥矩阵: {getattr(self.args, "key_matrix_path", "?")}')
+        logging.info('=' * 60)
 
     def construct_model(self):
         if self.model_name == 'resnet':
@@ -369,8 +405,11 @@ class FederatedLearningOnChestMNIST(Experiment):
             
             # ========== 第二步：下发前泄漏模拟 ==========
             # 只有启用泄漏源追踪时才执行泄漏模拟
+            # 注意：--disable_single_client_leak 会完全关闭单客户端泄漏，
+            #      此时只保留合谋泄漏（抗合谋水印的评测场景）。
             leak_info = None
-            if getattr(self.args, 'enable_source_tracing', True):
+            if (getattr(self.args, 'enable_source_tracing', True)
+                    and not self._single_client_leak_disabled()):
                 leak_info = self._simulate_pre_training_leakage(epoch, idxs_users)
 
             # ========== 第三步：模型泄漏追踪 ==========
@@ -446,9 +485,15 @@ class FederatedLearningOnChestMNIST(Experiment):
                 self.trainer.multi_loss.reset_epoch_cap_stats()
 
             # 确定本轮的恶意客户端（用于模拟泄漏）
-            self.current_malicious_client = self._get_current_malicious_client(epoch, idxs_users)
-            if self.current_malicious_client is not None:
-                logging.info(f"[本地训练] 第 {epoch + 1} 轮恶意客户端: {self.current_malicious_client}")
+            # 注意：--disable_single_client_leak 会关闭单客户端泄漏，
+            #      因此不选取恶意客户端（也不会有梯度缩放的特殊处理）。
+            if self._single_client_leak_disabled():
+                self.current_malicious_client = None
+            else:
+                self.current_malicious_client = self._get_current_malicious_client(
+                    epoch, idxs_users)
+                if self.current_malicious_client is not None:
+                    logging.info(f"[本地训练] 第 {epoch + 1} 轮恶意客户端: {self.current_malicious_client}")
             
             for i, idx in enumerate(tqdm(idxs_users, desc='Progress: %d / %d' % (epoch + 1, self.epochs))):
                 # 使用下发给该客户端的定制模型作为起点
@@ -478,9 +523,15 @@ class FederatedLearningOnChestMNIST(Experiment):
             # ========== 第四步半：训练后泄露模拟 + 水印偏差检测（每leak_interval轮执行一次） ==========
             if self.args.leak_interval > 0 and (epoch + 1) % self.args.leak_interval == 0:
                 # 首先模拟训练后的泄露（从local_ws中获取训练后的模型）
-                post_train_leak_info = self._simulate_post_training_leakage(
-                    epoch, idxs_users, local_ws
-                )
+                # 注意：--disable_single_client_leak 会关闭单客户端泄漏，
+                #      此时 post_train_leak_info 为 None，水印偏差检测退化为
+                #      "无泄漏"场景（不产生误报）。
+                if self._single_client_leak_disabled():
+                    post_train_leak_info = None
+                else:
+                    post_train_leak_info = self._simulate_post_training_leakage(
+                        epoch, idxs_users, local_ws
+                    )
                 # 执行水印相似度检测（对比训练后的模型）
                 detection_result = self._watermark_deviation_detection(
                     local_ws, idxs_users, current_round=epoch + 1,
@@ -488,6 +539,14 @@ class FederatedLearningOnChestMNIST(Experiment):
                 )
                 if detection_result is not None:
                     self.watermark_detection_results.append(detection_result)
+
+                # 抗合谋：模拟 K 个客户端合谋发布参数平均值，并做见证点归因
+                if getattr(self.args, 'enable_collusion_detection', False):
+                    collusion_info = self._simulate_collusion_leakage(
+                        epoch, idxs_users, local_ws
+                    )
+                    if collusion_info is not None:
+                        self._detect_collusion_leakage(collusion_info, idxs_users)
 
             # ========== 聚合前：计算参与训练的客户端的权重（相对于总数据集） ==========
             client_weights = []
@@ -767,6 +826,23 @@ class FederatedLearningOnChestMNIST(Experiment):
                 stats_row['watermark_similarity_detected'] = None
                 stats_row['watermark_detection_correct'] = None
 
+            # 添加抗合谋归因信息（见证点子集匹配）
+            coll_record = next((r for r in self.collusion_detection_results
+                                if r.get('round') == current_round), None)
+            if coll_record:
+                stats_row['collusion_actual_clients'] = ','.join(
+                    str(c) for c in (coll_record.get('actual_colluders') or []))
+                stats_row['collusion_detected_clients'] = ','.join(
+                    str(c) for c in (coll_record.get('detected_colluders') or []))
+                stats_row['collusion_estimated_size'] = coll_record.get('estimated_size')
+                stats_row['collusion_attribution_correct'] = (
+                    1 if coll_record.get('is_correct') else 0)
+            else:
+                stats_row['collusion_actual_clients'] = None
+                stats_row['collusion_detected_clients'] = None
+                stats_row['collusion_estimated_size'] = None
+                stats_row['collusion_attribution_correct'] = None
+
             stats_rows.append(stats_row)
 
         logging.info('='*60 + ' 训练结果 ' + '='*60)
@@ -960,6 +1036,100 @@ class FederatedLearningOnChestMNIST(Experiment):
             except Exception as e:
                 logging.warning(f'保存水印相似度检测结果失败: {e}')
 
+        # ========== 抗合谋归因结果汇总 ==========
+        if len(self.collusion_detection_results) > 0:
+            logging.info('='*60 + ' 抗合谋归因结果 ' + '='*60)
+            logging.info(f'总共发生 {len(self.collusion_detection_results)} 次合谋泄漏事件')
+
+            correct_coll = sum(1 for r in self.collusion_detection_results
+                               if r.get('is_correct'))
+            coll_accuracy = correct_coll / len(self.collusion_detection_results) * 100
+            logging.info(f'合谋归因准确率: {coll_accuracy:.2f}% '
+                         f'({correct_coll}/{len(self.collusion_detection_results)})')
+
+            # 按合谋规模分组统计
+            by_K = {}
+            for r in self.collusion_detection_results:
+                k = len(r.get('actual_colluders', []) or [])
+                slot = by_K.setdefault(k, {'total': 0, 'correct': 0})
+                slot['total'] += 1
+                if r.get('is_correct'):
+                    slot['correct'] += 1
+            for k in sorted(by_K):
+                s = by_K[k]
+                logging.info(f'  K={k}: {s["correct"]}/{s["total"]} = '
+                             f'{s["correct"] / s["total"] * 100:.2f}%')
+
+            logging.info('详细合谋归因记录:')
+            for r in self.collusion_detection_results:
+                status = '✓' if r.get('is_correct') else '✗'
+                logging.info(
+                    f"  轮次 {r['round']} ({r.get('leak_stage', '?')}): "
+                    f"实际={r.get('actual_colluders')}, "
+                    f"检出={r.get('detected_colluders')} "
+                    f"(估计规模={r.get('estimated_size')}) [{status}]"
+                )
+
+            # 保存合谋归因结果
+            try:
+                import json
+                collusion_dir = os.path.join('save', 'collusion')
+                os.makedirs(collusion_dir, exist_ok=True)
+                collusion_log_path = os.path.join(
+                    collusion_dir,
+                    f'collusion_attribution_{self.model_name}_{self.dataset}_'
+                    f'{datetime.now().strftime("%Y%m%d%H%M%S")}.json'
+                )
+
+                rounds_data = []
+                for r in self.collusion_detection_results:
+                    rounds_data.append({
+                        'round': int(r['round']),
+                        'leak_stage': r.get('leak_stage'),
+                        'actual_colluders': [int(c) for c in
+                                             (r.get('actual_colluders') or [])],
+                        'detected_colluders': [int(c) for c in
+                                               (r.get('detected_colluders') or [])],
+                        'is_correct': bool(r.get('is_correct')),
+                        'estimated_size': (int(r['estimated_size'])
+                                           if r.get('estimated_size') is not None
+                                           else None),
+                        'error': (float(r['error'])
+                                  if isinstance(r.get('error'), (int, float))
+                                  else None),
+                        'margin': (float(r['margin'])
+                                   if isinstance(r.get('margin'), (int, float))
+                                   else None),
+                    })
+
+                with open(collusion_log_path, 'w', encoding='utf-8') as f:
+                    json.dump({
+                        'experiment_info': {
+                            'model': self.model_name,
+                            'dataset': self.dataset,
+                            'client_num': self.client_num,
+                            'epochs': self.epochs,
+                            'leak_interval': getattr(self.args, 'leak_interval', 0),
+                            'collusion_size': getattr(self.args, 'collusion_size', 2),
+                            'collusion_leak_stage': getattr(self.args,
+                                                            'collusion_leak_stage',
+                                                            'pre_training'),
+                            'witness_enabled': getattr(self.args, 'enable_witness', True),
+                        },
+                        'total_collusions': int(len(self.collusion_detection_results)),
+                        'correct_attributions': int(correct_coll),
+                        'attribution_accuracy': float(coll_accuracy),
+                        'by_collusion_size': {
+                            str(k): {'total': v['total'], 'correct': v['correct'],
+                                     'accuracy': float(v['correct'] / v['total'] * 100)}
+                            for k, v in sorted(by_K.items())
+                        },
+                        'rounds': rounds_data,
+                    }, f, indent=2, ensure_ascii=False)
+                logging.info(f'合谋归因结果已保存到: {collusion_log_path}')
+            except Exception as e:
+                logging.warning(f'保存合谋归因结果失败: {e}')
+
         logging.info(
             f'最佳模型 | Loss:{self.logs["best_model_loss"]:.4f} Acc:{self.logs["best_model_acc"]:.4f} AUC:{self.logs["best_model_auc"]:.4f}')
         logging.info(
@@ -1006,6 +1176,9 @@ class FederatedLearningOnChestMNIST(Experiment):
                 'watermark_actual_client', 'watermark_detected_client',
                 'watermark_similarity_actual', 'watermark_similarity_detected',
                 'watermark_detection_correct',
+                # 抗合谋归因（见证点子集匹配）
+                'collusion_actual_clients', 'collusion_detected_clients',
+                'collusion_estimated_size', 'collusion_attribution_correct',
             ]
             df = pd.DataFrame(stats_rows, columns=columns)
             now = datetime.now().strftime('%Y%m%d%H%M%S')
@@ -1056,11 +1229,10 @@ class FederatedLearningOnChestMNIST(Experiment):
 
             # encoder_params 按 client_id 顺序连续存储各客户端水印
             # 权威水印区间: encoder_params[offset_k : offset_k + len(P_k)]
-            encoder_offsets = {}
-            cumulative_offset = 0
-            for cid in range(self.client_num):
-                encoder_offsets[cid] = cumulative_offset
-                cumulative_offset += len(key_manager.load_positions(cid))
+            # 布局（见证点启用时）：
+            #   [见证点权威值区 [0, v*G) | 独占切片区 [v*G, ...)]
+            # 见 _get_encoder_offsets 的说明：两者不可重叠。
+            encoder_offsets = self._get_encoder_offsets(key_manager)
 
             # 将所有客户端的水印区域 P_k 覆盖为权威值
             for cid in range(self.client_num):
@@ -1085,6 +1257,24 @@ class FederatedLearningOnChestMNIST(Experiment):
         except Exception as e:
             logging.warning(f'[权威模型] 构建失败: {e}')
             return None
+
+    def _single_client_leak_disabled(self):
+        """是否已关闭单客户端泄漏仿真。
+
+        合谋泄漏（K 个客户端参数平均）与单客户端泄漏是两种互斥的
+        威胁模型：前者的泄漏模型是多个模型的平均，单客户端的
+        "余弦相似度溯源"完全失效；后者则不需要见证点。
+
+        因此本分支（抗合谋评测）用 ``--disable_single_client_leak``
+        关闭单客户端泄漏的**全部**路径：
+            - 训练前泄漏仿真（``_simulate_pre_training_leakage``）
+            - 训练后泄漏仿真（``_simulate_post_training_leakage``）
+            - 恶意客户端选取（``_get_current_malicious_client``）
+
+        Returns:
+            bool
+        """
+        return bool(getattr(self.args, 'disable_single_client_leak', False))
 
     def _fed_avg(self, local_ws, client_weights, idxs_users):
         """联邦平均算法，FedAvg with exclusive watermark aggregation"""
@@ -1120,6 +1310,350 @@ class FederatedLearningOnChestMNIST(Experiment):
 
         # 构建服务器端权威模型（与下发模型分离，带完整水印，仅存服务器端）
         self.server_authoritative_model = self._build_server_authoritative_model(w_avg)
+
+    # ================================================================
+    # 抗合谋水印（见证点）：布局加载 / offset 计算 / 嵌入
+    # ================================================================
+
+    def _load_witness_layout(self):
+        """加载见证点布局（抗合谋水印）。
+
+        布局文件由 train_key_matrix.py 生成，位于 key_matrix 目录下：
+            <key_matrix_path>/<model_type>/client<N>/witness_layout.json
+
+        Returns:
+            WitnessLayout 或 None（未启用 / 文件不存在）
+        """
+        if getattr(self, '_witness_layout', None) is not None:
+            return self._witness_layout
+        if not getattr(self.args, 'enable_witness', True):
+            self._witness_layout = None
+            return None
+
+        try:
+            from utils.collusion_resistant import load_witness_layout
+
+            # args.key_matrix_path 已指向 <base>/<model_type>/client<N>
+            candidates = [
+                os.path.join(self.args.key_matrix_path, 'witness_layout.json'),
+                os.path.join(self.args.key_matrix_path, f'client{self.client_num}',
+                             'witness_layout.json'),
+            ]
+            for path in candidates:
+                if os.path.exists(path):
+                    self._witness_layout = load_witness_layout(path)
+                    logging.info(f'[见证点] 已加载布局: {path} '
+                                 f'(v={self._witness_layout.v}, '
+                                 f'G={self._witness_layout.G})')
+                    return self._witness_layout
+
+            logging.info('[见证点] 未找到布局文件，跳过见证点嵌入')
+            profile = getattr(self.args, 'key_matrix_profile', 'default')
+            logging.warning(
+                f'[见证点] 目录 {self.args.key_matrix_path} 下缺少 witness_layout.json。\n'
+                f'         若要使用抗合谋水印，请先生成：\n'
+                f'           python train_key_matrix.py --model_type {getattr(self.args, "model_name", "?")} '
+                f'--client_num {self.client_num} --profile {profile}\n'
+                f'         当前将只使用传统独占切片水印（无见证点嵌入）。'
+            )
+            self._witness_layout = None
+        except Exception as e:
+            logging.warning(f'[见证点] 加载布局失败: {e}')
+            self._witness_layout = None
+        return self._witness_layout
+
+    def _get_encoder_offsets(self, key_manager):
+        """计算每个客户端在 encoder_params 中的偏移量。
+
+        布局（当见证点启用时）：
+            [ 独占切片区 [0, n*slice_size) ]   <- 独占切片，offset 不变
+            [ 见证点权威值区 [0, v*G) ]       <- 复用前段（值空间重叠）
+
+        两种水印的**位置空间完全不相交**（见证点位置取自未被任何
+        客户端分配的位置），因此见证点复用 encoder 参数前段是安全的：
+        所有权认证只看客户端 c 的切片位置，不会把共享的见证点值
+        误判为 c 的证据。
+
+        没有见证点布局时，本方法等价于原有的"从 0 开始连续切分"。
+
+        Args:
+            key_manager: KeyMatrixManager
+
+        Returns:
+            {client_id: offset}
+        """
+        offsets = {}
+        cumulative = 0
+        for cid in range(self.client_num):
+            offsets[cid] = cumulative
+            cumulative += len(key_manager.load_positions(cid))
+        return offsets
+
+    def _embed_witness_points(self, model_state, client_id, encoder_params,
+                              layout=None):
+        """把见证点水印写入客户端的定制模型（就地修改）。
+
+        规则：对见证点 p，若 A[p, client_id]==1，则在点 p 的 G 个位置
+        写入**共享**权威值 e_p；否则保持原值。
+
+        Args:
+            model_state: 模型参数字典（就地修改）
+            client_id: 客户端 ID
+            encoder_params: encoder 参数向量（torch tensor）
+            layout: 见证点布局；None 时自动加载
+
+        Returns:
+            是否成功嵌入
+        """
+        if layout is None:
+            layout = self._load_witness_layout()
+        if layout is None:
+            return False
+
+        try:
+            from utils.collusion_resistant import embed_witness_watermark_torch
+
+            embed_witness_watermark_torch(model_state, layout, client_id,
+                                          encoder_params)
+            return True
+        except Exception as e:
+            logging.warning(f'[见证点] 嵌入失败 (client={client_id}): {e}')
+            return False
+
+    def _detect_colluders(self, leaked_model_state, client_models,
+                          max_colluders=None, auto_size=True):
+        """抗合谋归因：从泄漏模型中识别出合谋的客户端集合。
+
+        原理：合谋者对各自收到的定制模型做参数平均，得到泄漏模型
+            L = mean({M_c : c ∈ S})
+        服务器对每个客户端都持有其模型 M_c，故只需在候选集合中
+        找到使残差最小的那一个：
+
+            S_hat = argmin_{S'} || L - mean({M_c : c ∈ S'}) ||^2
+
+        这是高斯噪声下的 ML 估计；若不指定合谋规模，可由残差随规模的
+        V 形曲线自动推断（见 estimate_collusion_size）。
+
+        Args:
+            leaked_model_state: 泄漏模型参数字典（torch tensor）
+            client_models: {client_id: 模型参数字典}
+            max_colluders: 最大搜索规模；None 时用布局的 K
+            auto_size: 是否自动推断合谋规模
+
+        Returns:
+            诊断信息字典（包含 'colluders' / 'estimated_size' / 'error' 等）
+        """
+        diag = {
+            'colluders': [],
+            'estimated_size': None,
+            'error': None,
+            'margin': None,
+            'n_candidates': 0,
+            'enabled': False,
+        }
+        layout = self._load_witness_layout()
+        if layout is None:
+            return diag
+        if not client_models:
+            return diag
+
+        try:
+            from utils.collusion_resistant import (
+                decode_colluders,
+                estimate_collusion_size,
+            )
+
+            # torch -> numpy
+            leaked_np = {k: v.detach().cpu().numpy().astype(np.float64)
+                         for k, v in leaked_model_state.items()
+                         if hasattr(v, 'detach')}
+            clients_np = {
+                cid: {k: v.detach().cpu().numpy().astype(np.float64)
+                      for k, v in m.items() if hasattr(v, 'detach')}
+                for cid, m in client_models.items()
+            }
+
+            if auto_size:
+                est_k, _ = estimate_collusion_size(
+                    leaked_np, clients_np, layout.design,
+                    max_colluders=max_colluders or layout.design.K + 2)
+                diag['estimated_size'] = est_k
+                k_search = est_k
+            else:
+                k_search = max_colluders or layout.design.K
+
+            found, d2 = decode_colluders(leaked_np, clients_np, layout.design,
+                                         max_colluders=k_search)
+            diag['colluders'] = found
+            diag['error'] = d2.get('best_error')
+            diag['margin'] = d2.get('margin')
+            diag['n_candidates'] = d2.get('n_candidates', 0)
+            diag['enabled'] = True
+
+            logging.info(f'[合谋检测] 识别出合谋者 = {found} '
+                         f'(残差={d2.get("best_error")}, '
+                         f'规模={diag["estimated_size"] or k_search})')
+        except Exception as e:
+            logging.warning(f'[合谋检测] 失败: {e}')
+            diag['error'] = str(e)
+        return diag
+
+    # ================================================================
+    # 合谋仿真：K 个客户端的定制模型/训练后模型做参数平均
+    # ================================================================
+
+    def _simulate_collusion_leakage(self, epoch, idxs_users, local_ws=None):
+        """模拟多客户端合谋泄漏事件。
+
+        威胁模型：K 个恶意客户端把各自收到的定制模型（训练前）或
+        训练后的模型（训练后）做**参数平均**，然后发布平均值。
+        目的是削弱水印并阻止溯源。
+
+        与单客户端泄漏的关键区别：泄漏模型是**多个模型的平均**，
+        因此"哪个客户端的水印还在里面"不再是有效线索 ——
+        必须用见证点子集匹配来归因。
+
+        Args:
+            epoch: 当前轮次
+            idxs_users: 参与训练的客户端ID列表
+            local_ws: 本地训练后的模型列表（post_training 阶段需要）
+
+        Returns:
+            leak_info 字典；本轮不进行合谋仿真时返回 None
+        """
+        if not getattr(self.args, 'enable_collusion_detection', False):
+            return None
+
+        leak_interval = self.args.leak_interval
+        if leak_interval <= 0:
+            return None
+        if (epoch + 1) % leak_interval != 0:
+            return None
+
+        K = max(2, int(getattr(self.args, 'collusion_size', 2)))
+        if len(idxs_users) < K:
+            logging.info(f'[合谋仿真] 参与客户端 {len(idxs_users)} < K={K}，跳过')
+            return None
+
+        stage = getattr(self.args, 'collusion_leak_stage', 'pre_training')
+
+        # 选取合谋者
+        colluders = sorted(np.random.choice(list(idxs_users), K,
+                                            replace=False).tolist())
+
+        # 收集各合谋者的模型
+        client_models = {}
+        if stage == 'pre_training':
+            # 训练前：各客户端收到的定制模型
+            for cid in colluders:
+                if cid not in self.customized_models:
+                    logging.warning(f'[合谋仿真] 定制模型不存在于客户端 {cid}')
+                    return None
+                client_models[cid] = self.customized_models[cid]
+        else:
+            # 训练后：各客户端本地训练得到的模型
+            if local_ws is None:
+                return None
+            for i, cid in enumerate(idxs_users):
+                if cid in colluders:
+                    client_models[cid] = local_ws[i]
+
+        # 参数平均（合谋）
+        keys = list(next(iter(client_models.values())).keys())
+        colluded = {}
+        for k in keys:
+            acc = None
+            for cid in colluders:
+                v = client_models[cid][k]
+                if not isinstance(v, torch.Tensor):
+                    continue
+                t = v.detach().clone().float()
+                acc = t if acc is None else acc + t
+            if acc is None:
+                continue
+            colluded[k] = acc / len(colluders)
+
+        # 可选：噪声攻击
+        attack_mode = getattr(self.args, 'collusion_attack_mode', 'none')
+        if attack_mode == 'gaussian_noise':
+            noise_scale = getattr(self.args, 'leak_noise_medium', 0.05)
+            for k in colluded:
+                if colluded[k].dtype.is_floating_point and colluded[k].numel() > 1:
+                    std = float(colluded[k].std())
+                    if std > 0:
+                        colluded[k] = colluded[k] + noise_scale * std * torch.randn_like(
+                            colluded[k])
+
+        leak_info = {
+            'round': epoch + 1,
+            'leak_type': 'collusion',
+            'leak_stage': stage,
+            'colluders': colluders,
+            'K': K,
+            'model_params': colluded,
+            'client_models': client_models,
+            'attack_mode': attack_mode,
+        }
+
+        logging.info(f'[合谋仿真] 第 {epoch + 1} 轮 - 客户端 {colluders} '
+                     f'(K={K}, {stage}) 合谋发布参数平均值')
+
+        return leak_info
+
+    def _detect_collusion_leakage(self, leak_info, idxs_users):
+        """对合谋泄漏事件做归因，识别出是哪 K 个客户端合谋。
+
+        Args:
+            leak_info: 合谋泄漏信息字典
+            idxs_users: 参与训练的客户端ID列表
+
+        Returns:
+            检测结果字典（已追加到 self.collusion_detection_results）
+        """
+        result = {
+            'round': leak_info.get('round'),
+            'leak_stage': leak_info.get('leak_stage'),
+            'actual_colluders': leak_info.get('colluders', []),
+            'detected_colluders': [],
+            'is_correct': False,
+            'estimated_size': None,
+            'error': None,
+            'margin': None,
+        }
+
+        try:
+            # 服务器持有的各客户端模型（用于匹配）
+            # 合谋者用其真实模型，其余用定制模型（服务器本就知道定制模型）
+            client_models = {}
+            for cid in idxs_users:
+                if cid in leak_info.get('client_models', {}):
+                    client_models[cid] = leak_info['client_models'][cid]
+                elif cid in self.customized_models:
+                    client_models[cid] = self.customized_models[cid]
+
+            diag = self._detect_colluders(
+                leak_info['model_params'], client_models, auto_size=True)
+
+            result['detected_colluders'] = diag.get('colluders', [])
+            result['estimated_size'] = diag.get('estimated_size')
+            result['error'] = diag.get('error')
+            result['margin'] = diag.get('margin')
+            result['is_correct'] = (set(result['detected_colluders'])
+                                    == set(result['actual_colluders']))
+        except Exception as e:
+            logging.warning(f'[合谋检测] 归因失败: {e}')
+            result['error'] = str(e)
+
+        status = '✓' if result['is_correct'] else '✗'
+        logging.info(
+            f"[合谋归因] 轮次{result['round']} | "
+            f"实际{result['actual_colluders']} | "
+            f"检出{result['detected_colluders']} "
+            f"(估计规模={result['estimated_size']}) {status}"
+        )
+
+        self.collusion_detection_results.append(result)
+        return result
 
     def _generate_all_customized_models(self, global_model, idxs_users, epoch):
         """
@@ -1169,11 +1703,10 @@ class FederatedLearningOnChestMNIST(Experiment):
             # encoder_params[len(P_0) : len(P_0)+len(P_1)] = client1
             # 注意：必须对所有客户端（0到client_num-1）计算偏移，不能只对idxs_users中的客户端
             # 因为 encoder_params 是按 client_id 顺序完整排列所有客户端的水印
-            encoder_offsets = {}
-            cumulative_offset = 0
-            for cid in range(self.client_num):
-                encoder_offsets[cid] = cumulative_offset
-                cumulative_offset += all_position_lengths.get(cid, 0)
+            # 布局（见证点启用时）：
+            #   [见证点权威值区 [0, v*G) | 独占切片区 [v*G, ...)]
+            # 见 _get_encoder_offsets 的说明：两者不可重叠。
+            encoder_offsets = self._get_encoder_offsets(key_manager)
 
             # 构建参数偏移映射
             offset_map, _ = self._build_param_offset_map(global_model)
@@ -1183,6 +1716,18 @@ class FederatedLearningOnChestMNIST(Experiment):
                     client_id, global_model, all_watermark_positions[client_id],
                     encoder_params, encoder_offsets[client_id], offset_map
                 )
+
+            # 嵌入见证点水印（抗合谋）：在共享位置上写入共享权威值
+            layout = self._load_witness_layout()
+            if layout is not None:
+                n_embedded = 0
+                for client_id in idxs_users:
+                    if self._embed_witness_points(customized_models[client_id],
+                                                  client_id, encoder_params,
+                                                  layout=layout):
+                        n_embedded += 1
+                logging.info(f'[见证点] 第 {epoch + 1} 轮已为 {n_embedded} 个客户端 '
+                             f'嵌入见证点水印 (v={layout.v}, G={layout.G})')
         except Exception as e:
             logging.warning(f'_generate_all_customized_models 失败: {e}')
             for client_id in idxs_users:
@@ -1277,11 +1822,8 @@ class FederatedLearningOnChestMNIST(Experiment):
             offset_map, _ = self._build_param_offset_map(model_state)
 
             # encoder_params 按 client_id 顺序连续存储各客户端水印
-            encoder_offsets = {}
-            cumulative = 0
-            for cid in range(self.client_num):
-                encoder_offsets[cid] = cumulative
-                cumulative += len(key_manager.load_positions(cid))
+            # 布局（见证点启用时）独占切片区整体后移，见 _get_encoder_offsets
+            encoder_offsets = self._get_encoder_offsets(key_manager)
 
             cur_vals, auth_vals = [], []
             for cid in range(self.client_num):
@@ -1555,13 +2097,15 @@ class FederatedLearningOnChestMNIST(Experiment):
             # encoder_params[0 : len(P_0)] = client0 的权威水印
             # encoder_params[len(P_0) : len(P_0)+len(P_1)] = client1 的权威水印
             # ...
+            # 布局（见证点启用时）独占切片区整体后移，见 _get_encoder_offsets
+            encoder_offsets = self._get_encoder_offsets(key_manager)
+
             client_authority_wm = {}  # {client_id: numpy权威水印数组}
-            cumulative_offset = 0
             for cid in range(self.client_num):
                 positions = key_manager.load_positions(cid)
                 wm_len = len(positions)
-                client_authority_wm[cid] = encoder_params_np[cumulative_offset:cumulative_offset + wm_len]
-                cumulative_offset += wm_len
+                off = encoder_offsets[cid]
+                client_authority_wm[cid] = encoder_params_np[off:off + wm_len]
 
             # 逐个客户端从泄漏模型中提取其水印区域 P_k 分片，与该客户端的权威水印做余弦相似度
             similarity_rankings = []

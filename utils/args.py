@@ -55,16 +55,48 @@ def parser_args():
     parser.add_argument('--enable_watermark', action='store_true', default=True, help='enable watermark embedding')
     parser.add_argument('--watermark_mode', type=str, default='enhanced', choices=['enhanced', 'normal'], help='watermark embedding mode')
     parser.add_argument('--use_key_matrix', action='store_true', default=True, help='use saved key matrices to embed watermark after local training')
-    parser.add_argument('--key_matrix_dir', type=str, default='save/key_matrix', help='directory containing generated key matrices')
+    parser.add_argument('--key_matrix_dir', type=str, default=None,
+                        help='directory containing generated key matrices (default: decided by --key_matrix_profile)')
+    parser.add_argument('--key_matrix_profile', type=str, default='default',
+                        choices=['default', 'collusion'],
+                        help='key matrix profile: default=save/key_matrix (traditional watermark baseline), '
+                             'collusion=save/key_matrix_collusion (collusion-resistant branch). '
+                             'Using separate directories avoids mismatch between key_matrix and witness_layout '
+                             'when switching between branches.')
 
     # ========================= 模型泄漏追踪配置 ========================
     parser.add_argument('--enable_leakage_tracking', action='store_true', default=False, help='enable model leakage tracking simulation and detection')
     parser.add_argument('--no_source_tracing', action='store_false', dest='enable_source_tracing', help='disable leakage source tracing while keeping customized model distribution')
+    parser.add_argument('--disable_single_client_leak', action='store_true', default=False,
+                        help='完全关闭单客户端泄漏仿真（预训练/后训练/恶意客户端选择），只保留合谋泄漏')
     parser.add_argument('--leak_interval', type=int, default=1, help='leak simulation interval (every N rounds), set to 0 to disable')
     parser.add_argument('--leak_attack_mode', type=str, default='gaussian_noise', choices=['none', 'gaussian_noise'], help='attack mode after model leakage')
     parser.add_argument('--leak_noise_weak', type=float, default=0.01, help='weak noise scale for level 1 (ratio of mean watermark value)')
     parser.add_argument('--leak_noise_medium', type=float, default=0.05, help='medium noise scale for level 2 (ratio of mean watermark value)')
     parser.add_argument('--leak_noise_strong', type=float, default=0.1, help='strong noise scale for level 3 (ratio of mean watermark value)')
+
+    # ========================= 抗合谋水印（见证点）配置 ========================
+    parser.add_argument('--collusion_only', action='store_true', default=False,
+                        help='抗合谋评测模式：一键关闭单客户端泄漏仿真与追踪、'
+                             '开启合谋检测、切换到 collusion 密钥矩阵目录。'
+                             '等价于 --disable_single_client_leak --no_source_tracing '
+                             '--enable_collusion_detection --key_matrix_profile collusion')
+    parser.add_argument('--enable_witness', action='store_true', default=True,
+                        help='enable collusion-resistant witness point watermark (shared witness pool)')
+    parser.add_argument('--no_enable_witness', action='store_false', dest='enable_witness',
+                        help='disable witness point watermark (fall back to exclusive-slice watermark only)')
+    parser.add_argument('--collusion_K', type=int, default=2,
+                        help='maximum collusion size the witness design resists')
+    parser.add_argument('--enable_collusion_detection', action='store_true', default=False,
+                        help='enable collusion attribution: identify which K clients colluded')
+    parser.add_argument('--collusion_size', type=int, default=2,
+                        help='number of colluding clients to simulate (>=2)')
+    parser.add_argument('--collusion_leak_stage', type=str, default='pre_training',
+                        choices=['pre_training', 'post_training'],
+                        help='collusion stage: average customized models (pre) or trained models (post)')
+    parser.add_argument('--collusion_attack_mode', type=str, default='none',
+                        choices=['none', 'gaussian_noise'],
+                        help='attack applied to the colluded model')
 
     # ========================= 差分隐私参数 ========================
     parser.add_argument('--dp', action='store_true', default=False, help='enable differential privacy')
@@ -91,11 +123,38 @@ def parser_args():
     from .key_matrix_utils import get_key_matrix_path
     import os
 
+    # ========================= 抗合谋评测模式联动 =========================
+    # --collusion_only 一键切换到"只做合谋攻击"的评测配置：
+    #   1. 关闭单客户端泄漏仿真（预训练/后训练/恶意客户端选取）
+    #   2. 关闭单客户端泄漏源追踪
+    #   3. 开启合谋检测与归因
+    #   4. 密钥矩阵切到 collusion 专用目录
+    # 单客户端泄漏与合谋泄漏是两种互斥的威胁模型：前者的泄漏模型是
+    # 单个模型，可用余弦相似度溯源；后者是多个模型的平均，只能用
+    # 见证点子集匹配归因。两者不应在同一实验里混跑。
+    if args.collusion_only:
+        args.disable_single_client_leak = True
+        args.enable_source_tracing = False
+        args.enable_collusion_detection = True
+        if args.key_matrix_dir is None and args.key_matrix_profile == 'default':
+            args.key_matrix_profile = 'collusion'
+        print('🔒 抗合谋评测模式：已关闭单客户端泄漏仿真与追踪，'
+              '开启合谋检测')
+
+    # 密钥矩阵目录：优先 --key_matrix_dir，否则按 profile 决定
+    # 不同实验分支用互不干扰的目录，避免切换分支时
+    # key_matrix 与 witness_layout 不匹配（save/ 未纳入 git 版本管理）。
+    if args.key_matrix_dir is None:
+        args.key_matrix_dir = ('save/key_matrix_collusion'
+                               if args.key_matrix_profile == 'collusion'
+                               else 'save/key_matrix')
+
     args.key_matrix_path = get_key_matrix_path(args.key_matrix_dir, args.model_name, args.client_num)
 
     if not os.path.exists(args.key_matrix_path):
         print(f'⚠️  警告: 密钥矩阵目录不存在: {args.key_matrix_path}')
-        print(f'   请先运行: python train_key_matrix.py --model_type {args.model_name} --client_num {args.client_num}')
+        print(f'   请先运行: python train_key_matrix.py --model_type {args.model_name} '
+              f'--client_num {args.client_num} --profile {args.key_matrix_profile}')
         args.key_matrix_path = args.key_matrix_dir
     else:
         print(f'✅ 找到密钥矩阵目录: {args.key_matrix_path}')

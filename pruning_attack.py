@@ -550,10 +550,19 @@ def main():
                        help='模型类型')
     parser.add_argument('--client_num', type=int, default=5,
                        help='客户端数量')
+    parser.add_argument('--key_matrix_profile', type=str, default='default',
+                       choices=['default', 'collusion'],
+                       help='key matrix profile: default=save/key_matrix, '
+                            'collusion=save/key_matrix_collusion')
     args = parser.parse_args()
     
     # 固定密钥矩阵路径（基于项目根目录，兼容从任意目录运行）
-    KEY_MATRIX_BASE_DIR = os.path.join(PROJECT_ROOT, 'save', 'key_matrix')
+    # profile 让不同实验分支使用互不干扰的目录（save/ 未纳入 git 管理）
+    KEY_MATRIX_BASE_DIR = os.path.join(
+        PROJECT_ROOT,
+        'save', 'key_matrix_collusion'
+        if getattr(args, 'key_matrix_profile', 'default') == 'collusion'
+        else 'key_matrix')
     from utils.key_matrix_utils import get_key_matrix_path
     args.key_matrix_path = get_key_matrix_path(KEY_MATRIX_BASE_DIR, args.model_type, args.client_num)
     

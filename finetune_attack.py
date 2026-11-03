@@ -816,6 +816,10 @@ def main():
     parser.add_argument('--dataset', type=str, default='chestmnist',
                        choices=['cifar10', 'cifar100', 'chestmnist'],
                        help='数据集类型')
+    parser.add_argument('--key_matrix_profile', type=str, default='default',
+                       choices=['default', 'collusion'],
+                       help='key matrix profile: default=save/key_matrix, '
+                            'collusion=save/key_matrix_collusion')
     parser.add_argument('--autoencoder_dir', type=str, 
                        default=os.path.join(PROJECT_ROOT, 'save', 'autoencoder'),
                        help='自编码器目录')
@@ -848,7 +852,12 @@ def main():
     args.save_mode = cmd_args.save_mode
     
     # 固定密钥矩阵路径（基于项目根目录，兼容从任意目录运行）
-    KEY_MATRIX_BASE_DIR = os.path.join(PROJECT_ROOT, 'save', 'key_matrix')
+    # profile 让不同实验分支使用互不干扰的目录（save/ 未纳入 git 管理）
+    KEY_MATRIX_BASE_DIR = os.path.join(
+        PROJECT_ROOT,
+        'save', 'key_matrix_collusion'
+        if getattr(cmd_args, 'key_matrix_profile', 'default') == 'collusion'
+        else 'key_matrix')
     from utils.key_matrix_utils import get_key_matrix_path
     
     # 从模型路径自动推断正确的模型类型
