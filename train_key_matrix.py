@@ -221,9 +221,15 @@ class KeyMatrixGenerator:
             print(f"⚠️ 见证点布局生成失败: {e}")
             return None
 
+        v_raw = layout.design.singer.v
         print(f"见证点布局: v={layout.v} k={layout.design.k} G={layout.G} "
               f"见证点位置={len(layout.positions)} "
               f"(取自 {len(free_pool)} 个未分配位置)")
+        if v_raw != layout.v:
+            g_before = self.encoder_params // (layout.n_clients * v_raw)
+            print(f"  地面集压缩: v_raw={v_raw} -> v_used={layout.v} "
+                  f"(剔除 {v_raw - layout.v} 个无人标记的点，"
+                  f"G 从 {g_before} 提升到 {layout.G})")
         print(f"  见证点权威值区 = [{layout.witness_offset}, "
               f"{layout.witness_offset + layout.v * layout.G})  "
               f"(复用 encoder 前段，与切片区值空间重叠但位置不相交)")

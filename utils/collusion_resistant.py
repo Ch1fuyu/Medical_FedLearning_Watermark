@@ -278,11 +278,14 @@ class WitnessDesign:
     Attributes:
         n_clients: 客户端数。
         K: 期望抵抗的最大合谋规模（用于限制搜索集合）。
-        v: 见证点数。
+        v: 见证点数（**压缩后**的实际使用点数）。
         k: 每客户端标记的点数（BIBD 块大小）。
         G: 每见证点占用的模型位置数。
         A: 关联矩阵，shape (v, n_clients)。
         singer: 对应的 Singer 差集参数。
+            注意 ``singer.v`` 是差集的原始地面集大小
+            （q^2+q+1），而 ``v`` 是其中真正被使用的点数
+            （已剔除行权为 0 的点），故 ``v <= singer.v``。
         positions: 见证点池在模型中的位置分配。
     """
     n_clients: int
@@ -311,11 +314,15 @@ class WitnessDesign:
 
     def summary(self) -> str:
         rw = self.row_weights
+        v_raw = self.singer.v
+        compressed = (v_raw != self.v)
         return (f"见证点设计: n={self.n_clients} K={self.K} "
                 f"q={self.singer.q} v={self.v} k={self.k} G={self.G}\n"
                 f"  关联矩阵 rank = {np.linalg.matrix_rank(self.A)}/{self.n_clients}\n"
                 f"  行权分布 = {np.bincount(rw, minlength=self.k + 1).tolist()}\n"
-                f"  位置池 = {self.n_witness_positions} 个 "
+                + (f"  地面集压缩: v_raw={v_raw} -> v_used={self.v} "
+                   f"(剔除 {v_raw - self.v} 个无人标记的点)\n" if compressed else "")
+                + f"  位置池 = {self.n_witness_positions} 个 "
                 f"(v={self.v} × G={self.G})")
 
     def to_dict(self) -> dict:
@@ -336,9 +343,12 @@ class WitnessDesign:
             q=sp["q"], p=sp["p"], a=sp["a"], v=sp["v"], k=sp["k"],
             D=tuple(sp["D"]), poly=tuple(sp["poly"]),
         )
+        A = np.array(d["A"], dtype=np.float64)
+        # 容错：以实际矩阵行数为准（旧版布局可能未压缩）
+        v = A.shape[0] if A.ndim == 2 else d["v"]
         return cls(
-            n_clients=d["n_clients"], K=d["K"], v=d["v"], k=d["k"],
-            G=d["G"], A=np.array(d["A"], dtype=np.float64), singer=singer,
+            n_clients=d["n_clients"], K=d["K"], v=v, k=d["k"],
+            G=d["G"], A=A, singer=singer,
         )
 
 
@@ -379,14 +389,18 @@ def build_witness_design(
             continue
         if singer.v < n_clients:
             continue
-        A = build_incidence_matrix(singer.v, n_clients, singer.k, singer.D)
-        if np.linalg.matrix_rank(A) < n_clients:
+        A_full = build_incidence_matrix(singer.v, n_clients, singer.k, singer.D)
+        if np.linalg.matrix_rank(A_full) < n_clients:
             continue
-        rw = A.sum(axis=1)
+        # 压缩：丢弃行权 = 0 的点（无人标记，纯浪费）
+        covered = np.where(A_full.sum(axis=1) > 0)[0]
+        A_c = A_full[covered, :]
+        # 打分基于压缩后的实际设计
+        rw = A_c.sum(axis=1)
         n_ge2 = int((rw >= 2).sum())
         score = (n_ge2, -float(rw.var()))
         if best is None or score > best[0]:
-            best = (score, singer, A)
+            best = (score, singer, A_c)
 
     if best is None:
         raise ValueError(
@@ -394,8 +408,7 @@ def build_witness_design(
             f"但候选 q={list(q_candidates)} 均不满足或关联矩阵不满秩")
 
     _, singer, A = best
-    v, k = singer.v, singer.k
-
+    v, k = A.shape[0], singer.k
     # 每见证点占用的位置数
     G = max(1, encoder_params // (n_clients * v))
     # 总位置数按 encoder_params 兜底（保证不超预算）
@@ -598,11 +611,15 @@ def build_witness_layout(
 
 def _layout_summary(self: WitnessLayout) -> str:
     rw = self.design.row_weights
+    v_raw = self.design.singer.v
+    compressed = (v_raw != self.v)
     return (f"见证点布局: n={self.n_clients} K={self.design.K} "
             f"q={self.design.singer.q} v={self.v} k={self.design.k} G={self.G}\n"
             f"  关联矩阵 rank = {np.linalg.matrix_rank(self.A)}/{self.n_clients}\n"
             f"  行权分布 = {np.bincount(rw, minlength=self.design.k + 1).tolist()}\n"
-            f"  见证点权威值区 = [{self.witness_offset}, "
+            + (f"  地面集压缩: v_raw={v_raw} -> v_used={self.v} "
+               f"(剔除 {v_raw - self.v} 个无人标记的点)\n" if compressed else "")
+            + f"  见证点权威值区 = [{self.witness_offset}, "
             f"{self.witness_offset + self.v * self.G})  (与切片区值空间重叠)\n"
             f"  独占切片区 = [{self.slice_offset}, {self.slice_end})  "
             f"({self.slice_size}/客户端)\n"
