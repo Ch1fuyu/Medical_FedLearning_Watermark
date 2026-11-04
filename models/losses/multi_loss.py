@@ -31,10 +31,14 @@ class FocalLoss(nn.Module):
 class MultiLoss:
     """Minimal wrapper for watermark-gradient diagnostics and param-drift tracking."""
 
-    def __init__(self, model=None, target_ratio=0.3):
+    def __init__(self, model=None, target_ratio=0.3, enable_capping=True):
         self.model = model
         self.target_ratio = target_ratio
         self.device = None
+        # 水印梯度缩放（capping）总开关。
+        # 冻结水印区域模式下，水印区梯度已被置零，
+        # 不再需要 capping 额外压制，故此处整体关闭。
+        self.enable_capping = enable_capping
 
         self._ema_gm = 0.0
         self._ema_gh = 0.0
@@ -213,7 +217,8 @@ class MultiLoss:
         self.cap_applied = False
         self.cap_scale_factor = 1.0
         corrected_gradients = gradients
-        if not skip_gradient_scaling and getattr(self, 'target_ratio', 0.3) > 0 and wm_ratio > self.target_ratio:
+        if not skip_gradient_scaling and self.enable_capping \
+                and getattr(self, 'target_ratio', 0.3) > 0 and wm_ratio > self.target_ratio:
             target_wm_grad = mean_non_watermark_grad.detach() * self.target_ratio
             current_wm_grad_val = mean_watermark_grad.detach()
 

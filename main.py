@@ -169,6 +169,19 @@ class FederatedLearningOnChestMNIST(Experiment):
             logging.info('==> 使用普通水印系统')
             self.trainer = TrainerPrivate(self.model, self.device, self.dp, self.sigma, self.random_positions, self.args)
             self.autoencoder_finetuner = None
+
+        # ========== 水印区域冻结模式 ==========
+        # 开启时：每个客户端在本地训练中完全冻结自己的水印区域 P_k
+        #         （backward 后梯度置零 + step 后参数还原）
+        #         并且不再执行「水印梯度缩放」（capping）步骤。
+        self.freeze_watermark_region = bool(
+            getattr(self.args, 'freeze_watermark_region', False)
+        )
+        if self.freeze_watermark_region:
+            logging.info('==> [水印冻结] 已启用：客户端自有水印区域 P_k 不参与本地训练'
+                         '（水印梯度缩放步骤已关闭）')
+        else:
+            logging.info('==> [水印冻结] 未启用：使用原有水印梯度缩放逻辑')
             
         self.tester = TesterPrivate(self.model, self.device, args=self.args)
 
@@ -455,6 +468,7 @@ class FederatedLearningOnChestMNIST(Experiment):
                 self.model.load_state_dict(self.customized_models[idx])
 
                 # 判断是否为恶意客户端（跳过梯度缩放）
+                # 注意：冻结模式下 capping 整体关闭，该标志不再影响训练行为
                 skip_gradient_scaling = (idx == self.current_malicious_client)
                 
                 # 统一调用：始终传入 current_epoch/total_epochs；
@@ -520,6 +534,8 @@ class FederatedLearningOnChestMNIST(Experiment):
                 'lr': self.lr,
                 # 记录当前生效的梯度比例阈值，便于跨实验对照
                 'wm_grad_target_ratio': float(getattr(self.args, 'watermark_grad_target_ratio', 0.3)),
+                # 水印区域冻结开关（True 时水印梯度缩放步骤被关闭）
+                'freeze_watermark_region': int(bool(getattr(self.args, 'freeze_watermark_region', False))),
             }
 
             self.logs['val_acc'].append(acc_val_label_mean)
@@ -576,7 +592,11 @@ class FederatedLearningOnChestMNIST(Experiment):
                 logging.info(f"MultiLoss - GM:{stats['prevGM']:.6f} GH:{stats['prevGH']:.6f} Ratio:{stats['prevRatio']:.6f}")
                 # capping 运行时诊断（受 watermark_grad_target_ratio 直接影响）
                 cap_rate = stats.get('cap_trigger_rate')
-                if cap_rate is not None:
+                if self.freeze_watermark_region:
+                    logging.info(
+                        '  [水印冻结] 已启用：水印区域不参与本地训练，水印梯度缩放(capping)步骤已跳过'
+                    )
+                elif cap_rate is not None:
                     logging.info(
                         f"  [Capping] 目标比例:{getattr(self.args, 'watermark_grad_target_ratio', 0.3):.3f} | "
                         f"触发率:{cap_rate:.2%} | 缩放系数:{stats.get('cap_scale_mean', 1.0):.4f} | "
@@ -975,7 +995,7 @@ class FederatedLearningOnChestMNIST(Experiment):
             columns = [
                 # 基础信息
                 'round', 'lr', 'train_loss', 'val_loss',
-                'wm_grad_target_ratio',
+                'wm_grad_target_ratio', 'freeze_watermark_region',
                 'train_acc_label', 'train_auc', 'val_acc_label', 'val_auc',
                 'best_val_acc_so_far', 'best_val_auc_so_far',
                 'train_acc_sample', 'val_acc_sample',

@@ -51,6 +51,13 @@ def parser_args():
     parser.add_argument('--multiloss_alpha_late', type=float, default=1e-4, help='alpha value for late training phase')
     parser.add_argument('--watermark_grad_target_ratio', type=float, default=0.3, help='target ratio of watermark gradient to non-watermark gradient; set to 0 to disable watermark gradient capping')
 
+    # ========================= 水印区域冻结 ========================
+    parser.add_argument('--freeze_watermark_region', action='store_true', default=True,
+                        help='freeze each client own watermark region P_k during local training (gradients zeroed, params restored); '
+                             'implies watermark gradient capping is disabled')
+    parser.add_argument('--no_freeze_watermark_region', action='store_false', dest='freeze_watermark_region',
+                        help='disable watermark region freezing (keep gradient capping behaviour)')
+
     # ========================= 水印与密钥矩阵配置 ========================
     parser.add_argument('--enable_watermark', action='store_true', default=True, help='enable watermark embedding')
     parser.add_argument('--watermark_mode', type=str, default='enhanced', choices=['enhanced', 'normal'], help='watermark embedding mode')

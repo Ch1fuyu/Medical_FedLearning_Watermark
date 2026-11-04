@@ -1,4 +1,5 @@
 import os
+import logging
 
 import numpy as np
 import torch
@@ -156,7 +157,7 @@ class TesterPrivate:
 
 class TrainerPrivateEnhanced:
     """增强版训练器，支持MultiLoss和自编码器水印"""
-    
+
     def __init__(self, model, device, dp, sigma, args=None):
         self.optimizer = None
         self.model = model
@@ -166,11 +167,31 @@ class TrainerPrivateEnhanced:
         self.sigma = sigma
         self.args = args
         self._key_manager = None
-        
+
+        # ========== 水印区域冻结 ==========
+        # freeze_watermark_region=True 时，客户端在本地训练中完全冻结
+        # 自己的水印区域 P_k（梯度置零 + 参数还原），且不再需要水印梯度缩放。
+        self.freeze_watermark_region = bool(
+            args is not None and getattr(args, 'freeze_watermark_region', False)
+        )
+        self.watermark_freezer = None
+        if self.freeze_watermark_region:
+            try:
+                from utils.watermark_freeze import WatermarkFreezer
+                self.watermark_freezer = WatermarkFreezer(
+                    self.model, args.key_matrix_path, args=args
+                )
+                logging.info('[水印冻结] 已启用：客户端水印区域在本地训练中保持不变')
+            except Exception as e:
+                logging.warning(f'[水印冻结] 初始化失败，关闭冻结: {e}')
+                self.freeze_watermark_region = False
+
         # MultiLoss和掩码管理器
         self.multi_loss = MultiLoss(
             model=self.model,
-            target_ratio=getattr(self.args, 'watermark_grad_target_ratio', 0.3)
+            target_ratio=getattr(self.args, 'watermark_grad_target_ratio', 0.3),
+            # 冻结水印区域时，水印区梯度已被置零，无需再叠加梯度缩放
+            enable_capping=not self.freeze_watermark_region
         )
         # 初始化参数快照，便于后续观察漂移
         if hasattr(self.multi_loss, 'update_param_snapshot'):
@@ -387,6 +408,16 @@ class TrainerPrivateEnhanced:
 
         epoch_loss, epoch_acc = [], []
 
+        # ========== 水印区域冻结 ==========
+        # 冻结模式下，客户端自有水印区域 P_k 在整个本地训练期间保持不变：
+        #   1) 每次 backward 后把 P_k 的梯度置零（杜绝动量/Adam 二阶矩带来的漂移）
+        #   2) 每次 optimizer.step 后把 P_k 的参数还原为训练开始时的快照
+        #      （抵消 weight decay 等一切非梯度来源的改动）
+        #   3) DP 噪声注入后再还原一次
+        wm_snapshot = None
+        if self.freeze_watermark_region and self.watermark_freezer is not None:
+            wm_snapshot = self.watermark_freezer.snapshot(client_id)
+
         for epoch in range(local_ep):
             loss_meter = 0.0
             acc_meter = 0.0
@@ -410,7 +441,7 @@ class TrainerPrivateEnhanced:
                         target_mask, encoder_mask, effective_mask = self.mask_manager.get_masks(self.device)
                     else:
                         target_mask, encoder_mask, effective_mask = None, None, None
-                    
+
                     # 使用 compute_loss_and_backward 正确应用对比正则项
                     total_loss = self.multi_loss.compute_loss_and_backward(
                         main_loss,
@@ -421,10 +452,19 @@ class TrainerPrivateEnhanced:
                         total_epochs,
                         skip_gradient_scaling=skip_gradient_scaling
                     )
-                
-                # 梯度裁剪
+
+                # 梯度裁剪（先裁剪再置零，保证非水印区的裁剪尺度与未冻结时一致）
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+
+                # 冻结水印区域：把 P_k 位置的梯度置零
+                if wm_snapshot is not None:
+                    self.watermark_freezer.zero_grads(client_id)
+
                 self.optimizer.step()
+
+                # 冻结水印区域：step 后还原 P_k 的参数值
+                if wm_snapshot is not None:
+                    self.watermark_freezer.restore(wm_snapshot)
 
                 batch_acc = self._compute_accuracy(pred, y)
                 acc_meter += batch_acc.item() * x.size(0) / 100.0
@@ -457,6 +497,10 @@ class TrainerPrivateEnhanced:
         if self.dp:
             for param in self.model.parameters():
                 param.data = param.data + torch.normal(torch.zeros(param.size()), self.sigma).to(self.device)
+
+        # 冻结水印区域：DP 噪声之后再次还原，保证 P_k 完全不变
+        if wm_snapshot is not None:
+            self.watermark_freezer.restore(wm_snapshot)
 
         return self.model.state_dict(), np.mean(epoch_loss), np.mean(epoch_acc)
 

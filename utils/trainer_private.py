@@ -140,6 +140,24 @@ class TrainerPrivate(object):
         self._key_manager = None
         self.position_dict = random_positions  # 为了兼容性，添加这个属性
 
+        # ========== 水印区域冻结 ==========
+        # freeze_watermark_region=True 时，客户端在本地训练中完全冻结
+        # 自己的水印区域 P_k（梯度置零 + 参数还原）。
+        self.freeze_watermark_region = bool(
+            args is not None and getattr(args, 'freeze_watermark_region', False)
+        )
+        self.watermark_freezer = None
+        if self.freeze_watermark_region:
+            try:
+                from utils.watermark_freeze import WatermarkFreezer
+                self.watermark_freezer = WatermarkFreezer(
+                    self.model, args.key_matrix_path, args=args
+                )
+                print('[水印冻结] 已启用：客户端水印区域在本地训练中保持不变')
+            except Exception as e:
+                print(f'[水印冻结] 初始化失败，关闭冻结: {e}')
+                self.freeze_watermark_region = False
+
     def get_loss_function(self, pred, target):
         """根据任务类型计算损失：multiclass 用 CrossEntropy；其他用 BCEWithLogits。"""
         if self.args is not None and getattr(self.args, 'task_type', 'multiclass') == 'multiclass':
@@ -197,6 +215,15 @@ class TrainerPrivate(object):
 
         epoch_loss, epoch_acc = [], []
 
+        # ========== 水印区域冻结 ==========
+        # 冻结模式下，客户端自有水印区域 P_k 在整个本地训练期间保持不变：
+        #   1) 每次 backward 后把 P_k 的梯度置零
+        #   2) 每次 optimizer.step 后把 P_k 的参数还原为训练开始时的快照
+        #   3) DP 噪声注入后再还原一次
+        wm_snapshot = None
+        if self.freeze_watermark_region and self.watermark_freezer is not None:
+            wm_snapshot = self.watermark_freezer.snapshot(client_id)
+
         for epoch in range(local_ep):
             loss_meter = 0.0
             acc_meter = 0.0
@@ -218,8 +245,18 @@ class TrainerPrivate(object):
 
                 # 反向传播
                 loss.backward()
+
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+
+                # 冻结水印区域：把 P_k 位置的梯度置零
+                if wm_snapshot is not None:
+                    self.watermark_freezer.zero_grads(client_id)
+
                 self.optimizer.step()
+
+                # 冻结水印区域：step 后还原 P_k 的参数值
+                if wm_snapshot is not None:
+                    self.watermark_freezer.restore(wm_snapshot)
 
                 # 记录损失（按样本加权）
                 loss_meter += loss.item() * x.size(0)
@@ -236,6 +273,11 @@ class TrainerPrivate(object):
             if epoch + 1 == local_ep:
                 from tqdm import tqdm
                 tqdm.write(f"C{client_id} E{epoch+1}/{local_ep}: L={loss_meter:.4f} A={acc_meter:.4f} LR={adjusted_lr:.6f}")
+
+        # 冻结水印区域：训练循环结束后再还原一次，
+        # 抵消 weight decay 等非梯度来源造成的残余漂移
+        if wm_snapshot is not None:
+            self.watermark_freezer.restore(wm_snapshot)
 
         # 本地训练结束后，进行水印嵌入
         if self.args is not None and getattr(self.args, 'use_key_matrix', False):
@@ -315,10 +357,19 @@ class TrainerPrivate(object):
             except Exception as e:
                 print(f"[Watermark Warning] Failed to embed watermark for client {client_id}: {e}")
 
+        # 冻结水印区域：水印嵌入完成后刷新快照，
+        # 使后续 DP 噪声的还原基准是「权威水印值」而非训练前的旧值
+        if wm_snapshot is not None:
+            wm_snapshot = self.watermark_freezer.snapshot(client_id)
+
         # 如果启用差分隐私（DP），为每个参数添加噪声
         if self.dp:
             for param in self.model.parameters():
                 param.data = param.data + torch.normal(torch.zeros(param.size()), self.sigma).to(self.device)
+
+        # 冻结水印区域：DP 噪声之后再次还原，保证 P_k 完全不变
+        if wm_snapshot is not None:
+            self.watermark_freezer.restore(wm_snapshot)
 
         return self.model.state_dict(), np.mean(epoch_loss), np.mean(epoch_acc)
 
