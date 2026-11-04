@@ -596,14 +596,10 @@ class FederatedLearningOnChestMNIST(Experiment):
 
             # 模型选择标准：ChestMNIST 按 AUC；否则按准确率
             #
-            # 保存内容：使用**服务器端权威模型**（带所有客户端的完整水印）。
-            # 该模型仅存服务器端，用于后续水印鲁棒性检测 / 存活分析等实验。
-            # 若权威模型不可用，则回退到当前的 FedAvg 模型。
-            save_state = self.server_authoritative_model
-            if save_state is None:
-                save_state = self.model.state_dict()
-            else:
-                save_state = {k: v.clone() for k, v in save_state.items()}
+            # 保存内容：使用**当前 FedAvg 聚合模型**（self.model）。
+            # 该模型与本轮评估（train/val metrics）所用的权重完全一致，
+            # 因此落盘模型的文件名 AUC/ACC 与下游攻击脚本加载后复算的结果一致。
+            save_state = self.model.state_dict()
 
             if select_by_auc:
                 if self.logs['best_model_auc'] < auc_val:
