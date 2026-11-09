@@ -37,10 +37,10 @@ import torch
 # 基础工具
 # ----------------------------------------------------------------------
 def _to_float_tensor(values) -> torch.Tensor:
-    """把 tensor / list / ndarray 统一转成 1-D float32 tensor"""
+    """把 tensor / list / ndarray 统一转成 1-D float32 tensor（始终拷贝，避免与原参数共享内存）"""
     if isinstance(values, torch.Tensor):
-        return values.detach().view(-1).to(torch.float32).cpu()
-    return torch.as_tensor(values, dtype=torch.float32).view(-1).cpu()
+        return values.detach().view(-1).to(torch.float32).cpu().clone()
+    return torch.as_tensor(values, dtype=torch.float32).view(-1).cpu().clone()
 
 
 def cosine_similarity(vec_a, vec_b) -> float:
