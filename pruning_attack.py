@@ -15,6 +15,11 @@ from models.light_autoencoder import LightAutoencoder
 from models.resnet import resnet18
 from utils.watermark_reconstruction import WatermarkReconstructor
 from utils.delta_pcc_utils import evaluate_delta_pcc, calculate_fixed_tau, format_delta_pcc_result, print_delta_pcc_summary
+from utils.watermark_sim_utils import (
+    compute_watermark_similarity,
+    format_watermark_similarity,
+    print_watermark_similarity,
+)
 
 def load_test_data(dataset_name: str, batch_size: int = 128, data_dir: str = './data'):
     """
@@ -504,6 +509,11 @@ def save_pruning_results(results, model_info, save_dir=None):
             'total_watermark_params': result['total_watermark_params'],
             'damaged_watermark_params': result['damaged_watermark_params'],
             'delta_pcc': result.get('delta_pcc', float('inf')),
+            'wm_sim': result.get('wm_sim', None),
+            'wm_sim_mean': result.get('wm_sim_mean', None),
+            'wm_sim_min': result.get('wm_sim_min', None),
+            'wm_rel_dev': result.get('wm_rel_dev', None),
+            'wm_nonzero_ratio': result.get('wm_nonzero_ratio', None),
             'is_infringement': result.get('is_infringement', False),
             'result_text': result.get('result_text', '评估失败')
         })
@@ -512,7 +522,8 @@ def save_pruning_results(results, model_info, save_dir=None):
     
     # 格式化数值列，保留6位小数
     numeric_columns = ['pruning_ratio', 'auc', 'accuracy', 'watermark_integrity', 
-                      'total_watermark_params', 'damaged_watermark_params', 'delta_pcc']
+                      'total_watermark_params', 'damaged_watermark_params', 'delta_pcc',
+                      'wm_sim', 'wm_sim_mean', 'wm_sim_min', 'wm_rel_dev', 'wm_nonzero_ratio']
     for col in numeric_columns:
         if col in df.columns:
             df[col] = df[col].apply(lambda x: f"{x:.6f}" if pd.notna(x) and isinstance(x, (int, float)) else x)
@@ -630,6 +641,13 @@ def main():
                 model.state_dict(), pruned_model.state_dict(), reconstructor, test_loader, device,
                 perf_fail_ratio=PERF_FAIL_RATIO, fixed_tau=fixed_tau, model=pruned_model
             )
+
+            # 评估水印区域相似度 sim（剪枝后的水印区域 vs 剪枝前的原始水印区域）
+            sim_result = compute_watermark_similarity(
+                pruned_model.state_dict(), model.state_dict(),
+                reconstructor.key_manager, model=pruned_model
+            )
+            print_watermark_similarity(sim_result)
             
             # 记录结果
             result = {
@@ -666,40 +684,46 @@ def main():
                 'result_text': '评估失败'
             }
             result.update(format_delta_pcc_result(delta_pcc_result, delta_pcc_default))
+
+            # 添加水印区域相似度 sim 结果
+            result.update(format_watermark_similarity(sim_result))
             
             results.append(result)
             
             # 根据数据集类型调整输出格式
+            sim_str = f"{result['wm_sim']:.6f}" if result.get('wm_sim') is not None else "N/A"
             if dataset_name == 'chestmnist':
-                print(f"剪枝{ratio:.0%}: AUC{pruned_auc:.4f} [主要] | 准确率{pruned_accuracy:.4f} [参考] | 水印完整性{result['watermark_integrity']:.2%} | ΔPCC{result['delta_pcc']:.6f} | {result['result_text']}")
+                print(f"剪枝{ratio:.0%}: AUC{pruned_auc:.4f} [主要] | 准确率{pruned_accuracy:.4f} [参考] | 水印完整性{result['watermark_integrity']:.2%} | ΔPCC{result['delta_pcc']:.6f} | sim{sim_str} | {result['result_text']}")
             else:
-                print(f"剪枝{ratio:.0%}: AUC{pruned_auc:.4f} [参考] | 准确率{pruned_accuracy:.4f} [主要] | 水印完整性{result['watermark_integrity']:.2%} | ΔPCC{result['delta_pcc']:.6f} | {result['result_text']}")
+                print(f"剪枝{ratio:.0%}: AUC{pruned_auc:.4f} [参考] | 准确率{pruned_accuracy:.4f} [主要] | 水印完整性{result['watermark_integrity']:.2%} | ΔPCC{result['delta_pcc']:.6f} | sim{sim_str} | {result['result_text']}")
         
         # 根据数据集类型调整总结表格格式
-        print(f"\n{'='*80}")
+        print(f"\n{'='*90}")
         print("实验结果总结")
-        print(f"{'='*80}")
+        print(f"{'='*90}")
         
         if dataset_name == 'chestmnist':
-            print(f"{'剪枝%':<6} {'AUC[主要]':<10} {'准确率[参考]':<10} {'水印完整性%':<13} {'ΔPCC':<9} {'侵权判断':<8}")
-            print("-" * 70)
+            print(f"{'剪枝%':<6} {'AUC[主要]':<10} {'准确率[参考]':<10} {'水印完整性%':<13} {'ΔPCC':<10} {'sim':<9} {'侵权判断':<8}")
+            print("-" * 80)
             
             for result in results:
+                sim_str = f"{result['wm_sim']:.6f}" if result.get('wm_sim') is not None else "N/A"
                 print(f"{result['pruning_ratio']:>4.0%} "
                       f"{result['auc_after']:>8.4f} "
                       f"{result['accuracy_after']:>8.4f} "
-                      f"{result['watermark_integrity']:>11.2%} {result['delta_pcc']:>9.6f} "
-                      f"{result['result_text']:>6}")
+                      f"{result['watermark_integrity']:>11.2%} {result['delta_pcc']:>10.6f} "
+                      f"{sim_str:>9} {result['result_text']:>6}")
         else:
-            print(f"{'剪枝%':<6} {'AUC[参考]':<10} {'准确率[主要]':<10} {'水印完整性%':<13} {'ΔPCC':<9} {'侵权判断':<8}")
-            print("-" * 70)
+            print(f"{'剪枝%':<6} {'AUC[参考]':<10} {'准确率[主要]':<10} {'水印完整性%':<13} {'ΔPCC':<10} {'sim':<9} {'侵权判断':<8}")
+            print("-" * 80)
             
             for result in results:
+                sim_str = f"{result['wm_sim']:.6f}" if result.get('wm_sim') is not None else "N/A"
                 print(f"{result['pruning_ratio']:>4.0%} "
                       f"{result['auc_after']:>8.4f} "
                       f"{result['accuracy_after']:>8.4f} "
-                      f"{result['watermark_integrity']:>11.2%} {result['delta_pcc']:>9.6f} "
-                      f"{result['result_text']:>6}")
+                      f"{result['watermark_integrity']:>11.2%} {result['delta_pcc']:>10.6f} "
+                      f"{sim_str:>9} {result['result_text']:>6}")
         
         # 保存实验结果
         print("\n保存实验结果...")
