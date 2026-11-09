@@ -577,8 +577,10 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
                 'result_text': 'N/A'
             })
 
-        # 添加水印区域相似度 sim 信息
+        # 添加水印区域相似度 sim 信息（含各客户端明细）
         metrics.update(format_watermark_similarity(sim_result))
+        if sim_result:
+            metrics['wm_sim_per_client_detail'] = sim_result.get('wm_sim_per_client_detail', {})
         
         performance_metrics.append(metrics)
         
@@ -704,7 +706,7 @@ def save_results(results, model_path: str, save_dir: str = None,
         import pandas as pd
         df_data = []
         for result in results:
-            df_data.append({
+            row = {
                 'epoch': result['epoch'],
                 'train_loss': result['train_loss'],
                 'test_loss': result['test_loss'],
@@ -720,9 +722,14 @@ def save_results(results, model_path: str, save_dir: str = None,
                 'wm_sim_min': result.get('wm_sim_min', None),
                 'wm_rel_dev': result.get('wm_rel_dev', None),
                 'wm_nonzero_ratio': result.get('wm_nonzero_ratio', None),
-                'is_infringement': result.get('is_infringement', None),
-                'result_text': result.get('result_text', 'N/A')
-            })
+            }
+            # 各客户端水印区域相似度（独立列）
+            for key, value in result.items():
+                if key.startswith('wm_sim_c'):
+                    row[key] = value
+            row['is_infringement'] = result.get('is_infringement', None)
+            row['result_text'] = result.get('result_text', 'N/A')
+            df_data.append(row)
 
         df = pd.DataFrame(df_data)
 
@@ -730,11 +737,12 @@ def save_results(results, model_path: str, save_dir: str = None,
         numeric_columns = ['train_loss', 'test_loss', 'test_auc', 'test_accuracy', 'learning_rate',
                           'perf_fail', 'tau', 'delta_perf', 'delta_pcc',
                           'wm_sim', 'wm_sim_mean', 'wm_sim_min', 'wm_rel_dev', 'wm_nonzero_ratio']
+        numeric_columns += [c for c in df.columns if c.startswith('wm_sim_c')]
         precision_map = {'delta_pcc': 8, 'wm_sim': 8, 'wm_sim_mean': 8, 'wm_sim_min': 8,
                          'wm_rel_dev': 8, 'wm_nonzero_ratio': 6}
         for col in numeric_columns:
             if col in df.columns:
-                prec = precision_map.get(col, 6)
+                prec = precision_map.get(col, 8)
                 df[col] = df[col].apply(
                     lambda x, p=prec: f"{float(x):.{p}f}"
                     if pd.notna(x) and isinstance(x, (int, float, np.floating)) else x
@@ -803,6 +811,10 @@ def save_paper_results(results, model_path: str, save_path: str, dataset_name: s
             'wm_sim': f"{r['wm_sim']:.6f}" if r.get('wm_sim') is not None else 'N/A',
             'infringement': 'Yes' if r['is_infringement'] else 'No' if r['is_infringement'] is not None else 'N/A',
         }
+        # 各客户端水印区域相似度（独立列）
+        for key, value in r.items():
+            if key.startswith('wm_sim_c'):
+                row[key] = f"{value:.6f}" if value is not None else 'N/A'
         df_data.append(row)
 
     df = pd.DataFrame(df_data)
@@ -813,7 +825,7 @@ def save_paper_results(results, model_path: str, save_path: str, dataset_name: s
         f.write(f"# Model: {os.path.basename(model_path)}\n")
         f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write("#\n")
-        f.write("# Columns: epoch, train_loss, test_loss, test_auc, test_acc, delta_pcc, wm_sim, infringement\n")
+        f.write("# Columns: epoch, train_loss, test_loss, test_auc, test_acc, delta_pcc, wm_sim, wm_sim_c{client_id}, infringement\n")
         f.write("#\n")
 
     # 追加CSV数据
@@ -1110,43 +1122,67 @@ def main():
     print("\n" + "=" * 80)
     print("微调攻击实验总结")
     print("=" * 80)
-    
+
+    # 收集各客户端的 sim 列（按客户端号升序）
+    client_ids = sorted({
+        int(k[len('wm_sim_c'):])
+        for r in results
+        for k in r.keys()
+        if k.startswith('wm_sim_c')
+    })
+
     # 根据数据集类型调整显示格式
     if dataset_type == 'chestmnist':
-        print(f"{'轮次':<4} {'训练损失':<10} {'测试损失':<10} {'测试AUC':<10} {'测试准确率%':<8} {'ΔPCC':<10} {'sim':<9} {'侵权判断':<8}")
-        print("-" * 95)
-        
+        header = (f"{'轮次':<4} {'训练损失':<10} {'测试损失':<10} {'测试AUC':<10} "
+                  f"{'测试准确率%':<8} {'ΔPCC':<10} {'sim':<9}")
+        header += ''.join(f"{'sim_C'+str(c):<10}" for c in client_ids)
+        header += f"{'侵权判断':<8}"
+        print(header)
+        print("-" * (95 + 10 * len(client_ids)))
+
         for result in results:
             delta_pcc_str = f"{result['delta_pcc']:.8f}" if result['delta_pcc'] is not None else "N/A"
             sim_str = f"{result.get('wm_sim'):.6f}" if result.get('wm_sim') is not None else "N/A"
             infringement_str = "是" if result['is_infringement'] else "否" if result['is_infringement'] is not None else "N/A"
-            
-            print(f"{result['epoch']:>3}  "
-                  f"{result['train_loss']:>8.4f}  "
-                  f"{result['test_loss']:>8.4f}  "
-                  f"{result['test_auc']:>8.4f}  "  # AUC更宽显示
-                  f"{result['test_accuracy']:>6.2%}  "  # 准确率稍窄
-                  f"{delta_pcc_str:>10}  "
-                  f"{sim_str:>9}  "
-                  f"{infringement_str:>6}")
+
+            line = (f"{result['epoch']:>3}  "
+                    f"{result['train_loss']:>8.4f}  "
+                    f"{result['test_loss']:>8.4f}  "
+                    f"{result['test_auc']:>8.4f}  "  # AUC更宽显示
+                    f"{result['test_accuracy']:>6.2%}  "  # 准确率稍窄
+                    f"{delta_pcc_str:>10}  "
+                    f"{sim_str:>9}")
+            for c in client_ids:
+                v = result.get(f'wm_sim_c{c}')
+                line += f"{(f'{v:.6f}' if v is not None else 'N/A'):>10}"
+            line += f"  {infringement_str:>6}"
+            print(line)
     else:
         # CIFAR10等多分类任务
-        print(f"{'轮次':<4} {'训练损失':<10} {'测试损失':<10} {'测试AUC':<8} {'测试准确率%':<10} {'ΔPCC':<10} {'sim':<9} {'侵权判断':<8}")
-        print("-" * 95)
-        
+        header = (f"{'轮次':<4} {'训练损失':<10} {'测试损失':<10} {'测试AUC':<8} "
+                  f"{'测试准确率%':<10} {'ΔPCC':<10} {'sim':<9}")
+        header += ''.join(f"{'sim_C'+str(c):<10}" for c in client_ids)
+        header += f"{'侵权判断':<8}"
+        print(header)
+        print("-" * (95 + 10 * len(client_ids)))
+
         for result in results:
             delta_pcc_str = f"{result['delta_pcc']:.8f}" if result['delta_pcc'] is not None else "N/A"
             sim_str = f"{result.get('wm_sim'):.6f}" if result.get('wm_sim') is not None else "N/A"
             infringement_str = "是" if result['is_infringement'] else "否" if result['is_infringement'] is not None else "N/A"
-            
-            print(f"{result['epoch']:>3}  "
-                  f"{result['train_loss']:>8.4f}  "
-                  f"{result['test_loss']:>8.4f}  "
-                  f"{result['test_auc']:>6.4f}  "
-                  f"{result['test_accuracy']:>8.2%}  "
-                  f"{delta_pcc_str:>10}  "
-                  f"{sim_str:>9}  "
-                  f"{infringement_str:>6}")
+
+            line = (f"{result['epoch']:>3}  "
+                    f"{result['train_loss']:>8.4f}  "
+                    f"{result['test_loss']:>8.4f}  "
+                    f"{result['test_auc']:>6.4f}  "
+                    f"{result['test_accuracy']:>8.2%}  "
+                    f"{delta_pcc_str:>10}  "
+                    f"{sim_str:>9}")
+            for c in client_ids:
+                v = result.get(f'wm_sim_c{c}')
+                line += f"{(f'{v:.6f}' if v is not None else 'N/A'):>10}"
+            line += f"  {infringement_str:>6}"
+            print(line)
 
     # 分析趋势
     print("\n趋势分析:")
