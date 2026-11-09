@@ -501,7 +501,7 @@ def save_pruning_results(results, model_info, save_dir=None):
     
     df_data = []
     for result in results:
-        df_data.append({
+        row = {
             'pruning_ratio': result['pruning_ratio'],
             'auc': result.get('auc_after', 0.0),
             'accuracy': result.get('accuracy_after', 0.0),
@@ -514,9 +514,14 @@ def save_pruning_results(results, model_info, save_dir=None):
             'wm_sim_min': result.get('wm_sim_min', None),
             'wm_rel_dev': result.get('wm_rel_dev', None),
             'wm_nonzero_ratio': result.get('wm_nonzero_ratio', None),
-            'is_infringement': result.get('is_infringement', False),
-            'result_text': result.get('result_text', '评估失败')
-        })
+        }
+        # 各客户端水印区域相似度（独立列）
+        for key, value in result.items():
+            if key.startswith('wm_sim_c'):
+                row[key] = value
+        row['is_infringement'] = result.get('is_infringement', False)
+        row['result_text'] = result.get('result_text', '评估失败')
+        df_data.append(row)
     
     df = pd.DataFrame(df_data)
     
@@ -524,6 +529,7 @@ def save_pruning_results(results, model_info, save_dir=None):
     numeric_columns = ['pruning_ratio', 'auc', 'accuracy', 'watermark_integrity', 
                       'total_watermark_params', 'damaged_watermark_params', 'delta_pcc',
                       'wm_sim', 'wm_sim_mean', 'wm_sim_min', 'wm_rel_dev', 'wm_nonzero_ratio']
+    numeric_columns += [c for c in df.columns if c.startswith('wm_sim_c')]
     for col in numeric_columns:
         if col in df.columns:
             df[col] = df[col].apply(lambda x: f"{x:.6f}" if pd.notna(x) and isinstance(x, (int, float)) else x)
@@ -685,8 +691,10 @@ def main():
             }
             result.update(format_delta_pcc_result(delta_pcc_result, delta_pcc_default))
 
-            # 添加水印区域相似度 sim 结果
+            # 添加水印区域相似度 sim 结果（含各客户端明细）
             result.update(format_watermark_similarity(sim_result))
+            if sim_result:
+                result['wm_sim_per_client_detail'] = sim_result.get('wm_sim_per_client_detail', {})
             
             results.append(result)
             
@@ -697,33 +705,59 @@ def main():
             else:
                 print(f"剪枝{ratio:.0%}: AUC{pruned_auc:.4f} [参考] | 准确率{pruned_accuracy:.4f} [主要] | 水印完整性{result['watermark_integrity']:.2%} | ΔPCC{result['delta_pcc']:.6f} | sim{sim_str} | {result['result_text']}")
         
+        # 收集各客户端的 sim 列（按客户端号升序）
+        client_ids = sorted({
+            int(k[len('wm_sim_c'):])
+            for r in results
+            for k in r.keys()
+            if k.startswith('wm_sim_c')
+        })
+
         # 根据数据集类型调整总结表格格式
         print(f"\n{'='*90}")
         print("实验结果总结")
         print(f"{'='*90}")
-        
+
         if dataset_name == 'chestmnist':
-            print(f"{'剪枝%':<6} {'AUC[主要]':<10} {'准确率[参考]':<10} {'水印完整性%':<13} {'ΔPCC':<10} {'sim':<9} {'侵权判断':<8}")
-            print("-" * 80)
-            
+            header = (f"{'剪枝%':<6} {'AUC[主要]':<10} {'准确率[参考]':<10} "
+                      f"{'水印完整性%':<13} {'ΔPCC':<10} {'sim':<9}")
+            header += ''.join(f"{'sim_C'+str(c):<10}" for c in client_ids)
+            header += f"{'侵权判断':<8}"
+            print(header)
+            print("-" * (80 + 10 * len(client_ids)))
+
             for result in results:
                 sim_str = f"{result['wm_sim']:.6f}" if result.get('wm_sim') is not None else "N/A"
-                print(f"{result['pruning_ratio']:>4.0%} "
-                      f"{result['auc_after']:>8.4f} "
-                      f"{result['accuracy_after']:>8.4f} "
-                      f"{result['watermark_integrity']:>11.2%} {result['delta_pcc']:>10.6f} "
-                      f"{sim_str:>9} {result['result_text']:>6}")
+                line = (f"{result['pruning_ratio']:>4.0%} "
+                        f"{result['auc_after']:>8.4f} "
+                        f"{result['accuracy_after']:>8.4f} "
+                        f"{result['watermark_integrity']:>11.2%} {result['delta_pcc']:>10.6f} "
+                        f"{sim_str:>9}")
+                for c in client_ids:
+                    v = result.get(f'wm_sim_c{c}')
+                    line += f"{(f'{v:.6f}' if v is not None else 'N/A'):>10}"
+                line += f" {result['result_text']:>6}"
+                print(line)
         else:
-            print(f"{'剪枝%':<6} {'AUC[参考]':<10} {'准确率[主要]':<10} {'水印完整性%':<13} {'ΔPCC':<10} {'sim':<9} {'侵权判断':<8}")
-            print("-" * 80)
-            
+            header = (f"{'剪枝%':<6} {'AUC[参考]':<10} {'准确率[主要]':<10} "
+                      f"{'水印完整性%':<13} {'ΔPCC':<10} {'sim':<9}")
+            header += ''.join(f"{'sim_C'+str(c):<10}" for c in client_ids)
+            header += f"{'侵权判断':<8}"
+            print(header)
+            print("-" * (80 + 10 * len(client_ids)))
+
             for result in results:
                 sim_str = f"{result['wm_sim']:.6f}" if result.get('wm_sim') is not None else "N/A"
-                print(f"{result['pruning_ratio']:>4.0%} "
-                      f"{result['auc_after']:>8.4f} "
-                      f"{result['accuracy_after']:>8.4f} "
-                      f"{result['watermark_integrity']:>11.2%} {result['delta_pcc']:>10.6f} "
-                      f"{sim_str:>9} {result['result_text']:>6}")
+                line = (f"{result['pruning_ratio']:>4.0%} "
+                        f"{result['auc_after']:>8.4f} "
+                        f"{result['accuracy_after']:>8.4f} "
+                        f"{result['watermark_integrity']:>11.2%} {result['delta_pcc']:>10.6f} "
+                        f"{sim_str:>9}")
+                for c in client_ids:
+                    v = result.get(f'wm_sim_c{c}')
+                    line += f"{(f'{v:.6f}' if v is not None else 'N/A'):>10}"
+                line += f" {result['result_text']:>6}"
+                print(line)
         
         # 保存实验结果
         print("\n保存实验结果...")

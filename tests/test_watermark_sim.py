@@ -117,9 +117,66 @@ def test_sim_pipeline():
     print('  ✓ 全部通过')
 
 
+def test_per_client_sim():
+    """验证每个客户端的相似度被单独计算并平铺输出"""
+    key_matrix_path = 'save/key_matrix/alexnet/client5'
+    if not os.path.exists(key_matrix_path):
+        print(f'⚠️  密钥矩阵不存在: {key_matrix_path}，跳过集成测试')
+        return
+
+    print('\n=== 测试各客户端相似度 ===')
+    model = build_model()
+    km = KeyMatrixManager(key_matrix_path)
+    state = model.state_dict()
+
+    # 自身对比 -> 每个客户端都应为 1
+    res = compute_watermark_similarity(state, state, km, model=model)
+    per_client = res['wm_sim_per_client']
+    detail = res['wm_sim_per_client_detail']
+
+    print(f'  客户端数量: {len(per_client)}')
+    assert len(per_client) == km.client_num, '每个客户端都应有相似度'
+    for cid in sorted(per_client):
+        print(f'    客户端 {cid}: sim={per_client[cid]:.6f} '
+              f'| 水印长度={detail[cid]["wm_size"]} '
+              f'| 非零占比={detail[cid]["nonzero_ratio"]:.2%}')
+        assert abs(per_client[cid] - 1.0) < 1e-5, f'客户端 {cid} 自身对比 sim 应为1'
+        assert detail[cid]['wm_size'] > 0, f'客户端 {cid} 水印长度应大于0'
+        assert detail[cid]['rel_dev'] is not None
+
+    # format 后应平铺为 wm_sim_c{cid} 独立列
+    fmt = format_watermark_similarity(res)
+    for cid in sorted(per_client):
+        key = f'wm_sim_c{cid}'
+        assert key in fmt, f'格式化结果应包含 {key}'
+        assert fmt[key] is not None
+
+    # 破坏单个客户端的水印 -> 只有该客户端 sim 下降
+    broken = {k: v.clone() for k, v in state.items()}
+    target_cid = 0
+    for param_name, local_idx in km.load_positions(target_cid):
+        if param_name in broken:
+            flat = broken[param_name].view(-1)
+            if local_idx < flat.numel():
+                flat[local_idx] = 0.0
+
+    res_broken = compute_watermark_similarity(broken, state, km, model=model)
+    pc_broken = res_broken['wm_sim_per_client']
+    print(f'  破坏客户端 {target_cid} 后:')
+    for cid in sorted(pc_broken):
+        print(f'    客户端 {cid}: sim={pc_broken[cid]:.6f}')
+    assert pc_broken[target_cid] < 0.99, '被破坏客户端的 sim 应显著下降'
+    for cid in sorted(pc_broken):
+        if cid != target_cid:
+            assert pc_broken[cid] > 0.999, f'未破坏客户端 {cid} 的 sim 应保持接近1'
+
+    print('  ✓ 全部通过')
+
+
 def main():
     test_cosine_similarity()
     test_sim_pipeline()
+    test_per_client_sim()
     print('\n✅ 水印相似度测试全部通过')
 
 
