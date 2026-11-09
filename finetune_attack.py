@@ -513,9 +513,17 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
             print(f"训练损失: {avg_loss:.4f} | 测试损失: {avg_test_loss:.4f} | "
                   f"AUC: {mean_auc:.4f} [参考] | 准确率: {accuracy:.2%} [主要]")
 
+        # 水印区域相似度 sim：每轮都计算（开销小，仅参数提取+余弦相似度）
+        sim_result = None
+        if reconstructor and original_model_state:
+            sim_result = compute_watermark_similarity(
+                model.state_dict(), original_model_state,
+                reconstructor.key_manager, model=model
+            )
+            print_watermark_similarity(sim_result)
+
         # 根据pcc_interval参数计算ΔPCC和侵权检测（计算量大的操作）
         delta_pcc_result = None
-        sim_result = None
         if ((epoch + 1) == 1) or ((epoch + 1) % pcc_interval == 0):
             print("🔍 进行ΔPCC和侵权检测评估...")
             # 保存状态
@@ -531,14 +539,6 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
             
             # 打印ΔPCC结果
             print_delta_pcc_summary(delta_pcc_result)
-
-            # 计算水印区域相似度 sim（与微调前的原始水印模型比较）
-            if reconstructor and original_model_state:
-                sim_result = compute_watermark_similarity(
-                    model_states[-1], original_model_state,
-                    reconstructor.key_manager, model=model
-                )
-            print_watermark_similarity(sim_result)
             
             # 清理内存
             if torch.cuda.is_available():
