@@ -29,6 +29,11 @@ from models.resnet import resnet18
 from utils.dataset import LocalChestMNISTDataset
 from utils.watermark_reconstruction import WatermarkReconstructor
 from utils.delta_pcc_utils import evaluate_delta_pcc, calculate_fixed_tau, format_delta_pcc_result, print_delta_pcc_summary
+from utils.watermark_sim_utils import (
+    compute_watermark_similarity,
+    format_watermark_similarity,
+    print_watermark_similarity,
+)
 
 
 def extract_model_info_from_path(model_path):
@@ -404,8 +409,7 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
         mnist_test_loader: MNIST测试数据加载器
         fixed_tau: 固定阈值τ
     """
-    from tqdm import tqdm
-    # 根据optimizer_type参数选择优化器
+    from tqdm import tqdm    # 根据optimizer_type参数选择优化器
     if optimizer_type.lower() == 'sgd':
         optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=1e-4)
     else:  # 默认使用Adam
@@ -511,6 +515,7 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
 
         # 根据pcc_interval参数计算ΔPCC和侵权检测（计算量大的操作）
         delta_pcc_result = None
+        sim_result = None
         if ((epoch + 1) == 1) or ((epoch + 1) % pcc_interval == 0):
             print("🔍 进行ΔPCC和侵权检测评估...")
             # 保存状态
@@ -526,6 +531,14 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
             
             # 打印ΔPCC结果
             print_delta_pcc_summary(delta_pcc_result)
+
+            # 计算水印区域相似度 sim（与微调前的原始水印模型比较）
+            if reconstructor and original_model_state:
+                sim_result = compute_watermark_similarity(
+                    model_states[-1], original_model_state,
+                    reconstructor.key_manager, model=model
+                )
+            print_watermark_similarity(sim_result)
             
             # 清理内存
             if torch.cuda.is_available():
@@ -563,6 +576,9 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
                 'is_infringement': None,
                 'result_text': 'N/A'
             })
+
+        # 添加水印区域相似度 sim 信息
+        metrics.update(format_watermark_similarity(sim_result))
         
         performance_metrics.append(metrics)
         
@@ -574,6 +590,9 @@ def finetune_model(model, train_loader, test_loader, epochs: int, lr: float = 0.
         if delta_pcc_result:
             del delta_pcc_result
             delta_pcc_result = None
+        if sim_result:
+            del sim_result
+            sim_result = None
 
         print("-" * 50)
         
@@ -696,6 +715,11 @@ def save_results(results, model_path: str, save_dir: str = None,
                 'tau': result.get('tau', None),
                 'delta_perf': result.get('delta_perf', None),
                 'delta_pcc': result.get('delta_pcc', None),
+                'wm_sim': result.get('wm_sim', None),
+                'wm_sim_mean': result.get('wm_sim_mean', None),
+                'wm_sim_min': result.get('wm_sim_min', None),
+                'wm_rel_dev': result.get('wm_rel_dev', None),
+                'wm_nonzero_ratio': result.get('wm_nonzero_ratio', None),
                 'is_infringement': result.get('is_infringement', None),
                 'result_text': result.get('result_text', 'N/A')
             })
@@ -704,8 +728,10 @@ def save_results(results, model_path: str, save_dir: str = None,
 
         # 格式化数值列
         numeric_columns = ['train_loss', 'test_loss', 'test_auc', 'test_accuracy', 'learning_rate',
-                          'perf_fail', 'tau', 'delta_perf', 'delta_pcc']
-        precision_map = {'delta_pcc': 8}
+                          'perf_fail', 'tau', 'delta_perf', 'delta_pcc',
+                          'wm_sim', 'wm_sim_mean', 'wm_sim_min', 'wm_rel_dev', 'wm_nonzero_ratio']
+        precision_map = {'delta_pcc': 8, 'wm_sim': 8, 'wm_sim_mean': 8, 'wm_sim_min': 8,
+                         'wm_rel_dev': 8, 'wm_nonzero_ratio': 6}
         for col in numeric_columns:
             if col in df.columns:
                 prec = precision_map.get(col, 6)
@@ -774,6 +800,7 @@ def save_paper_results(results, model_path: str, save_path: str, dataset_name: s
             'test_auc': f"{r['test_auc']:.4f}",
             'test_acc': f"{r['test_accuracy']:.4f}",
             'delta_pcc': f"{r['delta_pcc']:.6f}" if r['delta_pcc'] is not None else 'N/A',
+            'wm_sim': f"{r['wm_sim']:.6f}" if r.get('wm_sim') is not None else 'N/A',
             'infringement': 'Yes' if r['is_infringement'] else 'No' if r['is_infringement'] is not None else 'N/A',
         }
         df_data.append(row)
@@ -786,7 +813,7 @@ def save_paper_results(results, model_path: str, save_path: str, dataset_name: s
         f.write(f"# Model: {os.path.basename(model_path)}\n")
         f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write("#\n")
-        f.write("# Columns: epoch, train_loss, test_loss, test_auc, test_acc, delta_pcc, infringement\n")
+        f.write("# Columns: epoch, train_loss, test_loss, test_auc, test_acc, delta_pcc, wm_sim, infringement\n")
         f.write("#\n")
 
     # 追加CSV数据
@@ -806,14 +833,14 @@ def main():
     # 解析微调攻击特定的命令行参数
     parser = argparse.ArgumentParser(description='微调攻击实验')
     parser.add_argument('--model_path', type=str, 
-                       default='./save/alexnet/chestmnist/202606081322_reg_ablation_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_auc_0.7706_drift_margin_enhanced.pkl',
+                       default='./save/alexnet/cifar10/202611041703_Dp_0.1_iid_True_wm_enhanced_ep_150_le_2_cn_5_fra_1.0000_acc_0.9040_enhanced.pkl',
                        help='模型文件路径')
     parser.add_argument('--model_type', type=str, default='alexnet',
                        choices=['resnet', 'alexnet'],
                        help='模型类型')
     parser.add_argument('--client_num', type=int, default=5,
                        help='客户端数量')
-    parser.add_argument('--dataset', type=str, default='chestmnist',
+    parser.add_argument('--dataset', type=str, default='cifar10',
                        choices=['cifar10', 'cifar100', 'chestmnist'],
                        help='数据集类型')
     parser.add_argument('--autoencoder_dir', type=str, 
@@ -1047,6 +1074,14 @@ def main():
     # 添加第0轮的ΔPCC和侵权判断信息
     initial_result.update(format_delta_pcc_result(delta_pcc_result_0))
 
+    # 第0轮的水印区域相似度（自身与自身比较，sim=1，作为基线）
+    sim_result_0 = compute_watermark_similarity(
+        original_model_state, original_model_state,
+        reconstructor.key_manager if reconstructor else None, model=model
+    )
+    initial_result.update(format_watermark_similarity(sim_result_0))
+    print_watermark_similarity(sim_result_0, prefix="[基线] ")
+
     # 进行微调训练
     model_states, performance_metrics = finetune_model(
         model, train_loader, test_loader,
@@ -1078,11 +1113,12 @@ def main():
     
     # 根据数据集类型调整显示格式
     if dataset_type == 'chestmnist':
-        print(f"{'轮次':<4} {'训练损失':<10} {'测试损失':<10} {'测试AUC':<10} {'测试准确率%':<8} {'ΔPCC':<8} {'侵权判断':<8}")
-        print("-" * 80)
+        print(f"{'轮次':<4} {'训练损失':<10} {'测试损失':<10} {'测试AUC':<10} {'测试准确率%':<8} {'ΔPCC':<10} {'sim':<9} {'侵权判断':<8}")
+        print("-" * 95)
         
         for result in results:
             delta_pcc_str = f"{result['delta_pcc']:.8f}" if result['delta_pcc'] is not None else "N/A"
+            sim_str = f"{result.get('wm_sim'):.6f}" if result.get('wm_sim') is not None else "N/A"
             infringement_str = "是" if result['is_infringement'] else "否" if result['is_infringement'] is not None else "N/A"
             
             print(f"{result['epoch']:>3}  "
@@ -1091,14 +1127,16 @@ def main():
                   f"{result['test_auc']:>8.4f}  "  # AUC更宽显示
                   f"{result['test_accuracy']:>6.2%}  "  # 准确率稍窄
                   f"{delta_pcc_str:>10}  "
+                  f"{sim_str:>9}  "
                   f"{infringement_str:>6}")
     else:
         # CIFAR10等多分类任务
-        print(f"{'轮次':<4} {'训练损失':<10} {'测试损失':<10} {'测试AUC':<8} {'测试准确率%':<10} {'ΔPCC':<8} {'侵权判断':<8}")
-        print("-" * 80)
+        print(f"{'轮次':<4} {'训练损失':<10} {'测试损失':<10} {'测试AUC':<8} {'测试准确率%':<10} {'ΔPCC':<10} {'sim':<9} {'侵权判断':<8}")
+        print("-" * 95)
         
         for result in results:
             delta_pcc_str = f"{result['delta_pcc']:.8f}" if result['delta_pcc'] is not None else "N/A"
+            sim_str = f"{result.get('wm_sim'):.6f}" if result.get('wm_sim') is not None else "N/A"
             infringement_str = "是" if result['is_infringement'] else "否" if result['is_infringement'] is not None else "N/A"
             
             print(f"{result['epoch']:>3}  "
@@ -1107,6 +1145,7 @@ def main():
                   f"{result['test_auc']:>6.4f}  "
                   f"{result['test_accuracy']:>8.2%}  "
                   f"{delta_pcc_str:>10}  "
+                  f"{sim_str:>9}  "
                   f"{infringement_str:>6}")
 
     # 分析趋势
@@ -1134,6 +1173,14 @@ def main():
             final_delta_pcc = delta_pcc_values[-1]
             delta_pcc_change = final_delta_pcc - initial_delta_pcc
             print(f"ΔPCC变化: {initial_delta_pcc:.8f} → {final_delta_pcc:.8f} (变化: {delta_pcc_change:+.8f})")
+
+        # 分析水印相似度 sim 趋势
+        sim_values = [r['wm_sim'] for r in results if r.get('wm_sim') is not None]
+        if len(sim_values) > 1:
+            initial_sim = sim_values[0]
+            final_sim = sim_values[-1]
+            sim_change = final_sim - initial_sim
+            print(f"水印相似度sim变化: {initial_sim:.6f} → {final_sim:.6f} (变化: {sim_change:+.6f})")
         
         # 分析侵权判断
         infringement_count = sum(1 for r in results if r['is_infringement'] is True)
