@@ -4,6 +4,156 @@ import sys
 from typing import Dict, Any
 
 
+# ====================================================================
+#  实验配置中心
+# ====================================================================
+#  用法：直接改下面的值，然后运行 ``python main.py`` 即可。
+#
+#  优先级：**命令行参数 > 本配置块 > argparse 默认值**。
+#  也就是说配置块只填充"命令行没有显式给出"的项，
+#  临时想试个别的值，依然可以直接敲命令行覆盖。
+#
+#  生效范围：只有 :data:`_CONFIG_TARGET_SCRIPTS` 里的入口脚本会应用本配置块。
+#  消融实验（ablation_experiment.py 等）与攻击脚本（pruning_attack.py /
+#  finetune_attack.py）各自有独立的命令行参数，不受影响。
+#
+#  典型场景：跑 AlexNet + CIFAR10 + 10 客户端 + K=3 的抗合谋实验，
+#  把下面这些改好，直接 ``python main.py``。
+# --------------------------------------------------------------------
+
+#: 只有这些入口脚本会应用 EXPERIMENT_CONFIG。
+_CONFIG_TARGET_SCRIPTS = ('main.py',)
+
+EXPERIMENT_CONFIG: Dict[str, Any] = {
+    # ---------------- 数据集与模型 ----------------
+    'dataset': 'cifar10',          # chestmnist / cifar10 / cifar100
+    'model_name': 'alexnet',       # alexnet / resnet
+    'num_classes': None,           # None = 按 dataset 预设
+    'in_channels': None,           # None = 按 dataset 预设
+
+    # ---------------- 联邦学习 ----------------
+    'epochs': 3,                   # 通信轮数 R
+    'local_ep': 1,                 # 每客户端本地轮数 E
+    'batch_size': 128,             # 本地批大小 B
+    'client_num': 10,              # 客户端数（抗合谋模式下由配置表决定）
+    'frac': 1.0,                   # 每轮参与比例 C
+    'iid': True,                   # IID 数据划分
+
+    # ---------------- 优化器 ----------------
+    'optim': 'adam',               # adam / sgd
+    'lr': 1e-3,
+    'wd': 1e-5,
+    'use_lr_scheduler': False,
+    'dropout_rate': 0.5,           # 仅 AlexNet 分类层
+
+    # ---------------- 抗合谋评测（见证点）----------------
+    # 这是本分支的主实验。换数据集时，密钥矩阵目录与配置表要同步改
+    # （密钥矩阵目录不含数据集维度，卷积层形状随 in_channels 变化）。
+    'collusion_only': True,        # 一键切到抗合谋评测模式
+    'collusion_size': 3,           # 仿真的合谋规模 K
+    'collusion_leak_stage': 'post_training',   # pre_training / post_training
+    'collusion_attack_mode': 'none',            # none / gaussian_noise
+    'collusion_size_configs': 'config/collusion_presets_cifar10.json',
+    'key_matrix_dir': 'save/key_matrix_collusion_cifar10',
+    'key_matrix_profile': 'collusion',
+    'enable_witness': True,        # 启用见证点水印
+    'freeze_watermark_region': True,   # 冻结水印区域（抗合谋必须开）
+
+    # ---------------- 差分隐私 ----------------
+    'dp': True,
+    'sigma': 0.05,
+
+    # ---------------- 单客户端泄漏追踪 ----------------
+    # 与抗合谋是两种互斥的威胁模型，跑抗合谋时保持关闭。
+    'enable_leakage_tracking': False,
+    'disable_single_client_leak': True,
+    'leak_interval': 1,
+    'leak_attack_mode': 'gaussian_noise',
+}
+# ====================================================================
+
+
+def _explicit_cli_options(parser) -> set:
+    """收集命令行里**显式给出**的选项名。
+
+    用于判断某个参数是"用户从命令行指定"还是"只有默认值"，
+    从而决定要不要被 :data:`EXPERIMENT_CONFIG` 覆盖。
+
+    Args:
+        parser: 已构建好的 ArgumentParser。
+
+    Returns:
+        显式给出的选项名集合（如 ``{'--dataset', '--epochs'}``）。
+    """
+    known = set()
+    for action in parser._actions:
+        known.update(action.option_strings)
+
+    given = set()
+    for token in sys.argv[1:]:
+        name = token.split('=', 1)[0]
+        if name in known:
+            given.add(name)
+    return given
+
+
+def _config_applies_to_current_script() -> bool:
+    """判断当前运行的入口脚本是否应该应用 :data:`EXPERIMENT_CONFIG`。
+
+    依据是 ``sys.argv[0]`` 的文件名（basename）。这样消融实验
+    （``ablation_experiment.py`` 等）与攻击脚本（``pruning_attack.py`` /
+    ``finetune_attack.py``）不会因为共用 ``parser_args()`` 而被污染。
+
+    Returns:
+        True 表示当前脚本应当应用配置块。
+    """
+    if not _CONFIG_TARGET_SCRIPTS:
+        return True
+    try:
+        script = os.path.basename(sys.argv[0] or '')
+    except Exception:  # noqa: BLE001
+        return False
+    return script in _CONFIG_TARGET_SCRIPTS
+
+
+def _apply_experiment_config(parser, args) -> list:
+    """把 :data:`EXPERIMENT_CONFIG` 应用到未被命令行显式指定的参数上。
+
+    规则：
+      - 配置块里的键若在命令行出现过（包括 ``--no_xxx`` 这类反向开关），
+        **不覆盖**，命令行优先；
+      - 其余情况用配置块的值覆盖 argparse 默认值；
+      - 当前脚本不在 :data:`_CONFIG_TARGET_SCRIPTS` 里时**完全不应用**。
+
+    Args:
+        parser: 已构建好的 ArgumentParser。
+        args: 已解析的 Namespace（原地修改）。
+
+    Returns:
+        被配置块实际改动的参数名列表。
+    """
+    if not _config_applies_to_current_script():
+        return []
+
+    explicit = _explicit_cli_options(parser)
+
+    # dest -> 该参数的所有选项名（含 --no_xxx 反向开关）
+    dest_options = {}
+    for action in parser._actions:
+        dest_options.setdefault(action.dest, set()).update(action.option_strings)
+
+    applied = []
+    for key, value in EXPERIMENT_CONFIG.items():
+        if not hasattr(args, key):
+            continue
+        if dest_options.get(key, {f'--{key}'}) & explicit:
+            continue  # 命令行显式指定，优先级更高
+        setattr(args, key, value)
+        applied.append(key)
+
+    return applied
+
+
 class ArgConfigError(SystemExit):
     """参数配置不合法。
 
@@ -374,6 +524,14 @@ def parser_args():
                         help='save weights in float32 without compression')
 
     args = parser.parse_args()
+
+    # ========================= 应用实验配置中心 =========================
+    # 命令行显式给出的参数优先；其余用 utils.args.EXPERIMENT_CONFIG 覆盖。
+    # 这样"改配置块 -> 直接 python main.py"与"命令行临时覆盖"两种用法都能用。
+    _applied = _apply_experiment_config(parser, args)
+    if _applied:
+        print('⚙️  实验配置中心 (utils/args.py: EXPERIMENT_CONFIG) 已应用: '
+              + ', '.join(sorted(_applied)))
 
     from .key_matrix_utils import get_key_matrix_path
     import os
