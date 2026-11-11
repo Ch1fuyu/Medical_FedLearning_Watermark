@@ -400,6 +400,23 @@ def load_key_matrix_info(save_dir):
     with open(info_path, 'r') as f:
         return json.load(f)
 
+def _default_save_dir(profile: str, dataset: str) -> str:
+    """按 profile + dataset 推导密钥矩阵的默认保存目录。
+
+    复用 :func:`utils.args.default_key_matrix_dir`，保证生成端
+    （train_key_matrix.py）与评测端（main.py）算出来的目录**完全一致**。
+
+    Args:
+        profile: ``'default'``（传统水印基线）或 ``'collusion'``（抗合谋）。
+        dataset: 数据集名。
+
+    Returns:
+        相对保存目录（形如 ``./save/key_matrix_collusion_cifar10``）。
+    """
+    from utils.args import default_key_matrix_dir
+    return './' + default_key_matrix_dir(profile, dataset)
+
+
 def _cross_check_presets(client_num: int, model_type: str, design_K: int):
     """与抗合谋配置表交叉校验 design_K 是否一致。
 
@@ -445,7 +462,9 @@ def main():
     parser.add_argument('--watermark_strategy', type=str, default='equal',
                        choices=['equal', 'proportional'], help='水印分配策略')
     parser.add_argument('--save_dir', type=str, default=None,
-                       help='保存目录（默认按 profile 自动决定）')
+                       help='保存目录（默认按 profile + dataset 自动决定: '
+                            'collusion=save/key_matrix_collusion[_<dataset>], '
+                            'default=save/key_matrix[_<dataset>]）')
     parser.add_argument('--profile', type=str, default='default',
                        choices=['default', 'collusion'],
                        help='配置档案：default=save/key_matrix（传统水印基线），'
@@ -477,13 +496,15 @@ def main():
     
     args = parser.parse_args()
 
-    # 保存目录：优先 --save_dir，否则按 profile 决定
+    # 保存目录：优先 --save_dir，否则按 profile + dataset 自动决定
     # profile 让不同实验分支（传统水印基线 / 抗合谋）使用互不干扰的目录，
     # 避免来回切分支时 key_matrix 与 witness_layout 不匹配。
+    #
+    # dataset 维度：密钥矩阵目录 <base>/<model>/client<N> 本身不含数据集，
+    # 而卷积层形状随 in_channels 变化（chestmnist=1, cifar10/cifar100=3），
+    # 因此除主数据集外都带数据集后缀，避免不同数据集互相覆盖。
     if args.save_dir is None:
-        args.save_dir = ('./save/key_matrix_collusion'
-                         if args.profile == 'collusion'
-                         else './save/key_matrix')
+        args.save_dir = _default_save_dir(args.profile, args.dataset)
     print(f'配置档案: {args.profile} -> 保存目录: {args.save_dir}')
 
     # 使用预设配置获取数据集参数

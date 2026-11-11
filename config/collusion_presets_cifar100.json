@@ -1,0 +1,60 @@
+{
+  "_comment": [
+    "抗合谋评测配置表 (CIFAR100 专用): 合谋规模 K -> (模型类型 -> 密钥矩阵规格)。",
+    "",
+    "与 config/collusion_presets.json (chestmnist 专用) 的区别:",
+    "  - 密钥矩阵根目录: save/key_matrix_collusion_cifar100",
+    "  - dataset: cifar100 (in_channels=3)",
+    "",
+    "为什么要单独一份: 密钥矩阵目录 <base>/<model>/client<N> 不含数据集维度,",
+    "而卷积层形状随 in_channels 变化 (chestmnist=1, cifar100=3),",
+    "因此两种数据集的密钥矩阵不能放在同一目录。",
+    "",
+    "用法:",
+    "  python train_key_matrix.py --model_type alexnet --client_num 10 \\",
+    "      --profile collusion --collusion_K 3 --dataset cifar100 \\",
+    "      --save_dir save/key_matrix_collusion_cifar100",
+    "",
+    "  python main.py --collusion_only --dataset cifar100 --model_name alexnet \\",
+    "      --collusion_size 3 --collusion_leak_stage post_training \\",
+    "      --key_matrix_dir save/key_matrix_collusion_cifar100 \\",
+    "      --collusion_size_configs config/collusion_presets_cifar100.json"
+  ],
+
+  "2": {
+    "resnet":  {"client_num": 10, "dataset": "cifar100", "design_K": 3},
+    "alexnet": {"client_num": 10, "dataset": "cifar100", "design_K": 3}
+  },
+  "3": {
+    "resnet":  {"client_num": 10, "dataset": "cifar100", "design_K": 3},
+    "alexnet": {"client_num": 10, "dataset": "cifar100", "design_K": 3}
+  },
+  "4": {
+    "resnet":  {"client_num": 10, "dataset": "cifar100", "design_K": 3},
+    "alexnet": {"client_num": 10, "dataset": "cifar100", "design_K": 3}
+  },
+  "5": {
+    "resnet":  {"client_num": 10, "dataset": "cifar100", "design_K": 3},
+    "alexnet": {"client_num": 10, "dataset": "cifar100", "design_K": 3}
+  },
+  "6": {
+    "resnet":  {"client_num": 10, "dataset": "cifar100", "design_K": 3},
+    "alexnet": {"client_num": 10, "dataset": "cifar100", "design_K": 3}
+  },
+  "7": {
+    "resnet":  {"client_num": 10, "dataset": "cifar100", "design_K": 3},
+    "alexnet": {"client_num": 10, "dataset": "cifar100", "design_K": 3}
+  },
+  "8": {
+    "resnet":  {"client_num": 10, "dataset": "cifar100", "design_K": 3},
+    "alexnet": {"client_num": 10, "dataset": "cifar100", "design_K": 3}
+  },
+  "9": {
+    "resnet":  {"client_num": 10, "dataset": "cifar100", "design_K": 3},
+    "alexnet": {"client_num": 10, "dataset": "cifar100", "design_K": 3}
+  },
+  "10": {
+    "resnet":  {"client_num": 10, "dataset": "cifar100", "design_K": 3},
+    "alexnet": {"client_num": 10, "dataset": "cifar100", "design_K": 3}
+  }
+}

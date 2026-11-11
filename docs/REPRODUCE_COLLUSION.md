@@ -77,10 +77,18 @@ python train_key_matrix.py \
     --dataset cifar10
 ```
 
+> `--save_dir` **不用手填**，会按 `profile + dataset` 自动推导：
+> - `chestmnist` → `./save/key_matrix_collusion`
+> - `cifar10` → `./save/key_matrix_collusion_cifar10`
+> - `cifar100` → `./save/key_matrix_collusion_cifar100`
+>
+> `main.py` 侧用同一套规则（`utils/args.py: default_key_matrix_dir`），
+> 因此两边目录**必然一致**，不需要手工对齐。
+
 产出：
 
 ```
-save/key_matrix_collusion/alexnet/client10/
+save/key_matrix_collusion_cifar10/alexnet/client10/
 ├── key_matrix_info.json      # 含 model_signature（模型结构指纹）+ dataset
 ├── witness_layout.json       # 见证点布局（v=21, G=45）
 ├── client_0/
@@ -114,22 +122,19 @@ save/key_matrix_collusion/alexnet/client10/
 ### ⚠️ 不同数据集不能共用同一个密钥矩阵目录
 
 密钥矩阵目录结构是 `<base>/<model>/client<N>`，**不含数据集维度**。
-若要同时跑 ChestMNIST 和 CIFAR10，必须用**独立的根目录 + 独立的配置表**：
+因此 `--save_dir` 会自动按数据集加后缀，避免互相覆盖：
 
-```bash
-# ChestMNIST（默认目录 + 默认配置表）
-python train_key_matrix.py --model_type alexnet --client_num 10 \
-    --profile collusion --collusion_K 3 --dataset chestmnist
+| 数据集 | 自动推导的 `--save_dir` | 配置表 |
+|---|---|---|
+| chestmnist | `./save/key_matrix_collusion` | `config/collusion_presets.json` |
+| cifar10 | `./save/key_matrix_collusion_cifar10` | `config/collusion_presets_cifar10.json` |
+| cifar100 | `./save/key_matrix_collusion_cifar100` | `config/collusion_presets_cifar100.json` |
 
-# CIFAR10（独立目录 + 独立配置表）
-python train_key_matrix.py --model_type alexnet --client_num 10 \
-    --profile collusion --collusion_K 3 --dataset cifar10 \
-    --save_dir save/key_matrix_collusion_cifar10
-```
+`main.py` 侧的 `key_matrix_dir` / `collusion_size_configs` 也用同一套规则
+自动推导（见 `utils/args.py` 的 `default_key_matrix_dir` /
+`default_collusion_presets_path`），因此**两边天然对齐**。
 
-项目已预置 `config/collusion_presets_cifar10.json` 用于 CIFAR10。
-
-若不这样做，`train_key_matrix.py` 会给出覆盖告警：
+若强行用同一个目录，`train_key_matrix.py` 会给出覆盖告警：
 
 ```
 ⚠️  警告：密钥矩阵目录已被另一个数据集占用:
@@ -186,7 +191,7 @@ python main.py \
     --dp --sigma 0.05
 ```
 
-### 6.2 CIFAR10（独立目录 + 独立配置表）
+### 6.2 CIFAR10（目录与配置表自动推导）
 
 ```bash
 python main.py \
@@ -198,10 +203,12 @@ python main.py \
     --batch_size 128 \
     --collusion_size 3 \
     --collusion_leak_stage post_training \
-    --dp --sigma 0.05 \
-    --key_matrix_dir save/key_matrix_collusion_cifar10 \
-    --collusion_size_configs config/collusion_presets_cifar10.json
+    --dp --sigma 0.05
 ```
+
+> 更推荐的做法：直接在 `utils/args.py` 的 `EXPERIMENT_CONFIG` 里改，
+> 然后 `python main.py` 即可（不用敲任何命令行参数）。
+> 见 `docs/REPRODUCE_COLLUSION.md` 第 7 节。
 
 `--collusion_only` 一键完成四件事：
 
@@ -228,7 +235,69 @@ python main.py \
 合谋归因准确率: 100.00% (3/3)
 ```
 
-## 7. 输出产物
+## 7. 实验配置中心（推荐用法）
+
+`utils/args.py` 顶部有一个 **实验配置中心**，改完直接 `python main.py`
+即可，不用敲任何命令行参数：
+
+```python
+EXPERIMENT_CONFIG: Dict[str, Any] = {
+    # ---------------- 数据集与模型 ----------------
+    'dataset': 'cifar10',          # chestmnist / cifar10 / cifar100
+    'model_name': 'alexnet',       # alexnet / resnet
+
+    # ---------------- 联邦学习 ----------------
+    'epochs': 3,                   # 通信轮数 R
+    'local_ep': 1,                 # 每客户端本地轮数 E
+    'batch_size': 128,             # 本地批大小 B
+    'client_num': 10,              # 客户端数
+
+    # ---------------- 抗合谋评测（见证点）----------------
+    'collusion_only': True,        # 一键切到抗合谋评测模式
+    'collusion_size': 3,           # 仿真的合谋规模 K
+    'collusion_leak_stage': 'post_training',
+    # None = 按 profile + dataset 自动推导
+    'collusion_size_configs': None,
+    'key_matrix_dir': None,
+    'key_matrix_profile': 'collusion',
+    'enable_witness': True,
+    'freeze_watermark_region': True,
+
+    # ---------------- 差分隐私 ----------------
+    'dp': True,
+    'sigma': 0.05,
+    ...
+}
+```
+
+**优先级**：命令行参数 > 配置中心 > argparse 默认值。
+
+也就是说，命令行仍然可以临时覆盖任何一项：
+
+```bash
+# 配置中心用的是 epochs=3，这里临时改成 5
+python main.py --epochs 5
+```
+
+**生效范围**：只有 `main.py` 会应用配置中心。消融实验
+（`ablation_experiment.py` 等）与攻击脚本（`pruning_attack.py` /
+`finetune_attack.py`）各自有独立的命令行参数，不受影响。
+
+### 换数据集只需改一个字段
+
+把配置中心的 `'dataset'` 改成 `'chestmnist'`，密钥矩阵目录与配置表
+都会自动切到对应的一套：
+
+```
+chestmnist -> save/key_matrix_collusion            + config/collusion_presets.json
+cifar10    -> save/key_matrix_collusion_cifar10    + config/collusion_presets_cifar10.json
+cifar100   -> save/key_matrix_collusion_cifar100   + config/collusion_presets_cifar100.json
+```
+
+（规则见 `utils/args.py: default_key_matrix_dir` /
+`default_collusion_presets_path`，`train_key_matrix.py` 复用同一套逻辑。）
+
+## 8. 输出产物
 
 | 文件 | 内容 |
 |---|---|
@@ -237,7 +306,7 @@ python main.py \
 | `save/{model}/{dataset}/*_enhanced.pkl` | 训练日志 + 最优模型权重 |
 | `logs/console.logs` | 完整运行日志 |
 
-## 8. 常见问题
+## 9. 常见问题
 
 ### Q: 提示 `抗合谋配置表中没有 (合谋规模 K=..., 模型=...) 的条目`
 
@@ -269,16 +338,17 @@ python main.py --dataset cifar10 --model_name alexnet \
     --enable_leakage_tracking --leak_attack_mode gaussian_noise ...
 ```
 
-## 9. 附：目录结构速查
+## 10. 附：目录结构速查
 
 ```
 Medical_FedLearning_Watermark/
 ├── config/
 │   ├── globals.py
-│   ├── collusion_presets.json           # 抗合谋配置表 (chestmnist 专用)
-│   └── collusion_presets_cifar10.json   # 抗合谋配置表 (cifar10 专用)
+│   ├── collusion_presets.json           # 抗合谋配置表 (chestmnist)
+│   ├── collusion_presets_cifar10.json   # 抗合谋配置表 (cifar10)
+│   └── collusion_presets_cifar100.json  # 抗合谋配置表 (cifar100)
 ├── data/                            # 数据集（自动下载）
-├── docs/REPRODUCE_COLLUSION.md       # 新机器复现指南
+├── docs/REPRODUCE_COLLUSION.md       # 本文档
 ├── logs/console.logs                # 运行日志
 ├── save/
 │   ├── keys/witness_secret_collusion.key   # 长期密钥（gitignore）
@@ -289,12 +359,13 @@ Medical_FedLearning_Watermark/
 │   │       ├── witness_layout.json
 │   │       └── client_<i>/{key_matrix.pth, positions.json}
 │   ├── key_matrix_collusion_cifar10/ # 抗合谋分支 (cifar10, in_ch=3)
+│   ├── key_matrix_collusion_cifar100/# 抗合谋分支 (cifar100, in_ch=3)
 │   ├── collusion/                    # 抗合谋归因结果 JSON
 │   └── excel/                        # 指标 Excel
 ├── main.py                           # 主实验入口
 ├── train_key_matrix.py               # 密钥矩阵 + 见证点布局生成
 └── utils/
-    ├── args.py                       # 参数中心
+    ├── args.py                       # 参数中心 + 实验配置中心
     ├── collusion_presets.py          # 配置表解析与校验
     ├── collusion_resistant.py        # 见证点设计 / 嵌入 / 解码
     ├── witness_secret.py             # 密钥持久化

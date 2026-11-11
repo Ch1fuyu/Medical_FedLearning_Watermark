@@ -47,14 +47,17 @@ EXPERIMENT_CONFIG: Dict[str, Any] = {
     'dropout_rate': 0.5,           # 仅 AlexNet 分类层
 
     # ---------------- 抗合谋评测（见证点）----------------
-    # 这是本分支的主实验。换数据集时，密钥矩阵目录与配置表要同步改
-    # （密钥矩阵目录不含数据集维度，卷积层形状随 in_channels 变化）。
+    # 这是本分支的主实验。
     'collusion_only': True,        # 一键切到抗合谋评测模式
     'collusion_size': 3,           # 仿真的合谋规模 K
     'collusion_leak_stage': 'post_training',   # pre_training / post_training
     'collusion_attack_mode': 'none',            # none / gaussian_noise
-    'collusion_size_configs': 'config/collusion_presets_cifar10.json',
-    'key_matrix_dir': 'save/key_matrix_collusion_cifar10',
+    # None = 按 profile + dataset 自动推导:
+    #   chestmnist -> save/key_matrix_collusion
+    #   其他        -> save/key_matrix_collusion_<dataset>
+    # (train_key_matrix.py 用同一套规则, 两边目录必然一致)
+    'collusion_size_configs': None,
+    'key_matrix_dir': None,
     'key_matrix_profile': 'collusion',
     'enable_witness': True,        # 启用见证点水印
     'freeze_watermark_region': True,   # 冻结水印区域（抗合谋必须开）
@@ -71,6 +74,60 @@ EXPERIMENT_CONFIG: Dict[str, Any] = {
     'leak_attack_mode': 'gaussian_noise',
 }
 # ====================================================================
+
+
+def default_collusion_presets_path(dataset: str) -> str:
+    """按数据集推导抗合谋配置表的默认路径。
+
+    与 :func:`default_key_matrix_dir` 保持同一套规则：
+    ``chestmnist`` 用基础配置表，其他数据集用带后缀的独立配置表。
+
+    Args:
+        dataset: 数据集名。
+
+    Returns:
+        相对路径（形如 ``config/collusion_presets_cifar10.json``）。
+    """
+    dataset = (dataset or '').lower()
+    if dataset and dataset != 'chestmnist':
+        return f'config/collusion_presets_{dataset}.json'
+    return 'config/collusion_presets.json'
+
+
+def default_key_matrix_dir(profile: str, dataset: str) -> str:
+    """按 profile + dataset 推导密钥矩阵的默认根目录。
+
+    目录结构::
+
+        save/key_matrix_collusion/<model_name>/client<N>/
+        save/key_matrix_collusion_<dataset>/<model_name>/client<N>/
+
+    为什么数据集要进目录名
+    ----------------------
+    密钥矩阵里的位置索引是按**具体的卷积层形状**生成的，而卷积层形状
+    随 ``in_channels`` 变化（chestmnist=1, cifar10/cifar100=3）。若把
+    两种数据集的密钥矩阵放进同一目录，后生成的会覆盖先生成的，
+    导致先前的实验无法复现。
+
+    约定
+    ----
+      - ``chestmnist`` 是主实验数据集，使用不带后缀的基础目录
+        （``save/key_matrix`` / ``save/key_matrix_collusion``），
+        与历史产物保持一致；
+      - 其他数据集带 ``_<dataset>`` 后缀。
+
+    Args:
+        profile: ``'default'``（传统水印基线）或 ``'collusion'``（抗合谋）。
+        dataset: 数据集名。
+
+    Returns:
+        相对目录（形如 ``save/key_matrix_collusion_cifar10``）。
+    """
+    dataset = (dataset or '').lower()
+    base = 'key_matrix_collusion' if profile == 'collusion' else 'key_matrix'
+    if dataset and dataset != 'chestmnist':
+        base = f'{base}_{dataset}'
+    return f'save/{base}'
 
 
 def _explicit_cli_options(parser) -> set:
@@ -302,6 +359,12 @@ def _resolve_collusion_spec(args) -> None:
     )
 
     try:
+        # 配置表路径：未显式指定时按数据集自动推导
+        # （与 default_key_matrix_dir 同一套规则，保证目录与配置表配套）
+        if args.collusion_size_configs is None:
+            args.collusion_size_configs = default_collusion_presets_path(
+                args.dataset)
+
         spec, presets = resolve_collusion_spec(
             args.collusion_size, args.model_name, args.collusion_size_configs)
 
@@ -319,11 +382,12 @@ def _resolve_collusion_spec(args) -> None:
                 f"   (K={spec.size}, model_name={spec.model_name}, "
                 f"client_num={spec.client_num})\n"
                 f"   请先生成（--dataset 必须与评测用的数据集一致，"
-                f"因为 conv 层形状随 in_channels 变化）:\n"
+                f"因为 conv 层形状随 in_channels 变化；"
+                f"--save_dir 会按 profile + dataset 自动推导，不用手填）:\n"
                 f"     python train_key_matrix.py --model_type "
                 f"{spec.model_name} --client_num {spec.client_num} \\\n"
                 f"         --profile collusion --collusion_K {spec.design_K} "
-                f"--dataset <dataset>")
+                f"--dataset {args.dataset}")
 
         # 校验布局与配置表一致
         layout = None
@@ -562,13 +626,12 @@ def parser_args():
         print('🔒 抗合谋评测模式：已关闭单客户端泄漏仿真与追踪，'
               '开启合谋检测，已自动开启水印区域冻结')
 
-    # 密钥矩阵目录：优先 --key_matrix_dir，否则按 profile 决定
-    # 不同实验分支用互不干扰的目录，避免切换分支时
+    # 密钥矩阵目录：优先 --key_matrix_dir，否则按 profile + dataset 决定
+    # 不同实验分支/数据集用互不干扰的目录，避免切换时
     # key_matrix 与 witness_layout 不匹配（save/ 未纳入 git 版本管理）。
     if args.key_matrix_dir is None:
-        args.key_matrix_dir = ('save/key_matrix_collusion'
-                               if args.key_matrix_profile == 'collusion'
-                               else 'save/key_matrix')
+        args.key_matrix_dir = default_key_matrix_dir(
+            args.key_matrix_profile, args.dataset)
 
     # 先按 profile + 命令行参数推导一个"默认"路径；抗合谋模式下
     # 下面的配置表解析会用更精确的规格覆盖它。
