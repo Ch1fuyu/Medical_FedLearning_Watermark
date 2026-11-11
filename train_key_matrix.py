@@ -284,12 +284,34 @@ class KeyMatrixGenerator:
         return key_matrix
     
     def save_key_matrices(self, key_matrices, position_dict, save_dir, model_type, client_num,
-                          witness_layout=None):
+                          witness_layout=None, dataset=None):
         """保存密钥矩阵到文件"""
         # 创建新的目录结构: save_dir/model_type/client{client_num}/
         model_dir = os.path.join(save_dir, model_type)
         client_dir = os.path.join(model_dir, f'client{client_num}')
         os.makedirs(client_dir, exist_ok=True)
+
+        # ---- 覆盖检测 ----
+        # 密钥矩阵目录不含数据集维度（<base>/<model>/client<N>），而卷积层
+        # 形状随 in_channels 变化，因此 chestmnist 与 cifar10/cifar100
+        # 会**共用同一目录**。若用另一个数据集覆盖，会导致原来那套
+        # 实验的密钥矩阵失效。此处提前告警。
+        info_path = os.path.join(client_dir, 'key_matrix_info.json')
+        if dataset and os.path.exists(info_path):
+            try:
+                with open(info_path, 'r', encoding='utf-8') as f:
+                    old_info = json.load(f)
+                old_ds = old_info.get('dataset')
+                if old_ds and old_ds != dataset:
+                    print(f'⚠️  警告：密钥矩阵目录已被另一个数据集占用:')
+                    print(f'     目录: {client_dir}')
+                    print(f'     原有数据集: {old_ds} -> 本次: {dataset}')
+                    print(f'     卷积层形状随 in_channels 变化，两者不兼容；'
+                          f'本次生成会覆盖原有密钥矩阵。')
+                    print(f'     若需同时保留两种数据集，请为其中一种指定不同的 '
+                          f'--save_dir。')
+            except Exception:  # noqa: BLE001
+                pass
 
         # 保存每个客户端的密钥矩阵
         for client_id, key_matrix in key_matrices.items():
@@ -324,6 +346,12 @@ class KeyMatrixGenerator:
             'created_time': datetime.now().isoformat(),
             'seed': self.seed,
             'enable_witness': witness_layout is not None,
+            # 生成时使用的数据集（用于跨数据集覆盖检测）
+            'dataset': dataset,
+            # 模型结构指纹：用于检测"密钥矩阵与实际模型不匹配"。
+            # 卷积层形状随 in_channels 变化（chestmnist=1, cifar10=3），
+            # 因此换数据集时必须重新生成密钥矩阵。
+            'model_signature': self._model_signature(),
         }
         if witness_layout is not None:
             info['collusion_K'] = witness_layout.design.K
@@ -338,6 +366,19 @@ class KeyMatrixGenerator:
 
         print(f"密钥矩阵已保存到: {client_dir}")
         return info_path
+
+    def _model_signature(self) -> dict:
+        """提取模型结构指纹（卷积层名称 -> 形状）。
+
+        卷积层形状随 ``in_channels`` 变化，因此指纹可用于判断
+        "当前密钥矩阵是不是为这个模型结构生成的"。
+        """
+        sig = {}
+        for name, param in self.model.named_parameters():
+            if 'conv' in name.lower() and 'weight' in name.lower() \
+                    and len(param.shape) == 4:
+                sig[name] = list(param.shape)
+        return sig
 
 def load_key_matrix(save_dir, client_id):
     """加载指定客户端的密钥矩阵"""
@@ -376,11 +417,13 @@ def _cross_check_presets(client_num: int, model_type: str, design_K: int):
         return
 
     conflicts = []
-    for size, spec in sorted(presets.items()):
-        if (spec.client_num == client_num
-                and spec.model_name == model_type):
-            if spec.design_K is not None and spec.design_K != design_K:
-                conflicts.append((size, spec.design_K))
+    matched = []
+    for (size, mname), spec in sorted(presets.items()):
+        if spec.client_num != client_num or mname != model_type:
+            continue
+        matched.append(size)
+        if spec.design_K is not None and spec.design_K != design_K:
+            conflicts.append((size, spec.design_K))
 
     if conflicts:
         ks = ', '.join(f"K={k}(配置表 design_K={v})" for k, v in conflicts)
@@ -388,12 +431,10 @@ def _cross_check_presets(client_num: int, model_type: str, design_K: int):
               f'实际生成的是 design_K={design_K}。')
         print(f'   请同步更新 config/collusion_presets.json 中对应条目的 '
               f'design_K 为 {design_K}（或删掉该字段以跳过一致性校验）。')
-    else:
-        matched = [k for k, s in presets.items()
-                   if s.client_num == client_num and s.model_name == model_type]
-        if matched:
-            print(f'ℹ️  抗合谋配置表已同步 (K={sorted(matched)}, '
-                  f'design_K={design_K})')
+    elif matched:
+        print(f'ℹ️  抗合谋配置表已同步 '
+              f'(K={matched}, client_num={client_num}, '
+              f'model_name={model_type}, design_K={design_K})')
 
 
 def main():
@@ -534,7 +575,8 @@ def main():
     info_path = generator.save_key_matrices(key_matrices, position_dict,
                                             args.save_dir, args.model_type,
                                             args.client_num,
-                                            witness_layout=witness_layout)
+                                            witness_layout=witness_layout,
+                                            dataset=args.dataset)
 
     # 与抗合谋配置表交叉校验：配置表里若声明了该 (client_num, model_name)
     # 的 design_K，且与本次生成的布局不一致，提示同步更新配置表。

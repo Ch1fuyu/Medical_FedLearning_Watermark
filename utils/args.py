@@ -17,14 +17,129 @@ class ArgConfigError(SystemExit):
         super().__init__(f"\n❌ 配置错误：{message}\n")
 
 
+def _check_model_compatibility(args, spec) -> None:
+    """校验密钥矩阵与本次实验的模型结构是否匹配。
+
+    **为什么必须校验**：卷积层形状随 ``in_channels`` 变化
+    （chestmnist=1, cifar10/cifar100=3），而密钥矩阵里的位置索引是
+    按具体形状生成的。若用 chestmnist 生成的密钥矩阵跑 CIFAR10，
+    第一层卷积的形状对不上，水印会嵌入到错误的位置或直接被跳过。
+
+    判定依据（按可靠性排序）：
+      1. 直接比较 ``client_0/key_matrix.pth`` 里各卷积张量的形状与
+         当前模型同名参数是否一致——这是**最准确**的依据，因为
+         这些张量就是水印掩码实际作用的对象；
+      2. 老版本没有 ``model_signature`` 字段时，退化为比较
+         ``key_matrix_info.json`` 里的卷积参数量。
+
+    注意：**不比较总参数量**。总参数量含分类层（FC），而 FC 的形状
+    随 ``num_classes`` 变化却与水印位置无关（密钥矩阵只覆盖卷积层），
+    用总参数量判断会产生误报。
+
+    不匹配时直接退出并说明如何重新生成。
+    """
+    import json
+
+    info_path = os.path.join(args.key_matrix_path, 'key_matrix_info.json')
+    if not os.path.exists(info_path):
+        return  # 目录不存在的情况已由调用方报错
+
+    try:
+        with open(info_path, 'r', encoding='utf-8') as f:
+            info = json.load(f)
+    except Exception:  # noqa: BLE001
+        return
+
+    # 当前实验的模型
+    try:
+        from models.alexnet import AlexNet
+        from models.resnet import resnet18
+        if args.model_name == 'resnet':
+            model = resnet18(num_classes=args.num_classes,
+                             in_channels=args.in_channels,
+                             input_size=args.input_size)
+        else:
+            model = AlexNet(args.in_channels, args.num_classes,
+                            input_size=args.input_size,
+                            dropout_rate=getattr(args, 'dropout_rate', 0.5))
+        named = dict(model.named_parameters())
+    except Exception:  # noqa: BLE001
+        return
+
+    # ---- 依据 1：直接比较 key_matrix.pth 里的卷积张量形状 ----
+    km_path = os.path.join(args.key_matrix_path, 'client_0', 'key_matrix.pth')
+    if os.path.exists(km_path):
+        try:
+            import torch
+            km = torch.load(km_path, map_location='cpu', weights_only=False)
+            diffs = []
+            for name, tensor in km.items():
+                if name not in named:
+                    continue
+                if tuple(named[name].shape) != tuple(tensor.shape):
+                    diffs.append((name, tuple(tensor.shape),
+                                  tuple(named[name].shape)))
+            if diffs:
+                raise ArgConfigError(
+                    f"密钥矩阵与本次实验的模型结构不匹配:\n"
+                    f"   密钥矩阵目录: {args.key_matrix_path}\n"
+                    f"   该目录的卷积层形状是按另一个 in_channels 生成的\n"
+                    f"   本次实验: {args.model_name} + in_channels="
+                    f"{args.in_channels} (dataset={args.dataset})\n"
+                    f"   形状差异: {diffs[:3]}\n"
+                    f"   处理方式: 为本次实验重新生成密钥矩阵\n"
+                    f"     python train_key_matrix.py --model_type "
+                    f"{args.model_name} \\\n"
+                    f"         --client_num {spec.client_num} --profile "
+                    f"collusion \\\n"
+                    f"         --collusion_K {spec.design_K} "
+                    f"--dataset {args.dataset}")
+            return
+        except ArgConfigError:
+            raise
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ---- 依据 2：model_signature（新版生成器写入）----
+    saved_sig = info.get('model_signature')
+    if saved_sig:
+        current_sig = {
+            name: list(param.shape)
+            for name, param in named.items()
+            if 'conv' in name.lower() and 'weight' in name.lower()
+            and len(param.shape) == 4
+        }
+        if saved_sig != current_sig:
+            diff = [(n, saved_sig.get(n), c)
+                    for n, c in current_sig.items() if saved_sig.get(n) != c]
+            raise ArgConfigError(
+                f"密钥矩阵与本次实验的模型结构不匹配:\n"
+                f"   密钥矩阵目录: {args.key_matrix_path}\n"
+                f"   本次实验: {args.model_name} + in_channels={args.in_channels} "
+                f"(dataset={args.dataset})\n"
+                f"   形状差异: {diff[:3]}\n"
+                f"   处理方式: 为本次实验重新生成密钥矩阵\n"
+                f"     python train_key_matrix.py --model_type {args.model_name} \\\n"
+                f"         --client_num {spec.client_num} --profile collusion \\\n"
+                f"         --collusion_K {spec.design_K} --dataset {args.dataset}")
+        return
+
+    # ---- 依据 3（最弱）：旧版本无签名信息，跳过校验 ----
+    # 无法在不加载 key_matrix.pth 的情况下判断，而上面的依据 1 已经
+    # 覆盖了这种情况（旧目录同样有 key_matrix.pth）。
+
+
 def _resolve_collusion_spec(args) -> None:
-    """按合谋规模从配置表解析密钥矩阵规格，并写回 args。
+    """按 (合谋规模 K, 模型类型) 从配置表解析密钥矩阵规格，并写回 args。
 
     行为：
       - 加载抗合谋配置表（``--collusion_size_configs`` 或默认路径）；
-      - 按 ``args.collusion_size`` 取规格；
-      - 用规格里的 ``client_num`` / ``model_name`` 定位密钥矩阵目录；
-      - 校验磁盘上的见证点布局与配置表声明一致（design.K、布局版本）。
+      - 按 ``(args.collusion_size, args.model_name)`` 取规格；
+      - 用规格里的 ``client_num`` 定位密钥矩阵目录；
+      - 校验磁盘上的见证点布局与配置表声明一致（design.K、布局存在性）。
+
+    注意：**不覆盖** ``args.model_name``——模型类型是本次实验的显式选择，
+    配置表只是"该 (K, 模型) 用哪套密钥矩阵"的映射表。
 
     任何一步失败都会抛出 :class:`ArgConfigError` 直接终止运行。
     """
@@ -32,16 +147,16 @@ def _resolve_collusion_spec(args) -> None:
         CollusionPresetError,
         resolve_collusion_spec,
         resolve_key_matrix_path,
+        validate_dataset,
         validate_layout,
     )
 
     try:
         spec, presets = resolve_collusion_spec(
-            args.collusion_size, args.collusion_size_configs)
+            args.collusion_size, args.model_name, args.collusion_size_configs)
 
-        # 用配置表里的规格覆盖命令行参数（配置表是权威来源）
+        # 用配置表里的规格覆盖客户端数（配置表是权威来源）
         args.client_num = spec.client_num
-        args.model_name = spec.model_name
         args.collusion_K = spec.design_K
         args.collusion_spec = spec
         args.collusion_presets = presets
@@ -51,11 +166,14 @@ def _resolve_collusion_spec(args) -> None:
         if not os.path.isdir(args.key_matrix_path):
             raise CollusionPresetError(
                 f"配置表指定的密钥矩阵目录不存在: {args.key_matrix_path}\n"
-                f"   (K={spec.size}, client_num={spec.client_num}, "
-                f"model_name={spec.model_name})\n"
-                f"   请先生成: python train_key_matrix.py --model_type "
+                f"   (K={spec.size}, model_name={spec.model_name}, "
+                f"client_num={spec.client_num})\n"
+                f"   请先生成（--dataset 必须与评测用的数据集一致，"
+                f"因为 conv 层形状随 in_channels 变化）:\n"
+                f"     python train_key_matrix.py --model_type "
                 f"{spec.model_name} --client_num {spec.client_num} \\\n"
-                f"       --profile collusion --collusion_K {spec.design_K}")
+                f"         --profile collusion --collusion_K {spec.design_K} "
+                f"--dataset <dataset>")
 
         # 校验布局与配置表一致
         layout = None
@@ -69,9 +187,39 @@ def _resolve_collusion_spec(args) -> None:
                 f"见证点布局加载失败 ({args.key_matrix_path}): {e}") from e
         warning = validate_layout(layout, spec)
 
+        # 校验密钥矩阵生成时用的数据集与配置表声明一致
+        # （密钥矩阵目录不含数据集维度，chestmnist 与 cifar10 会共用）
+        validate_dataset(spec, args.key_matrix_path)
+
+        # 校验配置表声明的数据集与本次实验是否一致
+        # （密钥矩阵目录不含数据集维度，一套目录只能对应一个数据集）
+        if spec.dataset and args.dataset and spec.dataset != args.dataset:
+            raise CollusionPresetError(
+                f"配置表声明的数据集与本次实验不一致:\n"
+                f"   配置表条目 (K={spec.size}, {spec.model_name}) 声明 "
+                f"dataset={spec.dataset}\n"
+                f"   本次实验: dataset={args.dataset}\n"
+                f"   原因: 密钥矩阵目录 <base>/<model>/client<N> 不含数据集维度，"
+                f"而卷积层形状随 in_channels 变化 "
+                f"(chestmnist=1, cifar10/cifar100=3)，两者不能混用。\n"
+                f"   处理方式（二选一）:\n"
+                f"     1) 把本次实验的数据集改成 {spec.dataset};\n"
+                f"     2) 为 {args.dataset} 单独准备密钥矩阵目录与配置表，"
+                f"并用 --key_matrix_dir + --collusion_size_configs 指定:\n"
+                f"        python train_key_matrix.py --model_type "
+                f"{spec.model_name} --client_num {spec.client_num} \\\n"
+                f"            --profile collusion --collusion_K "
+                f"{spec.design_K} --dataset {args.dataset} \\\n"
+                f"            --save_dir save/key_matrix_collusion_{args.dataset}")
+
+        # 校验密钥矩阵与本次实验的模型结构是否匹配
+        # （卷积层形状随 in_channels 变化：chestmnist=1, cifar10=3）
+        _check_model_compatibility(args, spec)
+
         cap = spec.search_cap
-        print(f'📋 抗合谋配置: K={spec.size} -> client_num={spec.client_num}, '
-              f'model_name={spec.model_name}, '
+        print(f'📋 抗合谋配置: K={spec.size}, model={spec.model_name} -> '
+              f'client_num={spec.client_num}, '
+              f'dataset={spec.dataset or args.dataset}, '
               f'design_K={spec.design_K} '
               f'(归因搜索上限 {cap if cap is not None else "自适应"})')
         print(f'✅ 找到密钥矩阵目录: {args.key_matrix_path}')
@@ -174,11 +322,11 @@ def parser_args():
                         help='number of colluding clients to simulate (>=2)')
     parser.add_argument('--collusion_size_configs', type=str, default=None,
                         help='抗合谋评测配置表 (JSON 字符串或文件路径)。'
-                             '把"合谋规模 -> 密钥矩阵规格"做成显式配置，'
+                             '把"合谋规模 K + 模型类型 -> 密钥矩阵规格"做成显式配置，'
                              '运行 main.py 时据此自动定位密钥矩阵目录; '
                              '若该配置缺失或不合规则直接退出并说明原因。'
-                             '格式: {"K": {"client_num": 10, "model_name": "resnet", '
-                             '"design_K": 3}, ...}')
+                             '格式: {"<K>": {"<model_name>": {"client_num": 10, '
+                             '"design_K": 3}, ...}, ...}')
     parser.add_argument('--collusion_leak_stage', type=str, default='pre_training',
                         choices=['pre_training', 'post_training'],
                         help='collusion stage: average customized models (pre) or trained models (post)')
@@ -243,7 +391,11 @@ def parser_args():
         args.disable_single_client_leak = True
         args.enable_source_tracing = False
         args.enable_collusion_detection = True
-        if args.key_matrix_dir is None and args.key_matrix_profile == 'default':
+        # 显式指定 --key_matrix_dir 时，仍需切到 collusion profile：
+        # profile 决定"是否启用见证点"，而不是目录名。若不切，
+        # 见证点会被禁用，抗合谋归因无从谈起。
+        # （目录本身用显式传入的值，不被覆盖。）
+        if args.key_matrix_profile == 'default':
             args.key_matrix_profile = 'collusion'
         # 抗合谋分支必须冻结水印区域（含见证点），否则：
         #   - 任务梯度 / DP 噪声会把见证点冲掉，信号在若干轮后消失；
@@ -279,13 +431,13 @@ def parser_args():
     # ========================= 抗合谋配置表联动 =========================
     # 抗合谋模式下，"合谋规模 K -> 密钥矩阵规格"由显式配置表决定
     # （默认 config/collusion_presets.json）。这样可以：
-    #   1. 自动定位密钥矩阵目录（不需要手工对齐 --client_num/--model_name）；
+    #   1. 自动定位密钥矩阵目录（不需要手工对齐 --client_num）；
     #   2. 保证 design.K 与 K 匹配（否则归因会静默失败）；
     #   3. 配置缺失或不合法时**直接退出并说明**，而不是跑出错结果。
     #
     # 注意放在"分支隔离"之后：只有 collusion 分支才需要见证点布局。
-    if args.key_matrix_profile == 'collusion' and args.enable_collusion_detection:
-        _resolve_collusion_spec(args)
+    # 真正的调用点在下方（数据集预设生效之后），因为模型兼容性校验
+    # 需要知道 in_channels / input_size。
 
     # ========================= 见证点密钥 =========================
     # 支持从文件读取密钥（避免密钥出现在命令行历史 / 进程列表中）。
@@ -312,15 +464,8 @@ def parser_args():
         except Exception as e:
             print(f'⚠️  见证点密钥初始化失败: {e}')
 
-    # 密钥矩阵目录：抗合谋模式已由配置表解析出精确路径（args.key_matrix_path），
-    # 这里不要覆盖它；其余情况按 profile 推导。
-    if not os.path.exists(args.key_matrix_path):
-        print(f'⚠️  警告: 密钥矩阵目录不存在: {args.key_matrix_path}')
-        print(f'   请先运行: python train_key_matrix.py --model_type {args.model_name} '
-              f'--client_num {args.client_num} --profile {args.key_matrix_profile}')
-        args.key_matrix_path = args.key_matrix_dir
-    else:
-        print(f'✅ 找到密钥矩阵目录: {args.key_matrix_path}')
+    # 密钥矩阵目录检查放在下方（数据集预设生效、抗合谋配置解析之后），
+    # 因为抗合谋模式下的精确路径由配置表决定。
 
     DATASET_PRESETS: Dict[str, Dict[str, Any]] = {
         'chestmnist': {
@@ -431,6 +576,24 @@ def parser_args():
         args.metrics = ['loss']
 
     _apply_simple_overrides(args, args.override)
+
+    # ========================= 抗合谋配置表联动 =========================
+    # 放在**数据集预设生效之后**：模型兼容性校验需要知道
+    # in_channels / input_size（卷积层形状随 in_channels 变化，
+    # chestmnist=1 而 cifar10/cifar100=3）。
+    if args.key_matrix_profile == 'collusion' and args.enable_collusion_detection:
+        _resolve_collusion_spec(args)
+
+    # 密钥矩阵目录存在性检查：抗合谋模式已由配置表解析出精确路径，
+    # 这里不要覆盖它；其余情况按 profile 推导。
+    if not os.path.exists(args.key_matrix_path):
+        print(f'⚠️  警告: 密钥矩阵目录不存在: {args.key_matrix_path}')
+        print(f'   请先运行: python train_key_matrix.py --model_type {args.model_name} '
+              f'--client_num {args.client_num} --profile {args.key_matrix_profile} '
+              f'--dataset {args.dataset}')
+        args.key_matrix_path = args.key_matrix_dir
+    else:
+        print(f'✅ 找到密钥矩阵目录: {args.key_matrix_path}')
 
     if args.baseline_mode:
         args.enable_watermark = False
