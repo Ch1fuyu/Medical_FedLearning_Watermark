@@ -359,6 +359,43 @@ def load_key_matrix_info(save_dir):
     with open(info_path, 'r') as f:
         return json.load(f)
 
+def _cross_check_presets(client_num: int, model_type: str, design_K: int):
+    """与抗合谋配置表交叉校验 design_K 是否一致。
+
+    配置表（``config/collusion_presets.json``）里若声明了该
+    ``(client_num, model_name)`` 的 design_K，且与本次生成的布局不一致，
+    则提示同步更新配置表——否则 main.py 会在启动时报"配置已过期"。
+
+    该检查是**提示性**的，不阻断生成流程。
+    """
+    try:
+        from utils.collusion_presets import load_presets
+        presets = load_presets()
+    except Exception as e:  # noqa: BLE001
+        print(f'ℹ️  跳过抗合谋配置表交叉校验（配置表不可用: {e}）')
+        return
+
+    conflicts = []
+    for size, spec in sorted(presets.items()):
+        if (spec.client_num == client_num
+                and spec.model_name == model_type):
+            if spec.design_K is not None and spec.design_K != design_K:
+                conflicts.append((size, spec.design_K))
+
+    if conflicts:
+        ks = ', '.join(f"K={k}(配置表 design_K={v})" for k, v in conflicts)
+        print(f'⚠️  抗合谋配置表与本次生成的布局 design_K 不一致: {ks}，'
+              f'实际生成的是 design_K={design_K}。')
+        print(f'   请同步更新 config/collusion_presets.json 中对应条目的 '
+              f'design_K 为 {design_K}（或删掉该字段以跳过一致性校验）。')
+    else:
+        matched = [k for k, s in presets.items()
+                   if s.client_num == client_num and s.model_name == model_type]
+        if matched:
+            print(f'ℹ️  抗合谋配置表已同步 (K={sorted(matched)}, '
+                  f'design_K={design_K})')
+
+
 def main():
     parser = argparse.ArgumentParser(description='生成联邦学习密钥矩阵')
     parser.add_argument('--model_type', type=str, default='resnet', 
@@ -378,7 +415,11 @@ def main():
                                'cifar10', 'cifar100', 'imagenet'],
                        help='数据集类型')
     parser.add_argument('--collusion_K', type=int, default=3,
-                       help='抗合谋设计抵抗的最大合谋规模（见证点设计用）')
+                       help='抗合谋设计抵抗的最大合谋规模（见证点设计用）。'
+                            '注意：见证点设计的实质参数（v/k/G/关联矩阵）只取决于 '
+                            '--client_num，与本值无关；本值只是"设计容量"标注，'
+                            '会写入 key_matrix_info.json 与 witness_layout.json。'
+                            '评测用的 K -> 规格映射见 config/collusion_presets.json')
     parser.add_argument('--disable_witness', action='store_true',
                        help='禁用见证点布局（只生成传统的独占切片水印）')
     parser.add_argument('--witness_secret', type=str, default=None,
@@ -494,7 +535,13 @@ def main():
                                             args.save_dir, args.model_type,
                                             args.client_num,
                                             witness_layout=witness_layout)
-    
+
+    # 与抗合谋配置表交叉校验：配置表里若声明了该 (client_num, model_name)
+    # 的 design_K，且与本次生成的布局不一致，提示同步更新配置表。
+    if args.profile == 'collusion' and witness_layout is not None:
+        _cross_check_presets(args.client_num, args.model_type,
+                             witness_layout.design.K)
+
     # 显示统计信息
     print("\n=== 密钥矩阵生成完成 ===")
     print(f"保存目录: {args.save_dir}")

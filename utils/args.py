@@ -1,5 +1,85 @@
 import argparse
+import os
+import sys
 from typing import Dict, Any
+
+
+class ArgConfigError(SystemExit):
+    """参数配置不合法。
+
+    继承 ``SystemExit``，因此在 ``parser_args()`` 里抛出后，
+    Python 会以非零退出码结束程序并打印消息——这正是"配置不对就
+    直接退出并说明"所需要的语义（而不是抛一个没人处理的异常，
+    或者带着错误配置继续跑出一堆无效结果）。
+    """
+
+    def __init__(self, message: str):
+        super().__init__(f"\n❌ 配置错误：{message}\n")
+
+
+def _resolve_collusion_spec(args) -> None:
+    """按合谋规模从配置表解析密钥矩阵规格，并写回 args。
+
+    行为：
+      - 加载抗合谋配置表（``--collusion_size_configs`` 或默认路径）；
+      - 按 ``args.collusion_size`` 取规格；
+      - 用规格里的 ``client_num`` / ``model_name`` 定位密钥矩阵目录；
+      - 校验磁盘上的见证点布局与配置表声明一致（design.K、布局版本）。
+
+    任何一步失败都会抛出 :class:`ArgConfigError` 直接终止运行。
+    """
+    from .collusion_presets import (
+        CollusionPresetError,
+        resolve_collusion_spec,
+        resolve_key_matrix_path,
+        validate_layout,
+    )
+
+    try:
+        spec, presets = resolve_collusion_spec(
+            args.collusion_size, args.collusion_size_configs)
+
+        # 用配置表里的规格覆盖命令行参数（配置表是权威来源）
+        args.client_num = spec.client_num
+        args.model_name = spec.model_name
+        args.collusion_K = spec.design_K
+        args.collusion_spec = spec
+        args.collusion_presets = presets
+
+        # 定位密钥矩阵目录
+        args.key_matrix_path = resolve_key_matrix_path(args.key_matrix_dir, spec)
+        if not os.path.isdir(args.key_matrix_path):
+            raise CollusionPresetError(
+                f"配置表指定的密钥矩阵目录不存在: {args.key_matrix_path}\n"
+                f"   (K={spec.size}, client_num={spec.client_num}, "
+                f"model_name={spec.model_name})\n"
+                f"   请先生成: python train_key_matrix.py --model_type "
+                f"{spec.model_name} --client_num {spec.client_num} \\\n"
+                f"       --profile collusion --collusion_K {spec.design_K}")
+
+        # 校验布局与配置表一致
+        layout = None
+        try:
+            from .collusion_resistant import find_witness_layout, load_witness_layout
+            layout_path = find_witness_layout(args.key_matrix_path)
+            if layout_path:
+                layout = load_witness_layout(layout_path)
+        except Exception as e:  # noqa: BLE001
+            raise CollusionPresetError(
+                f"见证点布局加载失败 ({args.key_matrix_path}): {e}") from e
+        warning = validate_layout(layout, spec)
+
+        cap = spec.search_cap
+        print(f'📋 抗合谋配置: K={spec.size} -> client_num={spec.client_num}, '
+              f'model_name={spec.model_name}, '
+              f'design_K={spec.design_K} '
+              f'(归因搜索上限 {cap if cap is not None else "自适应"})')
+        print(f'✅ 找到密钥矩阵目录: {args.key_matrix_path}')
+        if warning:
+            print(f'⚠️  {warning}')
+
+    except CollusionPresetError as e:
+        raise ArgConfigError(str(e)) from e
 
 
 def parser_args():
@@ -86,11 +166,19 @@ def parser_args():
     parser.add_argument('--no_enable_witness', action='store_false', dest='enable_witness',
                         help='disable witness point watermark (fall back to exclusive-slice watermark only)')
     parser.add_argument('--collusion_K', type=int, default=2,
-                        help='maximum collusion size the witness design resists')
+                        help='maximum collusion size the witness design resists '
+                             '(设计容量; 实际生效的是 witness_layout.json 中的 design.K)')
     parser.add_argument('--enable_collusion_detection', action='store_true', default=False,
                         help='enable collusion attribution: identify which K clients colluded')
     parser.add_argument('--collusion_size', type=int, default=2,
                         help='number of colluding clients to simulate (>=2)')
+    parser.add_argument('--collusion_size_configs', type=str, default=None,
+                        help='抗合谋评测配置表 (JSON 字符串或文件路径)。'
+                             '把"合谋规模 -> 密钥矩阵规格"做成显式配置，'
+                             '运行 main.py 时据此自动定位密钥矩阵目录; '
+                             '若该配置缺失或不合规则直接退出并说明原因。'
+                             '格式: {"K": {"client_num": 10, "model_name": "resnet", '
+                             '"design_K": 3}, ...}')
     parser.add_argument('--collusion_leak_stage', type=str, default='pre_training',
                         choices=['pre_training', 'post_training'],
                         help='collusion stage: average customized models (pre) or trained models (post)')
@@ -172,6 +260,12 @@ def parser_args():
                                if args.key_matrix_profile == 'collusion'
                                else 'save/key_matrix')
 
+    # 先按 profile + 命令行参数推导一个"默认"路径；抗合谋模式下
+    # 下面的配置表解析会用更精确的规格覆盖它。
+    args.key_matrix_path = get_key_matrix_path(args.key_matrix_dir,
+                                                args.model_name,
+                                                args.client_num)
+
     # ========================= 分支隔离：见证点只属于抗合谋分支 =========================
     # 见证点（抗合谋水印）只在 key_matrix_profile == 'collusion' 时启用。
     # 默认分支（传统水印基线）完全不使用见证点：既不嵌入、也不冻结。
@@ -181,6 +275,17 @@ def parser_args():
             print('ℹ️  默认分支（传统水印基线）不启用见证点水印；'
                   '抗合谋分支请用 --collusion_only 或 --key_matrix_profile collusion')
         args.enable_witness = False
+
+    # ========================= 抗合谋配置表联动 =========================
+    # 抗合谋模式下，"合谋规模 K -> 密钥矩阵规格"由显式配置表决定
+    # （默认 config/collusion_presets.json）。这样可以：
+    #   1. 自动定位密钥矩阵目录（不需要手工对齐 --client_num/--model_name）；
+    #   2. 保证 design.K 与 K 匹配（否则归因会静默失败）；
+    #   3. 配置缺失或不合法时**直接退出并说明**，而不是跑出错结果。
+    #
+    # 注意放在"分支隔离"之后：只有 collusion 分支才需要见证点布局。
+    if args.key_matrix_profile == 'collusion' and args.enable_collusion_detection:
+        _resolve_collusion_spec(args)
 
     # ========================= 见证点密钥 =========================
     # 支持从文件读取密钥（避免密钥出现在命令行历史 / 进程列表中）。
@@ -207,8 +312,8 @@ def parser_args():
         except Exception as e:
             print(f'⚠️  见证点密钥初始化失败: {e}')
 
-    args.key_matrix_path = get_key_matrix_path(args.key_matrix_dir, args.model_name, args.client_num)
-
+    # 密钥矩阵目录：抗合谋模式已由配置表解析出精确路径（args.key_matrix_path），
+    # 这里不要覆盖它；其余情况按 profile 推导。
     if not os.path.exists(args.key_matrix_path):
         print(f'⚠️  警告: 密钥矩阵目录不存在: {args.key_matrix_path}')
         print(f'   请先运行: python train_key_matrix.py --model_type {args.model_name} '

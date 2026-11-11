@@ -205,6 +205,13 @@ class FederatedLearningOnChestMNIST(Experiment):
             logging.info(f'    合谋规模 K={getattr(self.args, "collusion_size", 2)}'
                          f' | 阶段={getattr(self.args, "collusion_leak_stage", "?")}'
                          f' | 攻击={getattr(self.args, "collusion_attack_mode", "?")}')
+            spec = getattr(self.args, 'collusion_spec', None)
+            if spec is not None:
+                cap = spec.search_cap
+                logging.info(f'    抗合谋规格: client_num={spec.client_num}'
+                             f' | model_name={spec.model_name}'
+                             f' | design_K={spec.design_K}'
+                             f' | 搜索上限={cap if cap is not None else "自适应"}')
         logging.info(f'    密钥矩阵: {getattr(self.args, "key_matrix_path", "?")}')
         logging.info('=' * 60)
 
@@ -1452,6 +1459,47 @@ class FederatedLearningOnChestMNIST(Experiment):
             logging.warning(f'[见证点] 嵌入失败 (client={client_id}): {e}')
             return False
 
+    def _collusion_search_cap(self, layout):
+        """归因搜索的合谋规模上界。
+
+        规则：``cap = design.K + SEARCH_MARGIN``，其中 ``SEARCH_MARGIN``
+        由抗合谋配置表统一约定（``utils.collusion_presets``），保证
+        "配置表声明的 design_K"与"运行时真正搜索的范围"一致。
+
+        额外兜底：若抗合谋配置表里声明了当前合谋规模 K，而布局的
+        design.K 偏小导致上界覆盖不了 K，则**直接按 K 放宽**——
+        否则真解不在搜索空间内，归因会静默失败（输出空列表），
+        很容易被误读成"方案缺陷"。配置表本身在 args 阶段已校验过
+        design_K >= K - SEARCH_MARGIN，这里只是防御性兜底。
+
+        Args:
+            layout: 已加载的 WitnessLayout。
+
+        Returns:
+            搜索上界（int）。
+        """
+        from utils.collusion_presets import SEARCH_MARGIN
+
+        design_k = int(getattr(getattr(layout, 'design', None), 'K', 0) or 0)
+        cap = design_k + SEARCH_MARGIN
+
+        target = int(getattr(self.args, 'collusion_size', 0) or 0)
+        if target > cap:
+            # 见证点计数解码对任意 K <= 客户端数 都成立（代数精确解），
+            # 因此这里按实际合谋规模放宽搜索空间是**安全**的，
+            # 不会引入"真解不在搜索空间内 -> 静默失败"的风险。
+            logging.info(
+                f'[合谋检测] 布局 design.K={design_k} 推出的搜索上界 {cap} '
+                f'< 合谋规模 K={target}，已自动放宽到 {target}。')
+            cap = target
+
+        # 也不能超过客户端总数（再大也没有意义）
+        n_clients = int(getattr(self, 'client_num', 0) or 0)
+        if n_clients:
+            cap = min(cap, n_clients)
+
+        return max(1, cap)
+
     def _detect_colluders(self, leaked_model_state, client_models,
                           max_colluders=None, auto_size=True):
         """抗合谋归因：从泄漏模型中识别出合谋的客户端集合。
@@ -1510,8 +1558,12 @@ class FederatedLearningOnChestMNIST(Experiment):
             # ---- 合谋规模推断 ----
             # 优先用"计数域"的 V 形曲线（对噪声/漂移更鲁棒）；
             # 若布局是 v1 旧格式（无密钥派生值），回退到原始残差匹配。
+            #
+            # 搜索上限：design.K + 余量。余量由抗合谋配置表统一约定
+            # （utils.collusion_presets.SEARCH_MARGIN），确保"配置表声明的
+            # design_K"与"运行时真正搜索的范围"始终一致。
             if auto_size:
-                k_search_cap = max_colluders or layout.design.K + 2
+                k_search_cap = max_colluders or self._collusion_search_cap(layout)
                 est_k, _ = estimate_collusion_size_by_count(
                     leaked_np, layout, max_colluders=k_search_cap)
                 if est_k is None:
@@ -1521,7 +1573,7 @@ class FederatedLearningOnChestMNIST(Experiment):
                 diag['estimated_size'] = est_k
                 k_search = est_k
             else:
-                k_search = max_colluders or layout.design.K
+                k_search = max_colluders or self._collusion_search_cap(layout)
 
             # ---- 优先使用"见证点计数"解码（v2 推荐路径）----
             # 见证点区域被冻结且取值固定，因此可由泄漏模型直接反解

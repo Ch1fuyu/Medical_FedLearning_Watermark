@@ -1,0 +1,37 @@
+{
+  "_comment": [
+    "抗合谋评测配置表: 合谋规模 K -> 密钥矩阵规格。",
+    "",
+    "main.py 在抗合谋模式下(--collusion_only / --key_matrix_profile collusion)",
+    "会按 --collusion_size 在本表中查找 K 对应的规格, 并据此自动定位密钥矩阵目录:",
+    "    <key_matrix_dir>/<model_name>/client<client_num>",
+    "",
+    "字段说明:",
+    "  client_num : 该 K 评测使用的客户端数 (密钥矩阵必须与之匹配)",
+    "  model_name : 该 K 评测使用的模型类型 (resnet / alexnet)",
+    "  design_K   : 可选。见证点布局的设计容量标注。",
+    "              见证点设计的实质参数(v/k/G/关联矩阵A)只取决于 client_num,",
+    "              与 design_K 无关, 因此该字段仅用于配置一致性校验:",
+    "              若与磁盘上 witness_layout.json 的 design.K 不一致, 程序会退出并说明。",
+    "",
+    "新增 K 时的步骤:",
+    "  1. 在本表添加对应条目 (client_num / model_name 必填, design_K 可选);",
+    "  2. 若需新的 client_num, 先生成对应密钥矩阵:",
+    "     python train_key_matrix.py --model_type <model_name> \\",
+    "         --client_num <client_num> --profile collusion --collusion_K <design_K>",
+    "  3. 确认布局的 secret_id 与密钥文件一致 (save/keys/witness_secret_collusion.key)。",
+    "",
+    "注意: 见证点计数解码对任意 K <= client_num 都成立(代数精确解),",
+    "      因此即便布局 design.K 偏小, 运行时也会自动放宽搜索上界并告警, 不会静默失败。"
+  ],
+
+  "2": {"client_num": 10, "model_name": "resnet", "design_K": 3},
+  "3": {"client_num": 10, "model_name": "resnet", "design_K": 3},
+  "4": {"client_num": 10, "model_name": "resnet", "design_K": 3},
+  "5": {"client_num": 10, "model_name": "resnet", "design_K": 3},
+  "6": {"client_num": 10, "model_name": "resnet", "design_K": 3},
+  "7": {"client_num": 10, "model_name": "resnet", "design_K": 3},
+  "8": {"client_num": 10, "model_name": "resnet", "design_K": 3},
+  "9": {"client_num": 10, "model_name": "resnet", "design_K": 3},
+  "10": {"client_num": 10, "model_name": "resnet", "design_K": 3}
+}
