@@ -168,15 +168,26 @@ class TrainerPrivateEnhanced:
         self._key_manager = None
         
         # MultiLoss和掩码管理器
+        # 冻结模式下水印区域的梯度会被直接置零，capping 已无意义
+        self.freeze_watermark_region = bool(
+            args and getattr(args, 'freeze_watermark_region', False))
         self.multi_loss = MultiLoss(
             model=self.model,
-            target_ratio=getattr(self.args, 'watermark_grad_target_ratio', 0.3)
+            target_ratio=getattr(self.args, 'watermark_grad_target_ratio', 0.3),
+            enable_capping=not self.freeze_watermark_region,
         )
         # 初始化参数快照，便于后续观察漂移
         if hasattr(self.multi_loss, 'update_param_snapshot'):
             self.multi_loss.update_param_snapshot(self.model)
         self.mask_manager = None
         self.autoencoder = None
+
+        # ---- 水印区域冻结（可选）----
+        # 开启后：客户端自有水印区域 P_k 与抗合谋的见证点区域都不参与
+        # 参数更新，保证服务器下发的权威值被原封不动地带回。
+        # （freeze_watermark_region 已在上面初始化，用于关闭 capping）
+        self.watermark_freezer = None
+        self._wm_snapshot = None
 
         # 初始化FocalLoss，降低gamma避免过度关注困难样本，提升训练稳定性
         focal_gamma = 1.0  # 降低到1.0，更接近标准BCE
@@ -194,6 +205,20 @@ class TrainerPrivateEnhanced:
         if args and getattr(args, 'use_key_matrix', False):
             from utils.mask_utils import create_mask_manager
             self.mask_manager = create_mask_manager(model, args.key_matrix_path, args)
+
+        # 初始化水印冻结器（需要 key_matrix 目录；见证点布局为可选）
+        if self.freeze_watermark_region and args and getattr(args, 'key_matrix_path', None):
+            try:
+                from utils.watermark_freeze import WatermarkFreezer
+                self.watermark_freezer = WatermarkFreezer(
+                    model, args.key_matrix_path, args=args)
+                witness_note = (f", 见证点区域 {len(self.watermark_freezer.witness_positions())} 个位置"
+                                if self.watermark_freezer.has_witness
+                                else ", 未找到见证点布局（仅冻结 P_k）")
+                print(f"✅ 水印冻结已启用{witness_note}")
+            except Exception as e:
+                print(f"⚠️ 水印冻结初始化失败: {e}")
+                self.watermark_freezer = None
         
         # 初始化自编码器（如果使用增强水印模式）
         if args and getattr(args, 'watermark_mode', '') == 'enhanced':
@@ -387,6 +412,10 @@ class TrainerPrivateEnhanced:
 
         epoch_loss, epoch_acc = [], []
 
+        # 冻结模式：记录水印区域（含见证点）的初始值，作为训练后还原的基准
+        if self.watermark_freezer is not None:
+            self._wm_snapshot = self.watermark_freezer.snapshot(client_id)
+
         for epoch in range(local_ep):
             loss_meter = 0.0
             acc_meter = 0.0
@@ -422,9 +451,18 @@ class TrainerPrivateEnhanced:
                         skip_gradient_scaling=skip_gradient_scaling
                     )
                 
+                # 冻结模式：把水印区域（含见证点）的梯度置零
+                if self.watermark_freezer is not None:
+                    self.watermark_freezer.zero_grads(client_id)
+
                 # 梯度裁剪
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
+
+                # 冻结模式：把水印区域（含见证点）还原为初始值
+                # （抵消 weight decay / 动量 / DP 噪声等一切改动）
+                if self.watermark_freezer is not None and self._wm_snapshot:
+                    self.watermark_freezer.restore(self._wm_snapshot)
 
                 batch_acc = self._compute_accuracy(pred, y)
                 acc_meter += batch_acc.item() * x.size(0) / 100.0
@@ -457,6 +495,10 @@ class TrainerPrivateEnhanced:
         if self.dp:
             for param in self.model.parameters():
                 param.data = param.data + torch.normal(torch.zeros(param.size()), self.sigma).to(self.device)
+
+        # 冻结模式：DP 噪声会改动所有参数（含水印区域），必须在此之后还原
+        if self.watermark_freezer is not None and self._wm_snapshot:
+            self.watermark_freezer.restore(self._wm_snapshot)
 
         return self.model.state_dict(), np.mean(epoch_loss), np.mean(epoch_acc)
 

@@ -1317,6 +1317,10 @@ class FederatedLearningOnChestMNIST(Experiment):
         布局文件由 train_key_matrix.py 生成，位于 key_matrix 目录下：
             <key_matrix_path>/<model_type>/client<N>/witness_layout.json
 
+        **只有抗合谋分支（key_matrix_profile == 'collusion'）才会加载见证点。**
+        默认分支（传统水印基线）不嵌入见证点水印，两条分支彻底分离，
+        避免来回切分支时 key_matrix 与 witness_layout 互相串味。
+
         Returns:
             WitnessLayout 或 None（未启用 / 文件不存在）
         """
@@ -1326,25 +1330,44 @@ class FederatedLearningOnChestMNIST(Experiment):
             self._witness_layout = None
             return None
 
+        # 分支隔离：默认分支不碰见证点
+        # 注意用 `profile == 'default'` 而非 `!= 'collusion'`：
+        # 手工构造 args 的调用方（测试/脚本）可能没设该属性，
+        # 此时不应擅自禁用见证点。真实运行时 utils/args.py 已确保
+        # 默认分支的 enable_witness=False（这里是第二道保险）。
+        profile = getattr(self.args, 'key_matrix_profile', None)
+        if profile == 'default':
+            logging.info('[见证点] 当前为默认分支（传统水印基线），'
+                         '不加载见证点布局。抗合谋分支请用 --collusion_only '
+                         '或 --key_matrix_profile collusion。')
+            self._witness_layout = None
+            return None
+
         try:
-            from utils.collusion_resistant import load_witness_layout
+            from utils.collusion_resistant import (
+                find_witness_layout,
+                load_witness_layout,
+            )
 
             # args.key_matrix_path 已指向 <base>/<model_type>/client<N>
-            candidates = [
-                os.path.join(self.args.key_matrix_path, 'witness_layout.json'),
-                os.path.join(self.args.key_matrix_path, f'client{self.client_num}',
-                             'witness_layout.json'),
-            ]
-            for path in candidates:
-                if os.path.exists(path):
-                    self._witness_layout = load_witness_layout(path)
-                    logging.info(f'[见证点] 已加载布局: {path} '
-                                 f'(v={self._witness_layout.v}, '
-                                 f'G={self._witness_layout.G})')
-                    return self._witness_layout
+            path = find_witness_layout(
+                self.args.key_matrix_path,
+                model_type=getattr(self.args, 'model_name', None),
+                client_num=self.client_num)
+            if path:
+                self._witness_layout = load_witness_layout(path)
+                logging.info(f'[见证点] 已加载布局: {path} '
+                             f'(v={self._witness_layout.v}, '
+                             f'G={self._witness_layout.G}, '
+                             f'secret_id={self._witness_layout.secret_id})')
+                if self._witness_layout.point_values is None:
+                    logging.warning(
+                        '[见证点] 该布局为 v1 旧格式（见证点值取自 encoder 切片），'
+                        '计数解码不可用。请重新运行 train_key_matrix.py '
+                        '生成 v2 布局以启用密钥派生的见证点水印。')
+                return self._witness_layout
 
             logging.info('[见证点] 未找到布局文件，跳过见证点嵌入')
-            profile = getattr(self.args, 'key_matrix_profile', 'default')
             logging.warning(
                 f'[见证点] 目录 {self.args.key_matrix_path} 下缺少 witness_layout.json。\n'
                 f'         若要使用抗合谋水印，请先生成：\n'
@@ -1361,14 +1384,16 @@ class FederatedLearningOnChestMNIST(Experiment):
     def _get_encoder_offsets(self, key_manager):
         """计算每个客户端在 encoder_params 中的偏移量。
 
-        布局（当见证点启用时）：
+        布局（v2，当见证点启用时）：
             [ 独占切片区 [0, n*slice_size) ]   <- 独占切片，offset 不变
-            [ 见证点权威值区 [0, v*G) ]       <- 复用前段（值空间重叠）
 
-        两种水印的**位置空间完全不相交**（见证点位置取自未被任何
-        客户端分配的位置），因此见证点复用 encoder 参数前段是安全的：
-        所有权认证只看客户端 c 的切片位置，不会把共享的见证点值
-        误判为 c 的证据。
+        **见证点权威值不再取自 encoder 参数向量的任何区间**，
+        而是由服务器密钥单向派生（见 utils/collusion_resistant.py::
+        derive_witness_values）。因此：
+          - 见证点值与任何客户端的私有切片**没有数值重叠**，
+            客户端 0 不再独自掌握全部见证点权威值；
+          - 合谋者即便拼齐自己分到的 encoder 切片，也无法反推见证点权威值；
+          - 合谋者无法伪造指向无辜客户端的见证点签名（陷害）。
 
         没有见证点布局时，本方法等价于原有的"从 0 开始连续切分"。
 
@@ -1389,13 +1414,24 @@ class FederatedLearningOnChestMNIST(Experiment):
                               layout=None):
         """把见证点水印写入客户端的定制模型（就地修改）。
 
-        规则：对见证点 p，若 A[p, client_id]==1，则在点 p 的 G 个位置
-        写入**共享**权威值 e_p；否则保持原值。
+        规则（v2）：
+            - 对见证点 p，若 A[p, client_id]==1，则在点 p 的 G 个**分散**位置
+              写入共享权威值 e_p（由服务器密钥派生）；
+            - 否则在同样的 G 个位置写入**固定基线** b_p（默认 0）。
+
+        为什么未标记点也要写基线：
+            见证点区域对所有客户端、所有轮次都写成"固定值"，
+            只有标记点随客户端不同。这样合谋平均后的取值满足
+
+                L[p] = (m_p / K) * e_p + (1 - m_p / K) * b_p
+
+            服务器据此可直接反解 m_p（该点被多少个合谋者标记），
+            且由于基线固定，信号不会随轮次衰减。
 
         Args:
             model_state: 模型参数字典（就地修改）
             client_id: 客户端 ID
-            encoder_params: encoder 参数向量（torch tensor）
+            encoder_params: encoder 参数向量（torch tensor，v1 兼容路径）
             layout: 见证点布局；None 时自动加载
 
         Returns:
@@ -1456,7 +1492,9 @@ class FederatedLearningOnChestMNIST(Experiment):
         try:
             from utils.collusion_resistant import (
                 decode_colluders,
+                decode_colluders_by_count,
                 estimate_collusion_size,
+                estimate_collusion_size_by_count,
             )
 
             # torch -> numpy
@@ -1469,14 +1507,49 @@ class FederatedLearningOnChestMNIST(Experiment):
                 for cid, m in client_models.items()
             }
 
+            # ---- 合谋规模推断 ----
+            # 优先用"计数域"的 V 形曲线（对噪声/漂移更鲁棒）；
+            # 若布局是 v1 旧格式（无密钥派生值），回退到原始残差匹配。
             if auto_size:
-                est_k, _ = estimate_collusion_size(
-                    leaked_np, clients_np, layout.design,
-                    max_colluders=max_colluders or layout.design.K + 2)
+                k_search_cap = max_colluders or layout.design.K + 2
+                est_k, _ = estimate_collusion_size_by_count(
+                    leaked_np, layout, max_colluders=k_search_cap)
+                if est_k is None:
+                    est_k, _ = estimate_collusion_size(
+                        leaked_np, clients_np, layout.design,
+                        max_colluders=k_search_cap)
                 diag['estimated_size'] = est_k
                 k_search = est_k
             else:
                 k_search = max_colluders or layout.design.K
+
+            # ---- 优先使用"见证点计数"解码（v2 推荐路径）----
+            # 见证点区域被冻结且取值固定，因此可由泄漏模型直接反解
+            # 每个点被多少个合谋者标记，再做子集计数匹配。
+            # 该路径对噪声与局部攻击更鲁棒，并且支持"弃权"。
+            count_found, count_diag = decode_colluders_by_count(
+                leaked_np, clients_np, layout, max_colluders=k_search)
+            if count_diag.get('enabled') and not count_diag.get('abstained'):
+                diag['colluders'] = count_found
+                diag['error'] = count_diag.get('avg_error')
+                diag['margin'] = count_diag.get('margin')
+                diag['n_candidates'] = count_diag.get('n_candidates', 0)
+                diag['enabled'] = True
+                diag['decoder'] = 'count'
+                diag['n_points'] = count_diag.get('n_points')
+                logging.info(
+                    f'[合谋检测] 识别出合谋者 = {count_found} '
+                    f'(计数解码, 平均残差={count_diag.get("avg_error"):.4f}, '
+                    f'margin={count_diag.get("margin"):.4f}, '
+                    f'有效见证点={count_diag.get("n_points")}, '
+                    f'规模={diag["estimated_size"] or k_search})')
+                return diag
+
+            # 计数解码弃权或不可用 -> 回退到 v1 的原始残差匹配
+            diag['decoder'] = 'residual'
+            diag['count_abstained'] = bool(count_diag.get('abstained'))
+            if count_diag.get('reason'):
+                diag['count_reason'] = count_diag['reason']
 
             found, d2 = decode_colluders(leaked_np, clients_np, layout.design,
                                          max_colluders=k_search)
@@ -1487,7 +1560,7 @@ class FederatedLearningOnChestMNIST(Experiment):
             diag['enabled'] = True
 
             logging.info(f'[合谋检测] 识别出合谋者 = {found} '
-                         f'(残差={d2.get("best_error")}, '
+                         f'(残差匹配, 残差={d2.get("best_error")}, '
                          f'规模={diag["estimated_size"] or k_search})')
         except Exception as e:
             logging.warning(f'[合谋检测] 失败: {e}')

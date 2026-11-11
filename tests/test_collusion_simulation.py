@@ -50,12 +50,27 @@ def build_server(collusion_size=2, stage="pre_training",
     return srv
 
 
-def make_customized_models(srv, seed=0):
-    """模拟各客户端的定制模型（含见证点 + 私有切片 + 本地训练漂移）。"""
+def make_customized_models(srv, seed=0, freeze_witness=True):
+    """模拟各客户端的定制模型（含见证点 + 私有切片 + 本地训练漂移）。
+
+    freeze_witness=True（默认）时，**见证点区域不参与漂移**，
+    与真实流程一致：抗合谋分支会自动开启 freeze_watermark_region，
+    客户端本地训练不会改动见证点位置，因此见证点信号在所有客户端、
+    所有轮次上保持固定。
+
+    这很重要 —— 若让见证点也漂移，见证点比值的噪声会达到信号量级
+    （|e_p| 最小仅 0.025，而漂移 std 为 0.05），
+    计数解码的规模推断就会频繁误判（实测准确率从 100% 掉到 ~94%）。
+    """
     layout = load_witness_layout(os.path.join(BASE, "witness_layout.json"))
     rng = np.random.default_rng(seed)
     model = resnet18(num_classes=10, in_channels=3, input_size=28)
     enc = torch.tensor(rng.normal(0, 1, 9472), dtype=torch.float32)
+
+    # 见证点位置集合（冻结区域）
+    witness_pos = {}
+    for nm, ix in layout.positions:
+        witness_pos.setdefault(nm, set()).add(int(ix))
 
     import json
     for cid in range(N):
@@ -74,10 +89,15 @@ def make_customized_models(srv, seed=0):
         for i, (nm, ix) in enumerate(ps):
             if nm in m and off + i < 9472:
                 m[nm].reshape(-1)[ix] = float(enc[off + i])
-        # 本地训练漂移
+        # 本地训练漂移（见证点区域被冻结，不漂移）
         for k in m:
             if m[k].dtype.is_floating_point:
-                m[k] = m[k] + 0.05 * torch.randn_like(m[k])
+                d = 0.05 * torch.randn_like(m[k])
+                if freeze_witness and k in witness_pos:
+                    flat = d.view(-1)
+                    flat[torch.tensor(sorted(witness_pos[k]), dtype=torch.long)] = 0.0
+                    d = flat.view(m[k].shape)
+                m[k] = m[k] + d
         srv.customized_models[cid] = m
     return srv
 
@@ -116,6 +136,9 @@ def test_detect_collusion():
     ok = 0
     T = 5
     for t in range(T):
+        # 固定随机种子：合谋者由 np.random.choice 抽取，
+        # 不固定种子会让本用例的结果依赖当次抽样（flaky）。
+        np.random.seed(1000 + t)
         info = srv._simulate_collusion_leakage(0, idxs, local_ws=None)
         result = srv._detect_collusion_leakage(info, idxs)
         if result['is_correct']:
@@ -136,6 +159,7 @@ def test_post_training_stage():
     # post_training 需要 local_ws
     local_ws = [srv.customized_models[c] for c in idxs]
 
+    np.random.seed(2000)
     info = srv._simulate_collusion_leakage(0, idxs, local_ws=local_ws)
     assert info is not None
     assert info['leak_stage'] == 'post_training'
@@ -154,7 +178,8 @@ def test_noise_attack():
     idxs = list(range(N))
     ok = 0
     T = 5
-    for _ in range(T):
+    for t in range(T):
+        np.random.seed(3000 + t)
         info = srv._simulate_collusion_leakage(0, idxs, local_ws=None)
         result = srv._detect_collusion_leakage(info, idxs)
         if result['is_correct']:

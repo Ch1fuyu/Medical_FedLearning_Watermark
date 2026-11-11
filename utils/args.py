@@ -98,6 +98,25 @@ def parser_args():
                         choices=['none', 'gaussian_noise'],
                         help='attack applied to the colluded model')
 
+    # ========================= 见证点密钥 / 冻结 ========================
+    parser.add_argument('--witness_secret', type=str, default=None,
+                        help='见证点密钥（十六进制字符串或任意文本）。'
+                             '见证点权威值由该密钥单向派生，'
+                             '不再取自 encoder 参数切片，'
+                             '因此合谋者无法反推或伪造见证点签名。'
+                             '生产环境务必显式指定并妥善保管；'
+                             '不指定时每次生成的见证点水印互不兼容。')
+    parser.add_argument('--witness_amplitude', type=float, default=None,
+                        help='见证点权威值幅度（默认 0.05）')
+    parser.add_argument('--witness_secret_file', type=str, default=None,
+                        help='从文件读取见证点密钥（推荐，避免密钥进入命令行历史）')
+    parser.add_argument('--freeze_watermark_region', action='store_true',
+                        default=False,
+                        help='冻结水印区域：本地训练期间客户端自有水印区域 P_k '
+                             '与抗合谋见证点区域都不参与参数更新，'
+                             '保证服务器下发的权威值被原封不动地带回，'
+                             '并保证见证点信号不随轮次衰减。')
+
     # ========================= 差分隐私参数 ========================
     parser.add_argument('--dp', action='store_true', default=False, help='enable differential privacy')
     parser.add_argument('--sigma', type=float, default=0.1, help='Gaussian noise standard deviation')
@@ -138,8 +157,12 @@ def parser_args():
         args.enable_collusion_detection = True
         if args.key_matrix_dir is None and args.key_matrix_profile == 'default':
             args.key_matrix_profile = 'collusion'
+        # 抗合谋分支必须冻结水印区域（含见证点），否则：
+        #   - 任务梯度 / DP 噪声会把见证点冲掉，信号在若干轮后消失；
+        #   - 见证点区域会随 w_t 漂移，"固定基线"的前提不成立。
+        args.freeze_watermark_region = True
         print('🔒 抗合谋评测模式：已关闭单客户端泄漏仿真与追踪，'
-              '开启合谋检测')
+              '开启合谋检测，已自动开启水印区域冻结')
 
     # 密钥矩阵目录：优先 --key_matrix_dir，否则按 profile 决定
     # 不同实验分支用互不干扰的目录，避免切换分支时
@@ -148,6 +171,41 @@ def parser_args():
         args.key_matrix_dir = ('save/key_matrix_collusion'
                                if args.key_matrix_profile == 'collusion'
                                else 'save/key_matrix')
+
+    # ========================= 分支隔离：见证点只属于抗合谋分支 =========================
+    # 见证点（抗合谋水印）只在 key_matrix_profile == 'collusion' 时启用。
+    # 默认分支（传统水印基线）完全不使用见证点：既不嵌入、也不冻结。
+    # 这样两条分支彻底分离，来回切换不会互相污染。
+    if args.key_matrix_profile != 'collusion':
+        if args.enable_witness:
+            print('ℹ️  默认分支（传统水印基线）不启用见证点水印；'
+                  '抗合谋分支请用 --collusion_only 或 --key_matrix_profile collusion')
+        args.enable_witness = False
+
+    # ========================= 见证点密钥 =========================
+    # 支持从文件读取密钥（避免密钥出现在命令行历史 / 进程列表中）。
+    # 未显式指定时，读取抗合谋分支的**默认长期密钥文件**；
+    # 文件不存在则自动创建，保证"密钥长期不变"。
+    if getattr(args, 'witness_secret_file', None):
+        try:
+            with open(args.witness_secret_file, 'r', encoding='utf-8') as f:
+                args.witness_secret = f.read().strip()
+            print(f'🔑 已从文件读取见证点密钥: {args.witness_secret_file}')
+        except Exception as e:
+            print(f'⚠️  读取见证点密钥文件失败: {e}')
+    elif not getattr(args, 'witness_secret', None) and args.enable_witness:
+        # 仅抗合谋分支需要见证点密钥
+        try:
+            from .witness_secret import (DEFAULT_SECRET_PATH,
+                                         load_or_create_secret,
+                                         secret_fingerprint)
+            _secret, _created = load_or_create_secret(DEFAULT_SECRET_PATH,
+                                                      create=True)
+            print(f'🔑 见证点密钥: {DEFAULT_SECRET_PATH} '
+                  f'({"新建" if _created else "已存在"}, '
+                  f'fingerprint={secret_fingerprint(_secret)})')
+        except Exception as e:
+            print(f'⚠️  见证点密钥初始化失败: {e}')
 
     args.key_matrix_path = get_key_matrix_path(args.key_matrix_dir, args.model_name, args.client_num)
 

@@ -166,7 +166,8 @@ class KeyMatrixGenerator:
         
         return key_matrices, position_dict
 
-    def generate_witness_layout(self, position_dict, all_positions=None):
+    def generate_witness_layout(self, position_dict, all_positions=None,
+                                secret=None, amplitude=None):
         """生成见证点布局（抗合谋水印）。
 
         见证点位置必须是**跨客户端共享**的，否则合谋者各自的水印区域
@@ -176,10 +177,16 @@ class KeyMatrixGenerator:
         这样见证点与现有"每客户端一段独占切片"的水印机制
         **完全不重叠**，不需要改动任何现有 offset 计算逻辑。
 
+        见证点**取值**由服务器密钥单向派生（不再取自 encoder 参数切片），
+        因此合谋者即使拼齐自己分到的 encoder 切片也无法反推权威值，
+        更无法伪造指向无辜客户端的见证点签名。
+
         Args:
             position_dict: {client_id: [(param_name, local_idx), ...]}
             all_positions: 全部可用 conv 位置 [(param_name, local_idx), ...]；
                 None 时由本类内部重建。
+            secret: 见证点密钥（bytes）；None 时由 build_witness_layout 随机生成。
+            amplitude: 见证点权威值幅度；None 时用默认值。
 
         Returns:
             WitnessLayout 或 None（未启用见证点 / 位置不足）
@@ -208,6 +215,12 @@ class KeyMatrixGenerator:
         # 现有切片的单客户端长度
         slice_size = len(position_dict[0]) if self.client_num > 0 else 0
 
+        kwargs = {}
+        if secret is not None:
+            kwargs['secret'] = secret
+        if amplitude is not None:
+            kwargs['amplitude'] = amplitude
+
         try:
             layout = build_witness_layout(
                 n_clients=self.client_num,
@@ -216,6 +229,7 @@ class KeyMatrixGenerator:
                 positions=free_pool,
                 slice_size=slice_size,
                 verbose=False,
+                **kwargs,
             )
         except ValueError as e:
             print(f"⚠️ 见证点布局生成失败: {e}")
@@ -230,9 +244,8 @@ class KeyMatrixGenerator:
             print(f"  地面集压缩: v_raw={v_raw} -> v_used={layout.v} "
                   f"(剔除 {v_raw - layout.v} 个无人标记的点，"
                   f"G 从 {g_before} 提升到 {layout.G})")
-        print(f"  见证点权威值区 = [{layout.witness_offset}, "
-              f"{layout.witness_offset + layout.v * layout.G})  "
-              f"(复用 encoder 前段，与切片区值空间重叠但位置不相交)")
+        print(f"  见证点取值 = 密钥派生 (secret_id={layout.secret_id}), "
+              f"与 encoder 切片完全解耦")
         print(f"  独占切片区 = [{layout.slice_offset}, {layout.slice_end})  "
               f"({layout.slice_size}/客户端，offset 不变)")
         return layout
@@ -368,6 +381,17 @@ def main():
                        help='抗合谋设计抵抗的最大合谋规模（见证点设计用）')
     parser.add_argument('--disable_witness', action='store_true',
                        help='禁用见证点布局（只生成传统的独占切片水印）')
+    parser.add_argument('--witness_secret', type=str, default=None,
+                       help='见证点密钥（十六进制字符串或任意文本）。'
+                            '见证点权威值由该密钥单向派生；'
+                            '生产环境必须显式指定并妥善保管，'
+                            '否则每次生成的见证点水印互不兼容。')
+    parser.add_argument('--witness_secret_file', type=str, default=None,
+                       help='见证点密钥文件路径（推荐，避免密钥进入命令行历史）。'
+                            '默认使用 save/keys/witness_secret_collusion.key，'
+                            '不存在时自动创建（该目录已被 gitignore）。')
+    parser.add_argument('--witness_amplitude', type=float, default=None,
+                       help='见证点权威值幅度（默认 0.05）')
     
     args = parser.parse_args()
 
@@ -439,8 +463,31 @@ def main():
 
     key_matrices, position_dict = generator.generate_key_matrices()
 
+    # 解析见证点密钥
+    # 优先级：--witness_secret > --witness_secret_file > 默认密钥文件
+    # 默认密钥文件路径固定（save/keys/witness_secret_collusion.key），
+    # 保证"密钥长期不变"：同一密钥生成的所有布局互相兼容。
+    secret = None
+    if args.witness_secret or args.witness_secret_file or not args.disable_witness:
+        from utils.witness_secret import (
+            DEFAULT_SECRET_PATH, resolve_secret, secret_fingerprint,
+        )
+        default_path = None if args.disable_witness else DEFAULT_SECRET_PATH
+        secret, source = resolve_secret(
+            explicit=args.witness_secret,
+            secret_file=args.witness_secret_file,
+            default_path=default_path,
+            create=True,
+        )
+        if secret is not None:
+            print(f'见证点密钥来源: {source} '
+                  f'(长度 {len(secret)} 字节, fingerprint={secret_fingerprint(secret)})')
+    else:
+        print('见证点已禁用，不解析密钥')
+
     # 生成见证点布局（抗合谋水印）
-    witness_layout = generator.generate_witness_layout(position_dict)
+    witness_layout = generator.generate_witness_layout(
+        position_dict, secret=secret, amplitude=args.witness_amplitude)
 
     # 保存密钥矩阵
     info_path = generator.save_key_matrices(key_matrices, position_dict,

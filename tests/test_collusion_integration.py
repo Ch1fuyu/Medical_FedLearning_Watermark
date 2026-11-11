@@ -74,14 +74,17 @@ def test_layout_no_overlap():
     assert not (wpos & used), "见证点位置与独占切片重叠！"
     print(f"  [OK] 见证点位置({len(wpos)}) 与独占切片({len(used)}) 不重叠")
 
-    # 2) encoder 区间：切片区保持原样（offset 不变），见证点复用前段
-    #    值空间允许重叠（encoder 参数已占满），但位置空间必须不相交
+    # 2) encoder 区间：切片区保持原样（offset 不变）
+    #    v2 起见证点权威值由密钥派生，**不再**取自 encoder 参数向量，
+    #    因此不存在"值空间重叠"，也就没有了"客户端 0 独自掌握全部
+    #    见证点权威值"的问题。
     witness_end = layout.witness_offset + layout.v * layout.G
     assert layout.slice_offset == 0, "独占切片区起点应保持为 0（offset 不变）"
     assert layout.slice_end <= DEFAULT_ENCODER_PARAMS, "切片区超出 encoder 预算"
     assert witness_end <= DEFAULT_ENCODER_PARAMS, "见证点区超出 encoder 预算"
+    assert layout.point_values is not None, "见证点值应已由密钥派生"
     print(f"  [OK] 切片区 [0, {layout.slice_end}) offset 不变; "
-          f"见证点权威值区 [{layout.witness_offset}, {witness_end}) 复用前段")
+          f"见证点值由密钥派生（secret_id={layout.secret_id}）")
     return layout
 
 
@@ -134,23 +137,24 @@ def test_embed_semantics():
         marked = layout.design.client_points(cid)
         unmarked = set(range(layout.v)) - set(marked.tolist())
 
-        # 标记点应等于 e_p
+        # 标记点应等于 e_p（位置由 point_positions 给出，副本已分散）
         for p in marked:
-            for j in range(layout.G):
-                nm, ix = layout.positions[p * layout.G + j]
+            pos = layout.point_positions(p)
+            for j in range(min(layout.G, len(pos))):
+                nm, ix = pos[j]
                 got = float(m[nm].reshape(-1)[ix])
                 assert abs(got - pv[p, j]) < 1e-6, \
                     f"client{cid} 点{p} 位置{j}: {got} != {pv[p, j]}"
-        # 未标记点应保持 w_t
+        # 未标记点应写入**固定基线**（默认 0）
         for p in list(unmarked)[:5]:
-            for j in range(min(layout.G, 3)):
-                nm, ix = layout.positions[p * layout.G + j]
+            pos = layout.point_positions(p)
+            for j in range(min(layout.G, len(pos), 3)):
+                nm, ix = pos[j]
                 got = float(m[nm].reshape(-1)[ix])
-                want = float(w_t[nm].reshape(-1)[ix])
-                assert abs(got - want) < 1e-6, \
-                    f"client{cid} 未标记点{p} 被改动了"
+                assert abs(got - 0.0) < 1e-6, \
+                    f"client{cid} 未标记点{p} 应为基线 0，实际 {got}"
 
-    print(f"  [OK] 标记点写入共享权威值，未标记点保持 w_t (n={n})")
+    print(f"  [OK] 标记点写入共享权威值，未标记点写入固定基线 (n={n})")
 
 
 def test_end_to_end_attribution():
@@ -273,6 +277,14 @@ def test_real_layout_isolation():
     assert w_end <= DEFAULT_ENCODER_PARAMS
     print(f"  [OK] 见证点权威值区 [{layout.witness_offset}, {w_end}) "
           f"在预算内")
+
+    # 4) v2 布局应内置密钥派生的见证点值（否则计数解码不可用）
+    if layout.point_values is None:
+        print("  [!] 该布局为 v1 旧格式（见证点值来自 encoder 切片），"
+              "计数解码不可用；请重新运行 train_key_matrix.py 生成 v2 布局")
+    else:
+        print(f"  [OK] 布局内置密钥派生见证点值 "
+              f"(secret_id={layout.secret_id})")
 
 
 def main():

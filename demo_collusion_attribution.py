@@ -134,9 +134,16 @@ def build_real_models(design):
     """真实布局里每个见证点占 G 个模型位置。
 
     这里统一用一个扁平参数 'wm' 承载 v*G 个位置（真实代码里分布在多个 conv 层）。
-    客户端 c 的定制模型：
-        - 见证点 p 被 c 标记 -> p 的 G 个位置全写 e_p
-        - 未被标记            -> 保持全局模型原值 w_t
+    客户端 c 的定制模型（v2 语义）：
+        - 见证点 p 被 c 标记 -> p 的 G 个位置全写 e_p（密钥派生）
+        - 未被标记            -> p 的 G 个位置全写固定基线 b_p（默认 0）
+
+    固定基线的意义：见证点区域在所有客户端、所有轮次上取值固定，
+    只有标记点随客户端不同。于是合谋平均后
+
+        L[p] = (m_p / K) * e_p,   m_p = 该点被多少个合谋者标记
+
+    服务器据此可直接反解 m_p，且信号不随轮次衰减。
     """
     v, G = design.v, design.G
     n_pos = v * G
@@ -153,7 +160,7 @@ def build_real_models(design):
             if design.A[p, c] > 0:
                 vals[p * G:(p + 1) * G] = point_auth[p]
             else:
-                vals[p * G:(p + 1) * G] = 0.0     # w_t 原值
+                vals[p * G:(p + 1) * G] = 0.0     # 固定基线 b_p
         models[c] = {"wm": vals}
     return models, point_auth
 

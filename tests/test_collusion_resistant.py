@@ -185,15 +185,18 @@ def test_embed_function():
     out = embed_witness_watermark(base, d, client_id=2, encoder_values=E)
     got = out["conv.weight"]
     marked = d.client_points(2)
-    unchanged = set(range(d.v)) - set(marked.tolist())
+    unmarked = set(range(d.v)) - set(marked.tolist())
     # 标记点应写入 e_p
     assert np.allclose(got[marked], E[marked]), "标记点应写入权威值"
-    # 未标记点应保持原值
-    assert np.allclose(got[list(unchanged)], WT[list(unchanged)]), \
-        "未标记点应保持原值"
+    # 未标记点应写入**固定基线**（默认 0）：
+    # 见证点区域在所有客户端上取值固定，只有标记点不同，
+    # 这样合谋平均后可直接反解"该点被多少个合谋者标记"。
+    assert np.allclose(got[list(unmarked)], 0.0), \
+        "未标记点应写入固定基线 0"
     # 原字典不应被修改
     assert np.allclose(base["conv.weight"], WT), "入参不应被修改"
-    print(f"  n=6 v={d.v} G={d.G}: 标记点={len(marked)} 写入正确、未修改入参 OK")
+    print(f"  n=6 v={d.v} G={d.G}: 标记点={len(marked)} 写入正确、"
+          f"未标记点=基线、未修改入参 OK")
 
 
 # ====================================================================
