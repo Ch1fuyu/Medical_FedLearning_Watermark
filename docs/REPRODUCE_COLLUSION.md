@@ -5,6 +5,22 @@
 
 ---
 
+## 快速开始（三步）
+
+```bash
+# 0) 环境就绪后，一键铺好所有配置下的密钥矩阵
+python generate_all_key_matrices.py
+
+# 1) 改 utils/args.py 顶部的 EXPERIMENT_CONFIG, 然后:
+python main.py
+```
+
+`generate_all_key_matrices.py` 会扫描抗合谋配置表自动枚举所需的
+`(数据集, 模型, 客户端数)` 组合并全部生成，最后自检是否就绪。
+详见 [第 4 节](#4-生成密钥矩阵抗合谋分支)。
+
+---
+
 ## 0. 前置条件
 
 | 项 | 要求 |
@@ -67,6 +83,64 @@ print('CIFAR10 ready')
 ## 4. 生成密钥矩阵（抗合谋分支）
 
 **这一步是抗合谋分支的核心，务必执行。**
+
+### 4.1 一键批量生成（推荐）
+
+```bash
+python generate_all_key_matrices.py
+```
+
+这条命令会扫描 `config/collusion_presets*.json`，把**所有**配置表里
+用到的 `(数据集, 模型, 客户端数, design_K)` 组合一次性生成完，
+最后做一次完整性自检：
+
+```
+抗合谋分支（profile=collusion）共 6 个规格:
+  · chestmnist  alexnet  client_num=10   design_K=3
+  · chestmnist  resnet   client_num=10   design_K=3
+  · cifar10     alexnet  client_num=10   design_K=3
+  · cifar10     resnet   client_num=10   design_K=3
+  · cifar100    alexnet  client_num=10   design_K=3
+  · cifar100    resnet   client_num=10   design_K=3
+
+...
+生成完毕: 成功 6 个, 失败 0 个, 耗时 20.9s
+
+=== 完整性自检 ===
+  ✓ chestmnist  alexnet  client_num=10   就绪
+  ...
+  共 6 项, 就绪 6 项, 缺失 0 项
+
+✅ 全部就绪。现在可以直接运行: python main.py
+```
+
+常用选项：
+
+```bash
+# 同时生成默认分支（传统水印基线）的密钥矩阵
+python generate_all_key_matrices.py --include-default
+
+# 只生成指定数据集 / 模型 / 客户端数
+python generate_all_key_matrices.py --datasets chestmnist --models resnet
+
+# 覆盖已存在的
+python generate_all_key_matrices.py --force
+
+# 只检查不生成（返回码 0 = 全部就绪，2 = 有缺失）
+python generate_all_key_matrices.py --check-only
+
+# 在新机器上复现与另一台机器完全一致的水印
+python generate_all_key_matrices.py --witness_secret_file my.key
+```
+
+> **关于密钥**：脚本默认使用 `save/keys/witness_secret_collusion.key`
+> （不存在时自动创建）。要跨机器复现**完全一致**的水印，把那边的
+> 密钥文件拷过来用 `--witness_secret_file` 指定。
+>
+> 运行时**不需要**密钥文件——见证点权威值已经固化在
+> `witness_layout.json` 的 `point_values` 字段里。
+
+### 4.2 手动生成单个
 
 ```bash
 python train_key_matrix.py \
@@ -363,7 +437,8 @@ Medical_FedLearning_Watermark/
 │   ├── collusion/                    # 抗合谋归因结果 JSON
 │   └── excel/                        # 指标 Excel
 ├── main.py                           # 主实验入口
-├── train_key_matrix.py               # 密钥矩阵 + 见证点布局生成
+├── train_key_matrix.py               # 密钥矩阵 + 见证点布局生成（单个）
+├── generate_all_key_matrices.py      # 批量生成（按配置表自动枚举）★ 新机器首选
 └── utils/
     ├── args.py                       # 参数中心 + 实验配置中心
     ├── collusion_presets.py          # 配置表解析与校验
