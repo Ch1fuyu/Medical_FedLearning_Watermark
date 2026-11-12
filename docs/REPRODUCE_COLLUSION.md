@@ -353,8 +353,7 @@ EXPERIMENT_CONFIG: Dict[str, Any] = {
 python main.py --epochs 5
 ```
 
-**生效范围**：只有 `main.py` 会应用配置中心。消融实验
-（`ablation_experiment.py` 等）与攻击脚本（`pruning_attack.py` /
+**生效范围**：只有 `main.py` 会应用配置中心。攻击脚本（`pruning_attack.py` /
 `finetune_attack.py`）各自有独立的命令行参数，不受影响。
 
 ### 换数据集只需改一个字段

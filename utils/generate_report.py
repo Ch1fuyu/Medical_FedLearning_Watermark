@@ -80,7 +80,7 @@ def check_data_freshness(diag_path, surv_path):
             age_days = (latest_exp - t) / 86400.0
             print(f"[WARN] {label}数据过期: {relpath(path, root)} "
                   f"比最新实验结果旧 {age_days:.1f} 天, "
-                  f"建议重跑 {'watermark_diagnostics.py' if '诊断' in label else 'watermark_survival_analysis.py'}")
+                  f"建议重新采集 {label}数据")
             ok = False
     return ok, ok
 
@@ -397,7 +397,7 @@ def build_markdown(diag, surv, diag_path, surv_path, tracking_accuracy=None):
             ratio_a = diag['AlexNet + CIFAR-10']['total_grad_norm'] / diag['AlexNet + ChestMNIST']['total_grad_norm']
             md.append(f"**核心发现**: AlexNet + CIFAR-10 的梯度强度是 AlexNet + ChestMNIST 的 **{ratio_a:.1f} 倍**\n")
     else:
-        md.append("> ⚠️ 未找到 `save/diagnostics/*.json` 数据，请先运行 `python watermark_diagnostics.py`\n")
+        md.append("> ⚠️ 未找到 `save/diagnostics/*.json` 数据\n")
 
     md.append("### 3.2 水印存活能力\n")
     if surv:
@@ -415,7 +415,7 @@ def build_markdown(diag, surv, diag_path, surv_path, tracking_accuracy=None):
                 md.append(f"| {name} | {wm_final:.4f} | {nwm_final:.4f} | **{ratio:.4f}** |")
         md.append("")
     else:
-        md.append("> ⚠️ 未找到 `save/survival_analysis/*.json` 数据，请先运行 `python watermark_survival_analysis.py`\n")
+        md.append("> ⚠️ 未找到 `save/survival_analysis/*.json` 数据\n")
     md.append("---\n")
     # 4. 机理
     md.append("## 4. 深层机理分析\n")
@@ -463,10 +463,7 @@ def build_markdown(diag, surv, diag_path, surv_path, tracking_accuracy=None):
     md.append(f"- 梯度诊断: `{relpath(diag_path, get_project_root())}`")
     md.append(f"- 水印存活: `{relpath(surv_path, get_project_root())}`")
     md.append("- 图表目录: `save/figures/`")
-    md.append("- 复现脚本:")
-    md.append("  - `watermark_diagnostics.py`")
-    md.append("  - `watermark_survival_analysis.py`")
-    md.append("  - `utils/generate_report.py` (本工具)\n")
+    md.append("- 生成工具: `utils/generate_report.py` (本工具)\n")
 
     return "\n".join(md)
 

@@ -45,22 +45,31 @@ python pruning_attack.py --model_path ./save/resnet/chestmnist/model.pkl
 
 ```
 ├── main.py                 # 联邦学习主程序
+├── generate_all_key_matrices.py # 批量生成密钥矩阵（抗合谋分支，新机器首选）
 ├── finetune_attack.py     # 微调攻击实验
 ├── pruning_attack.py      # 剪枝攻击实验
 ├── train_autoencoder.py   # 自编码器训练
 ├── train_key_matrix.py    # 密钥矩阵生成
+├── demo_collusion_attribution.py # 抗合谋归因演示（可读性优先的原理说明）
 ├── models/                # 模型定义
 │   ├── resnet.py         # ResNet18
 │   ├── alexnet.py        # AlexNet
 │   └── light_autoencoder.py
 ├── utils/                 # 工具模块
+│   ├── args.py           # 参数中心 + 实验配置中心
+│   ├── collusion_resistant.py # 见证点设计 / 嵌入 / 解码
+│   ├── collusion_presets.py    # 抗合谋配置表解析
+│   ├── watermark_freeze.py     # 水印区域冻结
+│   ├── witness_secret.py       # 见证点密钥持久化
 │   ├── dataset.py        # 数据处理
 │   ├── trainer_private.py # 训练器
 │   ├── watermark_reconstruction.py # 水印重建
 │   └── delta_pcc_utils.py # ΔPCC评估
+├── tests/                 # 单元测试
 └── save/                 # 结果保存
     ├── autoencoder/      # 自编码器权重
-    ├── key_matrix/       # 密钥矩阵
+    ├── key_matrix/       # 默认分支密钥矩阵
+    ├── key_matrix_collusion/ # 抗合谋分支密钥矩阵
     └── excel/           # 实验结果
 ```
 

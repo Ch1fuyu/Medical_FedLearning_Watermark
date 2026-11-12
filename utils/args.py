@@ -14,8 +14,8 @@ from typing import Dict, Any
 #  临时想试个别的值，依然可以直接敲命令行覆盖。
 #
 #  生效范围：只有 :data:`_CONFIG_TARGET_SCRIPTS` 里的入口脚本会应用本配置块。
-#  消融实验（ablation_experiment.py 等）与攻击脚本（pruning_attack.py /
-#  finetune_attack.py）各自有独立的命令行参数，不受影响。
+#  攻击脚本（pruning_attack.py / finetune_attack.py）各自有独立的
+#  命令行参数，不受影响。
 #
 #  典型场景：跑 AlexNet + CIFAR10 + 10 客户端 + K=3 的抗合谋实验，
 #  把下面这些改好，直接 ``python main.py``。
@@ -157,9 +157,9 @@ def _explicit_cli_options(parser) -> set:
 def _config_applies_to_current_script() -> bool:
     """判断当前运行的入口脚本是否应该应用 :data:`EXPERIMENT_CONFIG`。
 
-    依据是 ``sys.argv[0]`` 的文件名（basename）。这样消融实验
-    （``ablation_experiment.py`` 等）与攻击脚本（``pruning_attack.py`` /
-    ``finetune_attack.py``）不会因为共用 ``parser_args()`` 而被污染。
+    依据是 ``sys.argv[0]`` 的文件名（basename）。这样攻击脚本
+    （``pruning_attack.py`` / ``finetune_attack.py``）不会因为共用
+    ``parser_args()`` 而被污染。
 
     Returns:
         True 表示当前脚本应当应用配置块。
