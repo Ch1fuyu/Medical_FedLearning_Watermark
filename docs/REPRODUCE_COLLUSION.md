@@ -335,7 +335,6 @@ EXPERIMENT_CONFIG: Dict[str, Any] = {
     'key_matrix_dir': None,
     'key_matrix_profile': 'collusion',
     'enable_witness': True,
-    'freeze_watermark_region': True,
 
     # ---------------- 差分隐私 ----------------
     'dp': True,
@@ -443,6 +442,5 @@ Medical_FedLearning_Watermark/
     ├── collusion_presets.py          # 配置表解析与校验
     ├── collusion_resistant.py        # 见证点设计 / 嵌入 / 解码
     ├── witness_secret.py             # 密钥持久化
-    ├── watermark_freeze.py           # 水印区域冻结
-    └── trainer_private_enhanced.py   # 训练器（含冻结接入）
+    └── trainer_private_enhanced.py   # 训练器（训练后硬覆盖水印 + 梯度缩放）
 ```

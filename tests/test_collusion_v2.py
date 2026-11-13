@@ -9,7 +9,7 @@
   5. 计数解码：等权平均攻击下精确归因（含噪声）
   6. 计数解码：局部攻击（随机置零部分副本）下仍可归因
   7. 计数解码：无合谋 / 随机模型 -> 弃权
-  8. 冻结：见证点区域在本地训练后保持不变
+  8. 硬覆盖：见证点区域在本地训练扰动后可被权威值精确覆盖回去
 
 运行：
     python tests/test_collusion_v2.py
@@ -337,22 +337,16 @@ def test_framing_resistance():
 
 
 # ====================================================================
-def test_freeze_keeps_witness_intact():
-    print("== test_freeze_keeps_witness_intact ==")
-    from utils.watermark_freeze import WatermarkFreezer
+def test_hard_overwrite_restores_witness():
+    """见证点在本地训练被扰动后，可被权威值**硬覆盖**精确还原。
+
+    这是"水印信息必须是硬覆盖的"这一底层逻辑的验证。
+    （早期版本用"训练期冻结"实现，代价是污染 Adam 动量、掉主任务精度，
+      现改为训练后覆盖。）
+    """
+    print("== test_hard_overwrite_restores_witness ==")
 
     layout, secret = make_layout()
-    # 造一个 key_matrix 目录供 WatermarkFreezer 读取
-    import json
-    import tempfile
-    tmp = tempfile.mkdtemp()
-    os.makedirs(os.path.join(tmp, "client_0"), exist_ok=True)
-    with open(os.path.join(tmp, "key_matrix_info.json"), "w") as f:
-        json.dump({"client_num": N_CLIENTS}, f)
-    with open(os.path.join(tmp, "client_0", "positions.json"), "w") as f:
-        json.dump([["features.0.weight", 0]], f)
-    with open(os.path.join(tmp, "witness_layout.json"), "w") as f:
-        json.dump(layout.to_dict(), f)
 
     # 见证点索引可能落在任意参数上；这里给每个假参数名准备足够大的张量
     sizes = {}
@@ -378,11 +372,8 @@ def test_freeze_keeps_witness_intact():
             return self._params[nm]
 
     model = _Model()
-    fz = WatermarkFreezer(model, tmp)
-    assert fz.has_witness, "应加载到见证点布局"
-    print(f"  见证点位置数 = {len(fz.witness_positions())}")
 
-    # 写入见证点值后模拟训练扰动
+    # 写入见证点值
     enc = torch.tensor(np.random.default_rng(10).normal(0, 1,
                                                         DEFAULT_ENCODER_PARAMS),
                         dtype=torch.float32)
@@ -392,22 +383,28 @@ def test_freeze_keeps_witness_intact():
         with torch.no_grad():
             model.get(nm).copy_(state[nm])
 
-    snap = fz.snapshot(0)
+    print(f"  见证点位置数 = {len(layout.positions)}")
 
-    # 模拟：梯度 + 优化器 + DP 噪声
+    # 模拟本地训练扰动（任务梯度推动 + DP 噪声）
     with torch.no_grad():
         for nm in sizes:
             model.get(nm).add_(torch.randn(sizes[nm]) * 0.5)
-    fz.restore(snap)
+
+    # 训练后硬覆盖：把权威值写回
+    model_params = dict(model.named_parameters())
+    embed_witness_watermark_torch(model_params, layout, 0, enc)
+    for nm in sizes:
+        with torch.no_grad():
+            model.get(nm).copy_(model_params[nm])
 
     diff = 0.0
     for nm in sizes:
         d = (model.get(nm).detach().view(-1) -
              state[nm].view(-1)).abs().max().item()
         diff = max(diff, d)
-    print(f"  冻结还原后最大偏差 = {diff:.3e}")
-    assert diff == 0.0, "冻结还原后见证点应完全不变"
-    print("  见证点冻结 ✓")
+    print(f"  硬覆盖后最大偏差 = {diff:.3e}")
+    assert diff == 0.0, "硬覆盖后见证点应与权威值完全一致"
+    print("  见证点硬覆盖 ✓")
 
 
 # ====================================================================
@@ -420,7 +417,7 @@ def main():
     test_robust_to_partial_zeroing()
     test_abstain_on_random_model()
     test_framing_resistance()
-    test_freeze_keeps_witness_intact()
+    test_hard_overwrite_restores_witness()
     print("\n抗合谋 v2 验证全部通过 ✅")
 
 

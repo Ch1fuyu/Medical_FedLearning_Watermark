@@ -59,7 +59,6 @@ python pruning_attack.py --model_path ./save/resnet/chestmnist/model.pkl
 │   ├── args.py           # 参数中心 + 实验配置中心
 │   ├── collusion_resistant.py # 见证点设计 / 嵌入 / 解码
 │   ├── collusion_presets.py    # 抗合谋配置表解析
-│   ├── watermark_freeze.py     # 水印区域冻结
 │   ├── witness_secret.py       # 见证点密钥持久化
 │   ├── dataset.py        # 数据处理
 │   ├── trainer_private.py # 训练器

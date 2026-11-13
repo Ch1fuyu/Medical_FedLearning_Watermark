@@ -1057,23 +1057,27 @@ def embed_witness_watermark_torch(
     # v1 旧布局（point_values 为 None）保持原行为：未标记点沿用模型原值。
     write_baseline = layout.point_values is not None
 
-    for p in range(layout.v):
-        if p in marked:
-            vals = point_values[p]
-        elif write_baseline:
-            vals = base_values[p]
-        else:
-            continue
-
-        positions = layout.point_positions(p)
-        for j, (param_name, local_idx) in enumerate(positions):
-            if j >= G:
-                break
-            if param_name not in model_params:
+    # 原地写入叶张量（nn.Parameter）必须关掉梯度，否则会报
+    # "a view of a leaf Variable that requires grad is being used in
+    #  an in-place operation"。
+    with torch.no_grad():
+        for p in range(layout.v):
+            if p in marked:
+                vals = point_values[p]
+            elif write_baseline:
+                vals = base_values[p]
+            else:
                 continue
-            flat = model_params[param_name].view(-1)
-            if 0 <= local_idx < flat.numel():
-                flat[local_idx] = float(vals[j])
+
+            positions = layout.point_positions(p)
+            for j, (param_name, local_idx) in enumerate(positions):
+                if j >= G:
+                    break
+                if param_name not in model_params:
+                    continue
+                flat = model_params[param_name].view(-1)
+                if 0 <= local_idx < flat.numel():
+                    flat[local_idx] = float(vals[j])
 
     return model_params
 

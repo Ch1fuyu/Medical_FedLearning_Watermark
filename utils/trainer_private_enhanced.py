@@ -168,26 +168,21 @@ class TrainerPrivateEnhanced:
         self._key_manager = None
         
         # MultiLoss和掩码管理器
-        # 冻结模式下水印区域的梯度会被直接置零，capping 已无意义
-        self.freeze_watermark_region = bool(
-            args and getattr(args, 'freeze_watermark_region', False))
+        # 水印梯度缩放（capping）始终开启：把水印区梯度压到
+        # 非水印区的 target_ratio 倍，从而抑制水印区被任务梯度推动，
+        # 同时不浪费优化器状态（相比"梯度置零"，Adam 的动量不会被污染）。
         self.multi_loss = MultiLoss(
             model=self.model,
             target_ratio=getattr(self.args, 'watermark_grad_target_ratio', 0.3),
-            enable_capping=not self.freeze_watermark_region,
+            enable_capping=True,
         )
         # 初始化参数快照，便于后续观察漂移
         if hasattr(self.multi_loss, 'update_param_snapshot'):
             self.multi_loss.update_param_snapshot(self.model)
         self.mask_manager = None
         self.autoencoder = None
-
-        # ---- 水印区域冻结（可选）----
-        # 开启后：客户端自有水印区域 P_k 与抗合谋的见证点区域都不参与
-        # 参数更新，保证服务器下发的权威值被原封不动地带回。
-        # （freeze_watermark_region 已在上面初始化，用于关闭 capping）
-        self.watermark_freezer = None
-        self._wm_snapshot = None
+        # 见证点布局缓存（抗合谋分支；None 表示未启用/未找到）
+        self._witness_layout_cached = None
 
         # 初始化FocalLoss，降低gamma避免过度关注困难样本，提升训练稳定性
         focal_gamma = 1.0  # 降低到1.0，更接近标准BCE
@@ -206,20 +201,6 @@ class TrainerPrivateEnhanced:
             from utils.mask_utils import create_mask_manager
             self.mask_manager = create_mask_manager(model, args.key_matrix_path, args)
 
-        # 初始化水印冻结器（需要 key_matrix 目录；见证点布局为可选）
-        if self.freeze_watermark_region and args and getattr(args, 'key_matrix_path', None):
-            try:
-                from utils.watermark_freeze import WatermarkFreezer
-                self.watermark_freezer = WatermarkFreezer(
-                    model, args.key_matrix_path, args=args)
-                witness_note = (f", 见证点区域 {len(self.watermark_freezer.witness_positions())} 个位置"
-                                if self.watermark_freezer.has_witness
-                                else ", 未找到见证点布局（仅冻结 P_k）")
-                print(f"✅ 水印冻结已启用{witness_note}")
-            except Exception as e:
-                print(f"⚠️ 水印冻结初始化失败: {e}")
-                self.watermark_freezer = None
-        
         # 初始化自编码器（如果使用增强水印模式）
         if args and getattr(args, 'watermark_mode', '') == 'enhanced':
             self._initialize_autoencoder()
@@ -374,6 +355,99 @@ class TrainerPrivateEnhanced:
         except Exception as e:
             print(f"⚠️ 水印嵌入失败: {e}")
 
+    # ------------------------------------------------------------------
+    # 见证点水印（抗合谋）：训练后硬覆盖
+    # ------------------------------------------------------------------
+    def _load_witness_layout(self):
+        """加载见证点布局（抗合谋水印）；找不到返回 None。
+
+        与 ``main.py`` 的同名方法保持一致的分支隔离规则：
+        只有抗合谋分支（``key_matrix_profile == 'collusion'``）才使用见证点。
+        """
+        if getattr(self, '_witness_layout_cached', None) is not None:
+            return self._witness_layout_cached
+
+        profile = getattr(self.args, 'key_matrix_profile', None)
+        if profile == 'default':
+            self._witness_layout_cached = None
+            return None
+
+        try:
+            from utils.collusion_resistant import (
+                find_witness_layout,
+                load_witness_layout,
+            )
+
+            path = find_witness_layout(
+                self.args.key_matrix_path,
+                model_type=getattr(self.args, 'model_name', None),
+                client_num=getattr(self.args, 'client_num', None),
+            )
+            if path:
+                layout = load_witness_layout(path)
+                if layout.point_values is None:
+                    # v1 旧布局没有密钥派生值，计数解码不可用
+                    layout = None
+                self._witness_layout_cached = layout
+                return layout
+        except Exception as e:
+            print(f"⚠️ 见证点布局加载失败: {e}")
+
+        self._witness_layout_cached = None
+        return None
+
+    def _embed_witness_points(self, client_id, encoder_params=None):
+        """把见证点权威值/基线**硬覆盖**到模型上。
+
+        见证点计数解码依赖等式
+
+            L[p] = (m_p / K) * e_p + (1 - m_p / K) * b_p
+
+        即"每个客户端在见证点上的取值必须是精确的 e_p（标记点）或
+        b_p（基线点）"。本地训练会用任务梯度推动这些位置，DP 噪声也会
+        叠加上去，因此必须在训练结束后把权威值**硬覆盖**回去。
+
+        为什么用"训练后覆盖"而不是"训练期冻结"：
+            训练期冻结（梯度置零 + 参数还原）会污染 Adam 的动量状态
+            （置零的梯度仍会被累积进 exp_avg / exp_avg_sq），实测导致
+            主任务精度掉约 8 个百分点；而且它与梯度缩放（capping）互斥。
+            训练后覆盖不触碰任何梯度，对主任务零副作用。
+        """
+        layout = self._load_witness_layout()
+        if layout is None:
+            return False
+
+        try:
+            from utils.collusion_resistant import embed_witness_watermark_torch
+
+            if encoder_params is None:
+                encoder_params = self._extract_encoder_parameters()
+
+            with torch.no_grad():
+                model_params = dict(self.model.named_parameters())
+                embed_witness_watermark_torch(model_params, layout, client_id,
+                                              encoder_params)
+                for name, param in self.model.named_parameters():
+                    if name in model_params:
+                        param.data.copy_(model_params[name])
+            return True
+        except Exception as e:
+            print(f"⚠️ 见证点覆盖失败 (client={client_id}): {e}")
+            return False
+
+    def _restore_watermark_after_training(self, client_id, current_epoch):
+        """本地训练结束后，把水印区域（P_k 与见证点）硬覆盖回权威值。
+
+        这是"水印是硬覆盖的"这一底层逻辑的落点：
+        客户端本地训练只负责学主任务；水印区域的值始终由服务器下发的
+        权威值决定，训练造成的漂移一律在此抹平。
+        """
+        # 1) 客户端自有独占切片 P_k
+        self._embed_watermark(client_id, current_epoch)
+
+        # 2) 抗合谋见证点（跨客户端共享位置）
+        self._embed_witness_points(client_id)
+
     def local_update(self, dataloader, local_ep, lr, client_id, current_epoch=0, total_epochs=100,
                      skip_gradient_scaling=False):
         """本地更新，支持MultiLoss和自编码器训练
@@ -412,10 +486,6 @@ class TrainerPrivateEnhanced:
 
         epoch_loss, epoch_acc = [], []
 
-        # 冻结模式：记录水印区域（含见证点）的初始值，作为训练后还原的基准
-        if self.watermark_freezer is not None:
-            self._wm_snapshot = self.watermark_freezer.snapshot(client_id)
-
         for epoch in range(local_ep):
             loss_meter = 0.0
             acc_meter = 0.0
@@ -451,18 +521,9 @@ class TrainerPrivateEnhanced:
                         skip_gradient_scaling=skip_gradient_scaling
                     )
                 
-                # 冻结模式：把水印区域（含见证点）的梯度置零
-                if self.watermark_freezer is not None:
-                    self.watermark_freezer.zero_grads(client_id)
-
                 # 梯度裁剪
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
-
-                # 冻结模式：把水印区域（含见证点）还原为初始值
-                # （抵消 weight decay / 动量 / DP 噪声等一切改动）
-                if self.watermark_freezer is not None and self._wm_snapshot:
-                    self.watermark_freezer.restore(self._wm_snapshot)
 
                 batch_acc = self._compute_accuracy(pred, y)
                 acc_meter += batch_acc.item() * x.size(0) / 100.0
@@ -496,9 +557,10 @@ class TrainerPrivateEnhanced:
             for param in self.model.parameters():
                 param.data = param.data + torch.normal(torch.zeros(param.size()), self.sigma).to(self.device)
 
-        # 冻结模式：DP 噪声会改动所有参数（含水印区域），必须在此之后还原
-        if self.watermark_freezer is not None and self._wm_snapshot:
-            self.watermark_freezer.restore(self._wm_snapshot)
+        # 水印硬覆盖：把训练造成的漂移（含 DP 噪声）抹平，
+        # 让见证点严格满足 L[p] = (m_p/K)*e_p + (1-m_p/K)*b_p。
+        # （必须在 DP 噪声之后，否则噪声会再次污染水印区）
+        self._restore_watermark_after_training(client_id, current_epoch)
 
         return self.model.state_dict(), np.mean(epoch_loss), np.mean(epoch_acc)
 

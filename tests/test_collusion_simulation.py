@@ -50,15 +50,15 @@ def build_server(collusion_size=2, stage="pre_training",
     return srv
 
 
-def make_customized_models(srv, seed=0, freeze_witness=True):
+def make_customized_models(srv, seed=0, overwrite_witness=True):
     """模拟各客户端的定制模型（含见证点 + 私有切片 + 本地训练漂移）。
 
-    freeze_witness=True（默认）时，**见证点区域不参与漂移**，
-    与真实流程一致：抗合谋分支会自动开启 freeze_watermark_region，
-    客户端本地训练不会改动见证点位置，因此见证点信号在所有客户端、
-    所有轮次上保持固定。
+    overwrite_witness=True（默认）时，模拟真实流程中的**训练后硬覆盖**：
+    客户端本地训练会让见证点区域产生漂移，但训练结束后服务器下发的
+    权威值会被**硬覆盖**回去，因此见证点在最终上报的模型里
+    保持为精确的 e_p（标记点）/ b_p（基线点）。
 
-    这很重要 —— 若让见证点也漂移，见证点比值的噪声会达到信号量级
+    这很重要 —— 若不覆盖，见证点比值的噪声会达到信号量级
     （|e_p| 最小仅 0.025，而漂移 std 为 0.05），
     计数解码的规模推断就会频繁误判（实测准确率从 100% 掉到 ~94%）。
     """
@@ -67,18 +67,10 @@ def make_customized_models(srv, seed=0, freeze_witness=True):
     model = resnet18(num_classes=10, in_channels=3, input_size=28)
     enc = torch.tensor(rng.normal(0, 1, 9472), dtype=torch.float32)
 
-    # 见证点位置集合（冻结区域）
-    witness_pos = {}
-    for nm, ix in layout.positions:
-        witness_pos.setdefault(nm, set()).add(int(ix))
-
     import json
     for cid in range(N):
         m = {k: (torch.randn_like(v) * 0.05 if v.dtype.is_floating_point
                  else v.clone()) for k, v in model.state_dict().items()}
-        # 见证点
-        from utils.collusion_resistant import embed_witness_watermark_torch
-        embed_witness_watermark_torch(m, layout, cid, enc)
         # 私有切片
         with open(os.path.join(BASE, f"client_{cid}", "positions.json")) as f:
             ps = json.load(f)
@@ -89,15 +81,14 @@ def make_customized_models(srv, seed=0, freeze_witness=True):
         for i, (nm, ix) in enumerate(ps):
             if nm in m and off + i < 9472:
                 m[nm].reshape(-1)[ix] = float(enc[off + i])
-        # 本地训练漂移（见证点区域被冻结，不漂移）
+        # 本地训练漂移（**所有位置**都漂移，含见证点区域）
         for k in m:
             if m[k].dtype.is_floating_point:
-                d = 0.05 * torch.randn_like(m[k])
-                if freeze_witness and k in witness_pos:
-                    flat = d.view(-1)
-                    flat[torch.tensor(sorted(witness_pos[k]), dtype=torch.long)] = 0.0
-                    d = flat.view(m[k].shape)
-                m[k] = m[k] + d
+                m[k] = m[k] + 0.05 * torch.randn_like(m[k])
+        # 训练后硬覆盖：见证点权威值 / 基线值写回
+        if overwrite_witness:
+            from utils.collusion_resistant import embed_witness_watermark_torch
+            embed_witness_watermark_torch(m, layout, cid, enc)
         srv.customized_models[cid] = m
     return srv
 

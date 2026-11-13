@@ -60,7 +60,6 @@ EXPERIMENT_CONFIG: Dict[str, Any] = {
     'key_matrix_dir': None,
     'key_matrix_profile': 'collusion',
     'enable_witness': True,        # 启用见证点水印
-    'freeze_watermark_region': True,   # 冻结水印区域（抗合谋必须开）
 
     # ---------------- 差分隐私 ----------------
     'dp': True,
@@ -560,12 +559,6 @@ def parser_args():
                         help='见证点权威值幅度（默认 0.05）')
     parser.add_argument('--witness_secret_file', type=str, default=None,
                         help='从文件读取见证点密钥（推荐，避免密钥进入命令行历史）')
-    parser.add_argument('--freeze_watermark_region', action='store_true',
-                        default=False,
-                        help='冻结水印区域：本地训练期间客户端自有水印区域 P_k '
-                             '与抗合谋见证点区域都不参与参数更新，'
-                             '保证服务器下发的权威值被原封不动地带回，'
-                             '并保证见证点信号不随轮次衰减。')
 
     # ========================= 差分隐私参数 ========================
     parser.add_argument('--dp', action='store_true', default=False, help='enable differential privacy')
@@ -619,12 +612,20 @@ def parser_args():
         # （目录本身用显式传入的值，不被覆盖。）
         if args.key_matrix_profile == 'default':
             args.key_matrix_profile = 'collusion'
-        # 抗合谋分支必须冻结水印区域（含见证点），否则：
-        #   - 任务梯度 / DP 噪声会把见证点冲掉，信号在若干轮后消失；
-        #   - 见证点区域会随 w_t 漂移，"固定基线"的前提不成立。
-        args.freeze_watermark_region = True
+        # 注：这里**不再**强制开启水印区域冻结。
+        #
+        # 见证点的"跨轮固定"由**服务器端每轮重写**保证：
+        #   - _generate_customized_model 把客户端自有切片 P_k 覆盖为权威值；
+        #   - _embed_witness_points 把见证点池写成 e_p（标记点）/ b_p（基线点）。
+        # 因此本地训练期间的梯度漂移不影响解码——每一轮下发的定制模型
+        # 里见证点都是精确的。
+        #
+        # 冻结（梯度置零 + 参数还原）曾被用于固定见证点，但实测会让主任务
+        # 精度掉 ~8pt：置零的水印区梯度仍会被 Adam 累积进动量，污染优化器
+        # 状态；且它与梯度缩放（capping）互斥，等于把缩放挤掉了。
+        # 现改为沿用原设计：**梯度缩放**（watermark_grad_target_ratio）。
         print('🔒 抗合谋评测模式：已关闭单客户端泄漏仿真与追踪，'
-              '开启合谋检测，已自动开启水印区域冻结')
+              '开启合谋检测，使用梯度缩放保护水印区域')
 
     # 密钥矩阵目录：优先 --key_matrix_dir，否则按 profile + dataset 决定
     # 不同实验分支/数据集用互不干扰的目录，避免切换时
