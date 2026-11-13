@@ -406,7 +406,26 @@ cifar100   -> save/key_matrix_collusion_cifar100   + config/collusion_presets_ci
 [合谋检测] 布局 design.K=3 推出的搜索上界 5 < 合谋规模 K=6，已自动放宽到 6。
 ```
 
-若仍失败，检查见证点区域是否被正确冻结（`--collusion_only` 会自动开启）。
+若仍失败，检查见证点是否被正确写入。若归因残差明显大于 0，说明见证点
+在训练后没有被覆盖回权威值 —— 检查 `utils/trainer_private_enhanced.py` 里的
+`_restore_watermark_after_training` 是否被调用（它必须在 DP 噪声之后执行）。
+
+### Q: 抗合谋支持噪声攻击吗？
+
+**不支持，这是刻意设计的。** 抗合谋的威胁模型是**纯参数平均**：
+合谋者只做等权参数平均，不加噪声、不裁剪、不做后处理。
+
+原因：见证点计数解码依赖等式
+
+```
+L[p] = (m_p / K) * e_p + (1 - m_p / K) * b_p
+```
+
+该等式只在**纯平均**下精确成立。允许合谋者加噪声会让等式失效，
+规模推断随之失准。因此 `--collusion_attack_mode` 选项已被移除。
+
+（单客户端泄漏追踪那条线仍保留 `--leak_attack_mode` 与 `--leak_noise_*`，
+那是另一套威胁模型，与抗合谋互斥。）
 
 ### Q: 想跑"泄漏追踪"实验（带噪声攻击）
 

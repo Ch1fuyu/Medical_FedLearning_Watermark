@@ -204,7 +204,7 @@ class FederatedLearningOnChestMNIST(Experiment):
         if collusion_on:
             logging.info(f'    合谋规模 K={getattr(self.args, "collusion_size", 2)}'
                          f' | 阶段={getattr(self.args, "collusion_leak_stage", "?")}'
-                         f' | 攻击={getattr(self.args, "collusion_attack_mode", "?")}')
+                         f' | 攻击=纯参数平均')
             spec = getattr(self.args, 'collusion_spec', None)
             if spec is not None:
                 cap = spec.search_cap
@@ -1694,16 +1694,15 @@ class FederatedLearningOnChestMNIST(Experiment):
                 continue
             colluded[k] = acc / len(colluders)
 
-        # 可选：噪声攻击
-        attack_mode = getattr(self.args, 'collusion_attack_mode', 'none')
-        if attack_mode == 'gaussian_noise':
-            noise_scale = getattr(self.args, 'leak_noise_medium', 0.05)
-            for k in colluded:
-                if colluded[k].dtype.is_floating_point and colluded[k].numel() > 1:
-                    std = float(colluded[k].std())
-                    if std > 0:
-                        colluded[k] = colluded[k] + noise_scale * std * torch.randn_like(
-                            colluded[k])
+        # 威胁模型：**纯参数平均**。
+        #
+        # 合谋者只做等权参数平均，不加任何噪声、不做裁剪、不做后处理。
+        # 这是抗合谋水印的标准威胁模型：
+        #   - 见证点计数解码依赖 L[p] = (m_p/K)*e_p + (1-m_p/K)*b_p，
+        #     该等式只在"纯平均"下精确成立；
+        #   - 若允许合谋者加噪声，等式不再精确，规模推断会失准。
+        # 因此这里刻意**不提供**噪声攻击选项（曾经有
+        # --collusion_attack_mode gaussian_noise，已移除）。
 
         leak_info = {
             'round': epoch + 1,
@@ -1713,7 +1712,6 @@ class FederatedLearningOnChestMNIST(Experiment):
             'K': K,
             'model_params': colluded,
             'client_models': client_models,
-            'attack_mode': attack_mode,
         }
 
         logging.info(f'[合谋仿真] 第 {epoch + 1} 轮 - 客户端 {colluders} '

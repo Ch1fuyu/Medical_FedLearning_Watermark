@@ -51,7 +51,7 @@ EXPERIMENT_CONFIG: Dict[str, Any] = {
     'collusion_only': True,        # 一键切到抗合谋评测模式
     'collusion_size': 3,           # 仿真的合谋规模 K
     'collusion_leak_stage': 'post_training',   # pre_training / post_training
-    'collusion_attack_mode': 'none',            # none / gaussian_noise
+    # 威胁模型 = 纯参数平均（不提供噪声攻击选项）
     # None = 按 profile + dataset 自动推导:
     #   chestmnist -> save/key_matrix_collusion
     #   其他        -> save/key_matrix_collusion_<dataset>
@@ -560,9 +560,9 @@ def parser_args():
     parser.add_argument('--collusion_leak_stage', type=str, default='pre_training',
                         choices=['pre_training', 'post_training'],
                         help='collusion stage: average customized models (pre) or trained models (post)')
-    parser.add_argument('--collusion_attack_mode', type=str, default='none',
-                        choices=['none', 'gaussian_noise'],
-                        help='attack applied to the colluded model')
+    # 注：抗合谋的威胁模型是**纯参数平均**，因此刻意不提供噪声攻击选项。
+    # 见证点计数解码依赖 L[p] = (m_p/K)*e_p + (1-m_p/K)*b_p，
+    # 该等式只在纯平均下精确成立。
 
     # ========================= 见证点密钥 / 冻结 ========================
     parser.add_argument('--witness_secret', type=str, default=None,

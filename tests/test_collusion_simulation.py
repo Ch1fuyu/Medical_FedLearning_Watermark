@@ -24,8 +24,7 @@ BASE = r"D:\CODE\Medical_FedLearning_Watermark\save\key_matrix_collusion\resnet\
 N = 10
 
 
-def build_server(collusion_size=2, stage="pre_training",
-                 attack_mode="none", enable=True):
+def build_server(collusion_size=2, stage="pre_training", enable=True):
     """构造一个最小化的 FLServer 实例。"""
     from main import FederatedLearningOnChestMNIST as FLServer
 
@@ -37,8 +36,6 @@ def build_server(collusion_size=2, stage="pre_training",
         enable_collusion_detection=enable,
         collusion_size=collusion_size,
         collusion_leak_stage=stage,
-        collusion_attack_mode=attack_mode,
-        leak_noise_medium=0.05,
     )
     srv = FLServer.__new__(FLServer)
     srv.args = args
@@ -162,9 +159,14 @@ def test_post_training_stage():
     print("  [OK] post_training 阶段归因正确")
 
 
-def test_noise_attack():
-    print("== test_noise_attack ==")
-    srv = build_server(collusion_size=2, attack_mode="gaussian_noise")
+def test_pure_averaging_attack():
+    """威胁模型：合谋者只做**纯参数平均**（不加任何噪声）。
+
+    见证点计数解码依赖 L[p] = (m_p/K)*e_p + (1-m_p/K)*b_p，
+    该等式只在纯平均下精确成立，因此抗合谋分支刻意不提供噪声攻击。
+    """
+    print("== test_pure_averaging_attack ==")
+    srv = build_server(collusion_size=2)
     make_customized_models(srv, seed=3)
     idxs = list(range(N))
     ok = 0
@@ -172,12 +174,19 @@ def test_noise_attack():
     for t in range(T):
         np.random.seed(3000 + t)
         info = srv._simulate_collusion_leakage(0, idxs, local_ws=None)
+        # 泄漏模型必须就是各合谋者模型的等权算术平均（无任何额外扰动）
+        colluders = info['colluders']
+        for k in list(info['model_params'].keys())[:3]:
+            expect = sum(info['client_models'][c][k].float()
+                         for c in colluders) / len(colluders)
+            assert torch.allclose(info['model_params'][k], expect, atol=1e-6), \
+                f"参数 {k} 不是纯算术平均"
         result = srv._detect_collusion_leakage(info, idxs)
         if result['is_correct']:
             ok += 1
-    print(f"  噪声攻击下归因 {ok}/{T}")
+    print(f"  纯平均攻击下归因 {ok}/{T}")
     assert ok == T
-    print("  [OK] 抗噪声归因")
+    print("  [OK] 纯参数平均攻击下归因正确")
 
 
 def test_disabled():
@@ -247,7 +256,7 @@ def main():
     test_simulate_collusion()
     test_detect_collusion()
     test_post_training_stage()
-    test_noise_attack()
+    test_pure_averaging_attack()
     test_disabled()
     test_disable_single_client_leak()
     print("\n合谋仿真集成测试全部通过 ✅")
