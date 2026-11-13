@@ -261,8 +261,7 @@ python main.py \
     --local_ep 1 \
     --batch_size 128 \
     --collusion_size 3 \
-    --collusion_leak_stage post_training \
-    --dp --sigma 0.05
+    --collusion_leak_stage post_training
 ```
 
 ### 6.2 CIFAR10（目录与配置表自动推导）
@@ -276,9 +275,16 @@ python main.py \
     --local_ep 1 \
     --batch_size 128 \
     --collusion_size 3 \
-    --collusion_leak_stage post_training \
-    --dp --sigma 0.05
+    --collusion_leak_stage post_training
 ```
+
+> **关于 `--dp` / `--sigma`**：抗合谋主实验**默认关闭** DP。
+> 这里的"DP"只是给每个客户端参数加高斯噪声（无 per-sample 裁剪、
+> 无隐私预算会计），不构成可论证的 (ε, δ) 保证，却会拖垮主任务
+> （10 轮消融：DP 开 0.5309 vs DP 关 0.6323）。
+> 归因准确率两种设置都是 100%（见证点训练后硬覆盖，噪声被一并抹平）。
+> 需要"带隐私噪声"的场景时，用小 sigma（如 `--dp --sigma 0.01`），
+> 或在泄漏追踪实验里用 `--leak_noise_*`（攻击噪声，语义更明确）。
 
 > 更推荐的做法：直接在 `utils/args.py` 的 `EXPERIMENT_CONFIG` 里改，
 > 然后 `python main.py` 即可（不用敲任何命令行参数）。
@@ -337,7 +343,8 @@ EXPERIMENT_CONFIG: Dict[str, Any] = {
     'enable_witness': True,
 
     # ---------------- 差分隐私 ----------------
-    'dp': True,
+    # 抗合谋主实验默认关闭（原因见 utils/args.py 里的详细注释）
+    'dp': False,
     'sigma': 0.05,
     ...
 }
