@@ -62,15 +62,15 @@ MAIN_PY_PATH = PROJECT_ROOT / 'main.py'
 # ======================================================================
 
 #: 实验模式：'baseline' | 'collusion'
-MODE = 'baseline'
+MODE = 'collusion'
 
 # ---- 所有实验共享的固定配置 ----
 BASE_CONFIG = {
     '--optim': 'adam',
     '--lr': '0.001',
     '--watermark_grad_target_ratio': '0.3',
-    '--epochs': '10',
-    '--local_ep': '1',
+    '--epochs': '150',
+    '--local_ep': '2',
     '--batch_size': '128',
 }
 
@@ -82,7 +82,7 @@ MODELS = ['alexnet', 'resnet']
 CLIENT_NUMS = ['5', '10', '20']
 
 #: 'collusion' 模式：合谋规模 K（传给 --collusion_size）
-COLLUSION_SIZES = ['2', '3', '4']
+COLLUSION_SIZES = ['3']
 
 
 def build_experiments(mode):
