@@ -17,7 +17,7 @@ PY = r"D:\Environment\anaconda\envs\Med_FL_WM\python.exe"
 PROBE = """
 import sys
 sys.path.insert(0, r'{root}')
-sys.argv = ['x'] + {extra!r} + ['--client_num', '5', '--model_name', 'alexnet',
+sys.argv = [{script!r}] + {extra!r} + ['--client_num', '5', '--model_name', 'alexnet',
                               '--dataset', {dataset!r}]
 from utils.args import parser_args
 a = parser_args()
@@ -27,12 +27,16 @@ print('R|' + repr({{
     'enable_collusion_detection': a.enable_collusion_detection,
     'key_matrix_profile': a.key_matrix_profile,
     'key_matrix_path': a.key_matrix_path,
+    'client_num': a.client_num,
+    'epochs': a.epochs,
+    'collusion_only': a.collusion_only,
+    'dp': a.dp,
 }}))
 """
 
 
-def probe(extra, dataset='chestmnist'):
-    code = PROBE.format(root=ROOT, extra=extra, dataset=dataset)
+def probe(extra, dataset='chestmnist', script='x'):
+    code = PROBE.format(root=ROOT, extra=extra, dataset=dataset, script=script)
     r = subprocess.run([PY, "-c", code], capture_output=True, text=True,
                        cwd=ROOT, encoding="utf-8", errors="replace")
     for line in r.stdout.splitlines():
@@ -84,7 +88,7 @@ def test_explicit_missing_dir_exits():
     print("== test_explicit_missing_dir_exits ==")
     # 显式指定了不存在的目录 -> 应该退出并说明，而不是带着坏配置继续跑
     r = subprocess.run(
-        [PY, "-c", PROBE.format(root=ROOT, dataset='chestmnist',
+        [PY, "-c", PROBE.format(root=ROOT, dataset='chestmnist', script='x',
                                  extra=["--collusion_only",
                                         "--key_matrix_dir", "save/mykeymatrix"])],
         capture_output=True, text=True, cwd=ROOT,
@@ -99,7 +103,7 @@ def test_dataset_mismatch_exits():
     print("== test_dataset_mismatch_exits ==")
     # 目录是 cifar10 生成的，但用了 chestmnist 配置表 -> 应退出并说明
     r = subprocess.run(
-        [PY, "-c", PROBE.format(root=ROOT, dataset='chestmnist',
+        [PY, "-c", PROBE.format(root=ROOT, dataset='chestmnist', script='x',
                                  extra=["--collusion_only",
                                         "--key_matrix_dir",
                                         "save/key_matrix_collusion_cifar10"])],
@@ -110,12 +114,47 @@ def test_dataset_mismatch_exits():
     print("  [OK] 数据集不匹配时退出并说明原因")
 
 
+def test_no_config_center_disables_experiment_config():
+    """--no_config_center 应完全关闭 EXPERIMENT_CONFIG 配置块。
+
+    背景：批量实验脚本（utils/run_sweep.py）逐个传参给 main.py 子进程，
+    若不关闭配置中心，配置块里的 collusion_only / client_num / epochs
+    等设置会污染每一次运行，使 sweep 的遍历维度失效。
+    """
+    print("== test_no_config_center_disables_experiment_config ==")
+
+    # 模拟 run_sweep.py 的调用：以 main.py 为入口 + 显式参数
+    d = probe(["--no_config_center"], dataset='cifar10', script='main.py')
+    print("  %s" % d)
+
+    # 配置中心里的 'collusion_only': True 不应生效
+    assert d['collusion_only'] is False, "配置中心的 collusion_only 泄漏了"
+    assert d['enable_collusion_detection'] is False, "配置中心污染了合谋检测"
+    # 配置中心里的 'dp': False / 'sigma' 等也应让位给 argparse 默认值
+    assert d['dp'] is False, "配置中心的 dp 设置泄漏了"
+    # 配置中心里的 'epochs': 3 不应生效（argparse 默认 150）
+    assert d['epochs'] == 150, f"配置中心的 epochs 泄漏了: {d['epochs']}"
+    print("  [OK] 配置中心已完全关闭，全部使用命令行 + argparse 默认值")
+
+
+def test_config_center_applies_without_switch():
+    """不加 --no_config_center 时，配置中心仍应正常生效（手改配置的入口）。"""
+    print("== test_config_center_applies_without_switch ==")
+    d = probe([], dataset='cifar10', script='main.py')
+    print("  %s" % d)
+    assert d['collusion_only'] is True, "配置中心未生效（collusion_only）"
+    assert d['epochs'] == 3, f"配置中心的 epochs 未生效: {d['epochs']}"
+    print("  [OK] 不加开关时配置中心正常生效")
+
+
 def main():
     test_collusion_only()
     test_default_unchanged()
     test_explicit_override()
     test_explicit_missing_dir_exits()
     test_dataset_mismatch_exits()
+    test_no_config_center_disables_experiment_config()
+    test_config_center_applies_without_switch()
     print("\ncollusion_only 模式测试全部通过 ✅")
 
 

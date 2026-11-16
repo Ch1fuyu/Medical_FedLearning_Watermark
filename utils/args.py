@@ -196,7 +196,8 @@ def _apply_experiment_config(parser, args) -> list:
       - 配置块里的键若在命令行出现过（包括 ``--no_xxx`` 这类反向开关），
         **不覆盖**，命令行优先；
       - 其余情况用配置块的值覆盖 argparse 默认值；
-      - 当前脚本不在 :data:`_CONFIG_TARGET_SCRIPTS` 里时**完全不应用**。
+      - 当前脚本不在 :data:`_CONFIG_TARGET_SCRIPTS` 里时**完全不应用**；
+      - 命令行给了 ``--no_config_center`` 时**完全不应用**（显式关闭优先）。
 
     Args:
         parser: 已构建好的 ArgumentParser。
@@ -206,6 +207,13 @@ def _apply_experiment_config(parser, args) -> list:
         被配置块实际改动的参数名列表。
     """
     if not _config_applies_to_current_script():
+        return []
+
+    # --no_config_center：显式关闭配置中心（批量实验脚本用）
+    if getattr(args, 'no_config_center', False):
+        print('ℹ️  已通过 --no_config_center 关闭实验配置中心 '
+              '(utils/args.py: EXPERIMENT_CONFIG)，'
+              '本次完全使用命令行参数 + argparse 默认值')
         return []
 
     explicit = _explicit_cli_options(parser)
@@ -596,6 +604,13 @@ def parser_args():
                         help='compress saved weights to float16 (saves space, but pruning attacks need exact 0/non-zero values)')
     parser.add_argument('--no_compress_model', action='store_false', dest='compress_model',
                         help='save weights in float32 without compression')
+
+    # ========================= 配置中心开关 ========================
+    parser.add_argument('--no_config_center', action='store_true', default=False,
+                        help='不应用 utils/args.py 的 EXPERIMENT_CONFIG 配置块，'
+                             '完全使用命令行参数 + argparse 默认值。'
+                             '批量实验脚本（如 utils/run_sweep.py）应带上这个开关，'
+                             '否则配置中心里的 collusion_only 等设置会污染每一次运行。')
 
     args = parser.parse_args()
 
