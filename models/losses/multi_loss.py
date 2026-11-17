@@ -31,9 +31,32 @@ class FocalLoss(nn.Module):
 class MultiLoss:
     """Minimal wrapper for watermark-gradient diagnostics and param-drift tracking."""
 
-    def __init__(self, model=None, target_ratio=0.3):
+    #: 水印梯度缩放系数的**默认下限**。
+    #:
+    #: 语义：最多把水印区梯度压到原来的 ``DEFAULT_MIN_SCALE_FACTOR`` 倍，
+    #: 避免"水印信号被压得几乎消失"的极端情况。
+    #:
+    #: 取值依据：当原始 wm/non_wm 比例 R ≈ 1.0（实测值）时，
+    #: ``target_ratio >= 0.1`` 就能精确达成目标，下限不会生效；
+    #: 因此下限只会在"原始比例被推到极端高"时起保护作用。
+    #: 历史上该下限为 0.1，现改为可配置（见 ``min_scale_factor``）。
+    DEFAULT_MIN_SCALE_FACTOR = 0.01
+
+    def __init__(self, model=None, target_ratio=0.3,
+                 min_scale_factor: float = None):
         self.model = model
         self.target_ratio = target_ratio
+        #: 缩放系数下限。None 时使用 :attr:`DEFAULT_MIN_SCALE_FACTOR`。
+        #: 可通过命令行 ``--watermark_grad_min_scale_factor`` 覆盖。
+        self.min_scale_factor = (
+            self.DEFAULT_MIN_SCALE_FACTOR
+            if min_scale_factor is None
+            else float(min_scale_factor)
+        )
+        if not (0.0 < self.min_scale_factor <= 1.0):
+            raise ValueError(
+                f"min_scale_factor 必须在 (0, 1] 区间内，实际={self.min_scale_factor}"
+            )
         self.device = None
 
         self._ema_gm = 0.0
@@ -219,10 +242,12 @@ class MultiLoss:
 
             if current_wm_grad_val > 1e-10:
                 # 缩放因子：把水印区梯度均值压到 target_ratio * 非水印区梯度均值。
-                # 下限 0.1 是有意设计：最多把水印区梯度压到原来的 10%，
-                # 避免过度削弱水印信号（因此当原比例远大于 target_ratio 时，
-                # 实际达成的比例会是 0.1 * 原比例，而非严格的 target_ratio）。
-                scale_factor = (target_wm_grad / current_wm_grad_val).clamp(min=0.1, max=1.0)
+                # 下限 min_scale_factor 是有意设计：最多把水印区梯度压到原来的
+                # min_scale_factor 倍，避免过度削弱水印信号（因此当原比例远大于
+                # target_ratio 时，实际达成的比例会是 min_scale_factor * 原比例，
+                # 而非严格的 target_ratio）。
+                scale_factor = (target_wm_grad / current_wm_grad_val).clamp(
+                    min=self.min_scale_factor, max=1.0)
 
                 # 只对水印区做等比缩放，保留原始梯度符号。
                 # 注意：不能用 sign() 拆分正负部分再重组，那样负梯度会被翻成正梯度。

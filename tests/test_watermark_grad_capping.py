@@ -8,10 +8,11 @@
 
 1. **符号保持**：缩放后水印区梯度符号不得被翻转
     （历史 bug：用 sign() 拆分正负再重组，导致负梯度变正）
-2. **目标达成**：当缩放系数落在 [0.1, 1.0] 区间内时，
+2. **目标达成**：当缩放系数落在 [min_scale_factor, 1.0] 区间内时，
    实际达成的 wm/non_wm 比例应精确等于 target_ratio
-3. **缩放下限**：scale_factor 下限为 0.1（有意设计），
-   当目标比例远低于原比例时，实际达成比例 = 0.1 × 原比例
+3. **缩放下限**：scale_factor 默认下限为 0.01（``MultiLoss.DEFAULT_MIN_SCALE_FACTOR``），
+   当目标比例远低于原比例时，实际达成比例 = 0.01 × 原比例；
+   下限可通过 ``min_scale_factor`` 参数覆盖
 4. **非水印区不受影响**：非水印区梯度必须原样保留
 5. **未超阈值时不缩放**：wm_ratio <= target_ratio 时梯度不变
 6. **target_ratio=0 关闭 capping**：梯度完全不变
@@ -61,12 +62,17 @@ N_WM = 108
 N_NON = 16
 
 
-def _run_capping(wm_values, non_wm_values, target_ratio, skip_gradient_scaling=False):
+def _run_capping(wm_values, non_wm_values, target_ratio, skip_gradient_scaling=False,
+                 min_scale_factor=None):
     """
     驱动一次 MultiLoss capping，返回 (原始梯度, capping 后梯度, MultiLoss 实例)
+
+    Args:
+        min_scale_factor: 缩放系数下限（None 时用 MultiLoss 的默认值）。
     """
     model = _TinyConvNet()
-    multi_loss = MultiLoss(model=model, target_ratio=target_ratio)
+    multi_loss = MultiLoss(model=model, target_ratio=target_ratio,
+                            min_scale_factor=min_scale_factor)
     multi_loss.set_device(torch.device('cpu'))
 
     n_wm = model.conv1.weight.numel()
@@ -148,16 +154,16 @@ def test_negative_gradient_stays_negative():
 
 def test_target_ratio_is_actually_achieved():
     """
-    当所需缩放系数落在 [0.1, 1.0] 内时，实际达成的比例应精确等于 target_ratio。
+    当所需缩放系数落在 [min_scale_factor, 1.0] 内时，实际达成的比例应精确等于 target_ratio。
 
-    scale_factor = (target_ratio * non_wm_mean / wm_mean).clamp(0.1, 1.0)
+    scale_factor = (target_ratio * non_wm_mean / wm_mean).clamp(min_scale_factor, 1.0)
     即：原比例 R = wm_mean / non_wm_mean，所需 scale = target_ratio / R。
-    当 target_ratio / R >= 0.1 时 clamp 不生效，目标被精确达成。
+    当 target_ratio / R >= min_scale_factor 时 clamp 不生效，目标被精确达成。
     """
     wm = [2.0] * N_WM          # 原比例 R = 2.0
     nonwm = [1.0] * N_NON
 
-    # target_ratio / 2.0 >= 0.1  =>  target_ratio >= 0.2
+    # target_ratio / 2.0 >= min_scale_factor(默认 0.01)  =>  target_ratio >= 0.02
     for target_ratio in [0.5, 0.4, 0.3, 0.2]:
         original, corrected, ml = _run_capping(wm, nonwm, target_ratio=target_ratio)
 
@@ -176,17 +182,18 @@ def test_target_ratio_is_actually_achieved():
 
 def test_achieved_ratio_is_floor_times_original_when_floor_active():
     """
-    当 clamp 下限 0.1 生效时，实际达成比例 = 0.1 × 原比例。
+    当 clamp 下限生效时，实际达成比例 = min_scale_factor × 原比例。
 
-    手工推算：
-      - R = 10.0，target = 0.5  => 所需 scale = 0.05 < 0.1 => 截断为 0.1 => 达成 1.0
-      - R = 10.0，target = 0.1  => 所需 scale = 0.01 < 0.1 => 截断为 0.1 => 达成 1.0
-      - R =  2.0，target = 0.1  => 所需 scale = 0.05 < 0.1 => 截断为 0.1 => 达成 0.2
+    手工推算（默认下限 0.01）：
+      - R = 10.0，target = 0.05 => 所需 scale = 0.005 < 0.01 => 截断为 0.01 => 达成 0.1
+      - R = 10.0，target = 0.01 => 所需 scale = 0.001 < 0.01 => 截断为 0.01 => 达成 0.1
+      - R =  2.0，target = 0.01 => 所需 scale = 0.005 < 0.01 => 截断为 0.01 => 达成 0.02
     """
+    floor = MultiLoss.DEFAULT_MIN_SCALE_FACTOR
     cases = [
-        ([10.0] * N_WM, [1.0] * N_NON, 0.5, 1.0),
-        ([10.0] * N_WM, [1.0] * N_NON, 0.1, 1.0),
-        ([2.0] * N_WM, [1.0] * N_NON, 0.1, 0.2),
+        ([10.0] * N_WM, [1.0] * N_NON, 0.05, 10.0 * floor),
+        ([10.0] * N_WM, [1.0] * N_NON, 0.01, 10.0 * floor),
+        ([2.0] * N_WM, [1.0] * N_NON, 0.01, 2.0 * floor),
     ]
 
     for wm, nonwm, target_ratio, expected in cases:
@@ -197,33 +204,62 @@ def test_achieved_ratio_is_floor_times_original_when_floor_active():
         achieved = new_wm_mean / new_nonwm_mean
 
         assert ml.cap_applied is True, "capping 应已应用"
-        assert abs(ml.cap_scale_factor - 0.1) < 1e-6, (
-            f"scale_factor 应被 clamp 到 0.1，实际={ml.cap_scale_factor:.6f}"
+        assert abs(ml.cap_scale_factor - floor) < 1e-6, (
+            f"scale_factor 应被 clamp 到 {floor}，实际={ml.cap_scale_factor:.6f}"
         )
-        assert abs(achieved - expected) < 0.01, (
+        assert abs(achieved - expected) < 1e-4, (
             f"target_ratio={target_ratio} 期望达成 {expected}，实际={achieved:.4f}"
         )
 
 
-def test_scale_factor_lower_bound_is_0p1():
+def test_scale_factor_lower_bound_is_default_0p01():
     """
-    scale_factor 下限 0.1 是有意设计：最多把水印区梯度压到原来的 10%。
+    scale_factor 默认下限 0.01：最多把水印区梯度压到原来的 1%。
 
-    当目标远低于原比例时，clamp 生效，实际达成比例 = 0.1 × 原比例。
+    当目标远低于原比例时，clamp 生效，实际达成比例 = 0.01 × 原比例。
     """
+    floor = MultiLoss.DEFAULT_MIN_SCALE_FACTOR
+    assert floor == 0.01, f"默认下限应为 0.01，实际={floor}"
+
     wm = [10.0] * N_WM
     nonwm = [1.0] * N_NON
 
-    _, _, ml = _run_capping(wm, nonwm, target_ratio=0.05)
+    # 所需 scale = 0.005 < 0.01 => 截断到 0.01
+    _, _, ml = _run_capping(wm, nonwm, target_ratio=0.005)
 
     assert ml.cap_applied is True
-    assert abs(ml.cap_scale_factor - 0.1) < 1e-6, (
-        f"scale_factor 应被 clamp 到下限 0.1，实际={ml.cap_scale_factor:.6f}"
+    assert abs(ml.cap_scale_factor - floor) < 1e-6, (
+        f"scale_factor 应被 clamp 到下限 {floor}，实际={ml.cap_scale_factor:.6f}"
     )
-    # 原比例 10.0，被压到 10% => 1.0
-    assert abs(ml.current_wm_ratio_after_cap - 1.0) < 0.01, (
+    # 原比例 10.0，被压到 1% => 0.1
+    assert abs(ml.current_wm_ratio_after_cap - 0.1) < 1e-4, (
+        f"实际达成比例应为 0.1，实际={ml.current_wm_ratio_after_cap:.4f}"
+    )
+
+
+def test_min_scale_factor_is_configurable():
+    """min_scale_factor 可显式指定，用于对照实验。"""
+    wm = [10.0] * N_WM
+    nonwm = [1.0] * N_NON
+
+    # 显式指定 0.1（历史值）=> 达成 0.1 × 10.0 = 1.0
+    _, _, ml = _run_capping(wm, nonwm, target_ratio=0.05, min_scale_factor=0.1)
+    assert abs(ml.cap_scale_factor - 0.1) < 1e-6, (
+        f"显式指定下限 0.1 时 scale 应为 0.1，实际={ml.cap_scale_factor:.6f}"
+    )
+    assert abs(ml.current_wm_ratio_after_cap - 1.0) < 1e-4, (
         f"实际达成比例应为 1.0，实际={ml.current_wm_ratio_after_cap:.4f}"
     )
+
+
+def test_min_scale_factor_rejects_invalid_values():
+    """非法下限必须直接报错，而不是静默产生错误结果。"""
+    for bad in (0.0, -0.1, 1.5):
+        try:
+            MultiLoss(model=_TinyConvNet(), target_ratio=0.3, min_scale_factor=bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"min_scale_factor={bad} 应当抛出 ValueError")
 
 
 def test_achieved_ratio_tracks_target_across_range():
@@ -374,25 +410,25 @@ def test_after_cap_ratio_not_exceed_target():
 
 def test_after_cap_ratio_may_exceed_target_when_floor_active():
     """
-    当 clamp 下限生效时，实际达成比例可能高于 target_ratio（这是下限 0.1 的已知后果）。
+    当 clamp 下限生效时，实际达成比例可能高于 target_ratio（这是下限的已知后果）。
 
-    原比例 10.0，目标 0.1 所需 scale = 0.01 < 0.1，被截断到 0.1，
-    实际达成比例 = 0.1 × 10.0 = 1.0 > 0.1。
+    原比例 10.0，目标 0.005 所需 scale = 0.0005 < 0.01，被截断到 0.01，
+    实际达成比例 = 0.01 × 10.0 = 0.1 > 0.005。
     """
     wm = [10.0] * N_WM
     nonwm = [1.0] * N_NON
 
-    _, _, ml = _run_capping(wm, nonwm, target_ratio=0.1)
+    _, _, ml = _run_capping(wm, nonwm, target_ratio=0.005)
 
     assert ml.cap_applied is True
-    assert abs(ml.cap_scale_factor - 0.1) < 1e-6, (
-        f"scale_factor 应被 clamp 到 0.1，实际={ml.cap_scale_factor:.6f}"
+    assert abs(ml.cap_scale_factor - 0.01) < 1e-6, (
+        f"scale_factor 应被 clamp 到 0.01，实际={ml.cap_scale_factor:.6f}"
     )
-    assert ml.current_wm_ratio_after_cap > 0.1, (
-        "下限生效时达成比例应高于目标（本例为 1.0）"
+    assert ml.current_wm_ratio_after_cap > 0.005, (
+        "下限生效时达成比例应高于目标（本例为 0.1）"
     )
-    assert abs(ml.current_wm_ratio_after_cap - 1.0) < 0.01, (
-        f"实际达成比例应为 1.0，实际={ml.current_wm_ratio_after_cap:.4f}"
+    assert abs(ml.current_wm_ratio_after_cap - 0.1) < 1e-4, (
+        f"实际达成比例应为 0.1，实际={ml.current_wm_ratio_after_cap:.4f}"
     )
 
 

@@ -14,16 +14,16 @@
 | # | Bug | 位置 | 后果 |
 |---|-----|------|------|
 | 1 | 水印区**负梯度被翻转为正梯度** | `models/losses/multi_loss.py` | 方向反转，等价于在主任务梯度上叠加随机噪声，水印信号被破坏 |
-| 2 | ~~`scale_factor` 下限 `clamp(0.1)`~~ | `models/losses/multi_loss.py` | **非 bug** —— 下限 0.1 是有意设计，保留不变（见 3.3） |
+| 2 | ~~`scale_factor` 下限 `clamp(0.1)`~~ | `models/losses/multi_loss.py` | **非 bug** —— 下限是保护水印信号强度的有意设计；现已参数化，默认 0.01（见 3.2） |
 
 > **关键推论**: 在此之前所有关于「ratio 取多少合适」的结论都建立在
 > **梯度方向被反向**的 capping 之上，需要在修复后重新评估。
 >
-> ⚠️ 注意：`clamp(0.1)` 下限保留后，capping **不再精确达成** `target_ratio`。
-> 当原始 `wm/non_wm` 比例 R 满足 `target_ratio / R < 0.1`（即 R > 10 × target_ratio）时，
-> 缩放系数被截断到 0.1，实际达成比例 = `0.1 × R`。
+> ⚠️ 注意：缩放系数下限存在时，capping **不再精确达成** `target_ratio`。
+> 当原始 `wm/non_wm` 比例 R 满足 `target_ratio / R < min_scale_factor` 时，
+> 缩放系数被截断到下限，实际达成比例 = `min_scale_factor × R`。
 > 这意味着**当前实测配置（capping 前比例约 1.0）中，只要 target_ratio ≥ 0.1，
-> clamp 就不生效，目标仍能被精确达成**（见 6.2）。
+> 下限就不生效，目标仍能被精确达成**（见 6.2）。
 
 ### 修复后的实测结论（chestmnist / alexnet / K=5 / 30 轮 × 6 个 ratio）
 
@@ -111,7 +111,8 @@ utils/trainer_private_enhanced.py:173
         ↓
 models/losses/multi_loss.py:198-220
                            若 wm_ratio > target_ratio，则对水印区梯度做缩放
-                           scale_factor = (target_wm_grad / current_wm_grad_val).clamp(0.1, 1.0)
+                           scale_factor = (target_wm_grad / current_wm_grad_val).clamp(min_scale_factor, 1.0)
+                           # min_scale_factor 默认 0.01，可用 --watermark_grad_min_scale_factor 覆盖
 ```
 
 作用机理：把**水印区域梯度均值**压到 **非水印区域梯度均值 × target_ratio**，
@@ -165,39 +166,53 @@ corrected_gradients = (
 
 ---
 
-## 3. `clamp(0.1)` 下限：有意设计，保留不变
+## 3. 缩放系数下限：可配置（默认 0.01）
 
 ### 3.1 语义
 
 ```python
-scale_factor = (target_wm_grad / current_wm_grad_val).clamp(0.1, 1.0)
+scale_factor = (target_wm_grad / current_wm_grad_val).clamp(min_scale_factor, 1.0)
 ```
 
 设原始 `wm/non_wm` 比例为 R，所需缩放系数 = `target_ratio / R`。
 
-- 若 `target_ratio / R ≥ 0.1`（即 **R ≤ 10 × target_ratio**）：clamp 不生效，
-  **精确达成** `target_ratio`。
-- 若 `target_ratio / R < 0.1`（即 R > 10 × target_ratio）：系数被截断到 `0.1`，
-  实际达成比例 = `0.1 × R` > `target_ratio`。
+- 若 `target_ratio / R ≥ min_scale_factor`（即 **R ≤ target_ratio / min_scale_factor**）：
+  clamp 不生效，**精确达成** `target_ratio`。
+- 若 `target_ratio / R < min_scale_factor`：系数被截断到 `min_scale_factor`，
+  实际达成比例 = `min_scale_factor × R` > `target_ratio`。
 
-### 3.2 这是有意的设计（已与作者确认）
-
-下限 `0.1` 的含义是：**最多把水印区梯度压到原来的 10%**，
+下限的语义是：**最多把水印区梯度压到原来的 `min_scale_factor` 倍**，
 即不允许出现「水印信号被压得几乎消失」的极端情况。
-这是一个**保护水印信号强度**的设计，而非 bug，故**保留不变**。
+这是一个**保护水印信号强度**的设计，而非 bug。
+
+### 3.2 下限已参数化（默认值由 0.1 调整为 0.01）
+
+历史上下限硬编码为 `0.1`（最多压到原来的 10%）。现改为：
+
+- **默认下限 `0.01`**（最多压到原来的 1%），定义在
+  `models/losses/multi_loss.py::MultiLoss.DEFAULT_MIN_SCALE_FACTOR`；
+- **可通过命令行覆盖**：`--watermark_grad_min_scale_factor`（例如传 `0.1`
+  即可复现历史行为，用于对照实验）；
+- **非法值直接报错**：`min_scale_factor` 必须在 `(0, 1]` 区间内，
+  否则构造 `MultiLoss` 时抛 `ValueError`（不静默产生错误结果）。
+
+调整动机：把魔法数字从代码里提出来变成可配置项，便于做参数敏感性对照。
 
 ### 3.3 对实际结论的影响
 
-当前实测配置下，capping 前的原始比例 R ≈ **1.0**（见 6.2 结论 2），
-因此只要 `target_ratio ≥ 0.1`，就满足 `R ≤ 10 × target_ratio`，clamp 不生效，
-**目标仍被精确达成**——这解释了为什么 6.1 的扫描中 ratio=0.1~0.5 都能精确命中目标。
+当前实测配置下，capping 前的原始比例 R ≈ **0.87~1.0**（见 6.2 结论 2），
+因此只要 `target_ratio ≥ 0.1`，就满足 `R ≤ target_ratio / 0.01`，
+clamp 不生效，**目标仍被精确达成**——这解释了为什么 6.1 的扫描中
+ratio=0.1~0.5 都能精确命中目标。
 
-只有当**原始比例远大于 10 倍目标值**时，下限才会截断。
-例如 R = 50.0、target = 0.1：所需系数 0.002 被截断到 0.1，
-实际达成 5.0（而非 0.1）。
+**重要**：在 R ≈ 1.0 的训练场景下，下限取 0.1 还是 0.01 **对结果没有区别**——
+两者都不会被触发。只有当**原始比例远大于目标值 / 下限**时，下限才会截断。
+例如 R = 50.0、target = 0.1：所需系数 0.002，下限 0.1 时被截断到 0.1
+（达成 5.0），下限 0.01 时被截断到 0.01（达成 0.5）。
 
-> **推论**：在当前 `wm/non_wm ≈ 1.0` 的训练场景下，`clamp(0.1)` **几乎不影响** capping 的实际效果。
-> 它只在「原始比例被推到极端高」时起保护作用。保留它不会损害 ratio 扫描的有效性。
+> **推论**：在当前 `wm/non_wm ≈ 1.0` 的训练场景下，缩放系数下限
+> **几乎不影响** capping 的实际效果。它只在「原始比例被推到极端高」时起保护作用。
+> 因此本次把默认值从 0.1 调整为 0.01，**不会改变任何已有 ratio 扫描的结论**。
 
 ### 3.4 对应测试
 
@@ -205,7 +220,9 @@ scale_factor = (target_wm_grad / current_wm_grad_val).clamp(0.1, 1.0)
 
 | 用例 | 验证内容 |
 |------|---------|
-| `test_scale_factor_lower_bound_is_0p1` | 系数被截断到 0.1，达成比例 = 0.1 × R |
+| `test_scale_factor_lower_bound_is_default_0p01` | 默认下限为 0.01，达成比例 = 0.01 × R |
+| `test_min_scale_factor_is_configurable` | 可显式指定下限（覆盖为历史值 0.1） |
+| `test_min_scale_factor_rejects_invalid_values` | 非法下限抛 ValueError |
 | `test_achieved_ratio_is_floor_times_original_when_floor_active` | 三组手工推算的 floor 生效场景 |
 | `test_after_cap_ratio_may_exceed_target_when_floor_active` | floor 生效时达成比例可高于目标（已知后果） |
 
@@ -250,8 +267,10 @@ python tests/test_watermark_grad_capping.py
 | `test_scaling_is_proportional` | 缩放等比（Bug 1） |
 | `test_target_ratio_is_actually_achieved` | clamp 不生效时精确达成目标 |
 | `test_achieved_ratio_tracks_target_across_range` | 多目标扫描（clamp 不生效区间） |
-| `test_scale_factor_lower_bound_is_0p1` | 下限 0.1 生效（有意设计） |
-| `test_achieved_ratio_is_floor_times_original_when_floor_active` | floor 生效时达成比例 = 0.1 × R |
+| `test_scale_factor_lower_bound_is_default_0p01` | 默认下限 0.01 生效 |
+| `test_min_scale_factor_is_configurable` | 下限可显式覆盖 |
+| `test_min_scale_factor_rejects_invalid_values` | 非法下限报错 |
+| `test_achieved_ratio_is_floor_times_original_when_floor_active` | floor 生效时达成比例 = 下限 × R |
 | `test_after_cap_ratio_not_exceed_target` | clamp 不生效时不超目标 |
 | `test_after_cap_ratio_may_exceed_target_when_floor_active` | floor 生效时可超目标（已知后果） |
 | `test_after_cap_ratio_field_is_tracked` | 新统计字段 |
@@ -680,9 +699,11 @@ chestmnist / alexnet / K=5 / 4 轮，同一随机种子：
 
 1. **自然梯度比例 R ≈ 0.97~0.99**，即在无 capping 情况下水印区梯度
    与非水印区梯度**几乎等大**。这决定了 ratio 的实际作用区间：
-   - `target_ratio < 0.1` → 触发 `clamp(0.1)` 下限，**无法精确达成目标**，
-     实际达成 = `0.1 × R ≈ 0.097`（与 target 无关）。
-   - `target_ratio ≥ 0.1` → 精确达成目标（当前配置下 R ≈ 1.0 < 10×target）。
+   - `target_ratio < 0.01` → 触发缩放系数下限，**无法精确达成目标**，
+     实际达成 = `min_scale_factor × R ≈ 0.0097`（与 target 无关）。
+   - `target_ratio ≥ 0.01` → 精确达成目标（当前配置下 R ≈ 1.0）。
+   - 注：旧版本下限为 0.1，故当时 `target_ratio < 0.1` 都会退化；
+     下限参数化为 0.01 后，该退化区间已收窄到 `target_ratio < 0.01`。
 
 2. **ratio 对精度影响极小**（val_auc 极差 < 0.001），因此**不能**用主任务精度
    来选 ratio。
@@ -749,10 +770,12 @@ capping 只作用于「本地训练时水印区梯度被压制的程度」。但
 
 1. 用 `target_ratio=0` 跑 2~3 轮，读取 Excel 的 `wm_grad_ratio_mean` → 得到该配置的
    自然比例 $R$（实测 chestmnist/alexnet/K=5 ≈ 0.97~0.99）。
-2. 若 $R \le 10 \times \text{target\_ratio}$，capping 精确达成目标（`clamp(0.1)` 不生效）。
-   反之实际达成 = $0.1R$，此时**调 target_ratio 无效**，必须改 `clamp` 下限。
-3. 因此**可行区间**为 `target_ratio ≥ R/10`；若希望把 R 压到 $0.3R$，
-   取 `target_ratio = 0.3` 即可（前提 $R/10 \le 0.3$，即 $R \le 3$）。
+2. 若 $R \le \text{target\_ratio} / \text{min\_scale\_factor}$，capping 精确达成目标
+   （下限不生效）。反之实际达成 = $\text{min\_scale\_factor} \times R$，
+   此时**调 target_ratio 无效**，必须调小 `--watermark_grad_min_scale_factor`。
+3. 默认下限 0.01 时，**可行区间**为 `target_ratio ≥ R/100`；
+   若希望把 R 压到 $0.3R$，取 `target_ratio = 0.3` 即可（前提 $R/100 \le 0.3$，
+   即 $R \le 30$，实测 $R \approx 1$ 远满足）。
 
 **（3）建议的默认值**
 
@@ -760,7 +783,8 @@ capping 只作用于「本地训练时水印区梯度被压制的程度」。但
 |---|---|---|
 | 默认 | 保持 `0.3` | 在 $R \approx 1$ 的配置下可精确达成，且对精度影响可忽略 |
 | 探索性对照 | `0.1 / 0.3 / 0.5` | 覆盖「弱/中/强」压制，触发率与保真度均可观测 |
-| 需要极强压制 | `0.05` | **注意**：会触发 `clamp(0.1)`，实际达成 ≈ $0.1R$，此时应同时调 `clamp` 下限 |
+| 需要极强压制 | `0.05` | 默认下限 0.01 下仍可精确达成（所需系数 0.05 ≥ 0.01） |
+| 需要复现历史行为 | `--watermark_grad_min_scale_factor 0.1` | 把下限改回旧值 0.1 做对照 |
 | 关闭 | `0` | 关闭 capping（用于对照） |
 
 **（4）若要让 ratio 真正影响水印鲁棒性，需要改机制**

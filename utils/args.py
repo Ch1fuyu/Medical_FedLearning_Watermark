@@ -50,6 +50,14 @@ def parser_args():
     parser.add_argument('--multiloss_alpha_early', type=float, default=5e-5, help='alpha value for early training phase')
     parser.add_argument('--multiloss_alpha_late', type=float, default=1e-4, help='alpha value for late training phase')
     parser.add_argument('--watermark_grad_target_ratio', type=float, default=0.3, help='target ratio of watermark gradient to non-watermark gradient; set to 0 to disable watermark gradient capping')
+    parser.add_argument('--watermark_grad_min_scale_factor', type=float, default=None,
+                        help='lower bound of the watermark gradient scaling factor; '
+                             'caps how far the watermark region gradient can be suppressed '
+                             '(e.g. 0.01 = at most 1%% of the original). '
+                             'When the natural wm/non_wm ratio R is far above '
+                             'target_ratio, the achieved ratio becomes '
+                             'min_scale_factor * R instead of the strict target. '
+                             'Default: models.losses.multi_loss.MultiLoss.DEFAULT_MIN_SCALE_FACTOR')
 
     # ========================= 水印与密钥矩阵配置 ========================
     parser.add_argument('--enable_watermark', action='store_true', default=True, help='enable watermark embedding')

@@ -24,21 +24,25 @@ watermark_grad_target_ratio 遍历
   里判断 ``target_ratio > 0`` 不成立，capping 整段被跳过，水印区梯度
   原样保留（只受优化器本身影响）。
 - ``target_ratio > 0``：当水印区/非水印区梯度比例超过该阈值时，把水印区
-  梯度等比缩放，压到 ``target_ratio`` 倍（缩放系数下限 0.1，见 ``multi_loss.py``）。
+  梯度等比缩放，压到 ``target_ratio`` 倍（缩放系数下限见 ``multi_loss.py``
+  的 ``MultiLoss.DEFAULT_MIN_SCALE_FACTOR``，默认 0.01，
+  可用 ``--watermark_grad_min_scale_factor`` 覆盖）。
 
 因此 ratio 越大 = 水印区被压得越少 = 水印信号保留越多，但主任务精度
 受任务梯度推动得也越多。这个维度扫的就是这条**精度-鲁棒性权衡曲线**。
 
 注意 clamp 下限
 --------------
-缩放系数被 ``clamp(min=0.1, max=1.0)`` 限制，因此：
+缩放系数被 ``clamp(min=min_scale_factor, max=1.0)`` 限制，因此：
 
-- ``target_ratio >= 0.1`` 时：能精确达成目标比例；
-- ``target_ratio = 0.1`` 时：恰好在边界上，原始比例 R 若 > 1.0 则
-  实际达成 0.1*R（略高于 0.1）。
+- 所需系数 >= 下限时：能精确达成目标比例；
+- 所需系数 < 下限时：被截断到下限，实际达成比例 = 下限 × 原始比例
+  （略高于 target_ratio）。
 
-解读结果时请对照 Excel 里的 ``wm_grad_ratio_mean``（capping 前）与
-``wm_grad_ratio_after_cap_mean``（capping 后）两列。
+实测训练中的原始比例 R ≈ 0.87~1.0，因此 ``target_ratio >= 0.1`` 时
+下限**不会生效**，目标都能精确达成。解读结果时请对照 Excel 里的
+``wm_grad_ratio_mean``（capping 前）与 ``wm_grad_ratio_after_cap_mean``
+（capping 后）两列。
 
 输出目录
 --------
