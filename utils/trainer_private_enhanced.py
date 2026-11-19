@@ -351,11 +351,15 @@ class TrainerPrivateEnhanced:
             print(f"⚠️ 水印嵌入失败: {e}")
 
     def local_update(self, dataloader, local_ep, lr, client_id, current_epoch=0, total_epochs=100,
-                     skip_gradient_scaling=False):
+                     skip_gradient_scaling=False, skip_watermark_restore=False):
         """本地更新，支持MultiLoss和自编码器训练
         
         Args:
             skip_gradient_scaling: 如果为True，跳过水印梯度缩放（用于恶意客户端模拟）
+            skip_watermark_restore: 如果为True，本地训练结束后不把权威水印写回模型
+                （即"不执行参数恢复"）。仅恶意客户端使用；增强模式下本函数
+                本来就不在本地训练后写回权威水印，因此该开关在此处无实际影响，
+                保留它是为了让两种 trainer 的签名保持一致。
         """
         self.model.to(self.device)
         self.model.train()

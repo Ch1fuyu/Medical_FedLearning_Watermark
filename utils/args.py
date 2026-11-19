@@ -74,6 +74,25 @@ def parser_args():
     parser.add_argument('--leak_noise_medium', type=float, default=0.05, help='medium noise scale for level 2 (ratio of mean watermark value)')
     parser.add_argument('--leak_noise_strong', type=float, default=0.1, help='strong noise scale for level 3 (ratio of mean watermark value)')
 
+    # -------- 本地微调攻击 (Mode B) 的额外微调步长 --------
+    # 恶意客户端在完成正常的联邦本地训练之后, 再追加 N 轮"清洗式"微调,
+    # 目的是把下发模型中写入的权威水印进一步冲淡, 模拟真实的"拿到模型后
+    # 反复本地微调以规避水印检测"的攻击者行为。
+    #
+    # 这 N 轮微调严格遵循攻击者约束:
+    #   - 使用与联邦本地训练**一致**的学习率 (args.lr)
+    #   - 使用与联邦本地训练**一致**的批量大小 (args.batch_size)
+    #   - 使用该客户端的**本地数据** (与联邦本地训练同一个 dataloader)
+    #   - **不执行**水印梯度缩放 (skip_gradient_scaling=True)
+    #   - **不执行**参数恢复 (不把权威水印写回模型)
+    #
+    # 注意: 该值**不影响**正常客户端的联邦训练步长, 与 --local_ep 相互独立。
+    parser.add_argument('--malicious_ft_epochs', type=int, default=10,
+                        help='extra fine-tuning epochs performed by the malicious client '
+                             'after its normal local training (Mode B: local fine-tuning attack). '
+                             '0 disables the extra fine-tuning. '
+                             'Does not affect honest clients.')
+
     # ========================= 差分隐私参数 ========================
     parser.add_argument('--dp', action='store_true', default=False, help='enable differential privacy')
     parser.add_argument('--sigma', type=float, default=0.1, help='Gaussian noise standard deviation')

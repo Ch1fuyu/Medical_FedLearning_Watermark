@@ -8,7 +8,10 @@
              对定制模型的水印区域注入高斯噪声后追踪, 使用 trace_results_*.json
              追踪任务 = 在 K 个客户端中定位泄漏源 (similarity ranking)
     Mode B  本地微调 (Local fine-tuning)
-             追踪客户端本地训练后的模型, 使用 watermark_deviation_detection_*.json
+             恶意客户端以本地数据、与联邦本地训练一致的学习率和批量大小
+             进行 10 轮微调 (--malicious_ft_epochs, 默认 10), 且不执行
+             梯度缩放与参数恢复; 追踪该客户端本地训练后的模型, 使用
+             watermark_deviation_detection_*.json
              检测任务 = 判定该轮是否存在可疑恶意客户端
 
 输出 (每张图只含一种模式):
@@ -85,6 +88,7 @@ NOISE_LEVELS = [
 #          泄漏的是下发的定制模型, 其水印区域被注入高斯噪声后追踪
 #   post = 本地微调 (Local fine-tuning)
 #          泄漏的是客户端本地训练后的模型, 追踪其水印偏移
+#          (恶意客户端微调 10 轮, 见 --malicious_ft_epochs)
 PRE_MODE = ('pre', '水印区域扰动', 'Watermark-region perturbation', PRE_COLOR,
             'trace_accuracy', 'Tracing (source identification)')
 POST_MODE = ('post', '本地微调', 'Local fine-tuning', POST_COLOR,

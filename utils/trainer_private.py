@@ -174,6 +174,10 @@ class TrainerPrivate(object):
         # 提取 current_epoch 和 total_epochs（用于全局学习率调度）
         current_epoch = kwargs.get('current_epoch', 0)
         total_epochs = kwargs.get('total_epochs', 100)
+
+        # 恶意客户端不执行参数恢复：本地训练结束后不把权威水印写回模型。
+        # （仅恶意客户端为 True；正常客户端保持原行为。）
+        skip_watermark_restore = bool(kwargs.get('skip_watermark_restore', False))
         
         # 如果启用学习率调度器，根据全局轮次计算当前学习率
         if self.args and getattr(self.args, 'use_lr_scheduler', False):
@@ -238,7 +242,8 @@ class TrainerPrivate(object):
                 tqdm.write(f"C{client_id} E{epoch+1}/{local_ep}: L={loss_meter:.4f} A={acc_meter:.4f} LR={adjusted_lr:.6f}")
 
         # 本地训练结束后，进行水印嵌入
-        if self.args is not None and getattr(self.args, 'use_key_matrix', False):
+        # 恶意客户端 (skip_watermark_restore=True) 跳过这一步，即"不执行参数恢复"
+        if (not skip_watermark_restore) and self.args is not None and getattr(self.args, 'use_key_matrix', False):
             try:
                 # 获取该客户端的水印位置：优先使用保存的密钥矩阵；否则回退到随机位置
                 if self._key_manager is None:

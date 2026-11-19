@@ -254,6 +254,10 @@ def parse_detection_file(meta, data):
         'client_num': info.get('client_num'),
         'epochs': info.get('epochs'),
         'leak_interval': info.get('leak_interval'),
+        # 本地微调攻击 (Mode B) 的配置: 联邦本地步长与恶意客户端微调轮数
+        'local_ep': info.get('local_ep'),
+        'malicious_ft_epochs': info.get('malicious_ft_epochs'),
+        'attack_mode': info.get('attack_mode'),
         'detection_file': meta['name'],
         'detection_path': meta['path'],
         'timestamp': meta['timestamp'].strftime('%Y-%m-%d %H:%M:%S'),
@@ -338,6 +342,9 @@ def build_summary_rows(pairs):
             'client_num': t['client_num'] or d['client_num'],
             'epochs': d['epochs'],
             'leak_interval': d['leak_interval'],
+            # 本地微调攻击 (Mode B) 的配置
+            'local_ep': d.get('local_ep'),
+            'malicious_ft_epochs': d.get('malicious_ft_epochs'),
             'timestamp': t['timestamp'],
             'trace_file': t['trace_file'],
             'detection_file': d['detection_file'],

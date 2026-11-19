@@ -156,7 +156,17 @@ class FederatedLearningOnChestMNIST(Experiment):
         self.all_detection_deviations = []  # [[deviation, ...], ...] 每轮一个列表
         # 用于记录当前轮次的恶意客户端（模拟泄漏）
         self.current_malicious_client = None  # int or None
-        
+
+        # ========== 本地微调攻击 (Mode B) 配置 ==========
+        # 恶意客户端在正常联邦本地训练时使用的微调轮数。
+        # 由 --malicious_ft_epochs 控制 (默认 10)。
+        # 该值只作用于恶意客户端, 不影响诚实客户端的联邦本地步长 (self.local_ep)。
+        self.malicious_ft_epochs = int(getattr(args, 'malicious_ft_epochs', 10) or 0)
+        logging.info(
+            f'[攻击配置] 本地微调攻击: 恶意客户端微调 {self.malicious_ft_epochs} 轮 '
+            f'(联邦本地步长={self.local_ep}, 跳过梯度缩放, 不执行参数恢复)'
+        )
+
         # 根据watermark_mode参数选择trainer
         if self.args.watermark_mode == 'enhanced':
             logging.info('==> 使用增强水印系统（密钥矩阵 + 自编码器）')
@@ -455,18 +465,35 @@ class FederatedLearningOnChestMNIST(Experiment):
                 self.model.load_state_dict(self.customized_models[idx])
 
                 # 判断是否为恶意客户端（跳过梯度缩放）
-                skip_gradient_scaling = (idx == self.current_malicious_client)
-                
+                is_malicious = (idx == self.current_malicious_client)
+                skip_gradient_scaling = is_malicious
+
+                # 恶意客户端的本地微调轮数 (Mode B: 本地微调攻击)。
+                # 正常客户端保持联邦本地步长 self.local_ep 不变；
+                # 恶意客户端改用 --malicious_ft_epochs (默认 10 轮),
+                # 用以把下发模型中写入的权威水印冲淡得更彻底。
+                if is_malicious:
+                    client_local_ep = self.malicious_ft_epochs
+                    if client_local_ep > 0:
+                        logging.info(
+                            f"[本地微调攻击] 客户端 {idx} 本轮微调 {client_local_ep} 轮 "
+                            f"(联邦本地步长={self.local_ep}) | 不执行梯度缩放, 不执行参数恢复"
+                        )
+                else:
+                    client_local_ep = self.local_ep
+
                 # 统一调用：始终传入 current_epoch/total_epochs；
                 # 普通 Trainer 会通过 **kwargs 忽略
                 local_w, local_loss, local_acc = self.trainer.local_update(
-                    dataloader=local_train_loader[idx], 
-                    local_ep=self.local_ep, 
-                    lr=self.lr, 
+                    dataloader=local_train_loader[idx],
+                    local_ep=client_local_ep,
+                    lr=self.lr,
                     client_id=idx,
                     current_epoch=epoch,
                     total_epochs=self.epochs,
-                    skip_gradient_scaling=skip_gradient_scaling
+                    skip_gradient_scaling=skip_gradient_scaling,
+                    # 恶意客户端不把权威水印写回模型 (即"不执行参数恢复")
+                    skip_watermark_restore=is_malicious
                 )
 
                 local_ws.append(copy.deepcopy(local_w))
@@ -944,7 +971,11 @@ class FederatedLearningOnChestMNIST(Experiment):
                             'dataset': self.dataset,
                             'client_num': self.client_num,
                             'epochs': self.epochs,
-                            'leak_interval': getattr(self.args, 'leak_interval', 0)
+                            'leak_interval': getattr(self.args, 'leak_interval', 0),
+                            # 本地微调攻击 (Mode B) 的配置, 便于论文复现与核对
+                            'local_ep': self.local_ep,
+                            'malicious_ft_epochs': self.malicious_ft_epochs,
+                            'attack_mode': 'local_finetuning'
                         },
                         'total_detections': int(len(self.watermark_detection_results)),
                         'correct_detections': int(correct_detections),
