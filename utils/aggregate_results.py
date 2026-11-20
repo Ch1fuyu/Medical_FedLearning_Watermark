@@ -625,10 +625,31 @@ def aggregate(trace_dir=DEFAULT_TRACE_DIR,
               detection_dir=DEFAULT_DETECTION_DIR,
               top_n=18,
               out_dir=DEFAULT_OUT_DIR,
+              datasets=None,
+              models=None,
+              client_nums=None,
+              dedupe_latest=True,
               verbose=True):
-    """执行整合, 返回结果字典"""
+    """执行整合, 返回结果字典
+
+    datasets / models / client_nums: 可选过滤条件 (None = 不过滤)。
+      - datasets / models 按文件名元信息过滤
+      - client_nums 按解析后的实验元信息过滤
+    dedupe_latest: 同一 (model, dataset, client_num) 只保留时间戳最新的一个。
+    过滤与去重在"取最新 N 个"之前完成, 因此 top_n 与过滤条件可以组合使用。
+    """
     trace_files = list_trace_files(trace_dir)
     det_files = list_detection_files(detection_dir)
+
+    if datasets or models:
+        def _keep(meta):
+            if datasets and meta['dataset'].lower() not in datasets:
+                return False
+            if models and meta['model'].lower() not in models:
+                return False
+            return True
+        trace_files = [m for m in trace_files if _keep(m)]
+        det_files = [m for m in det_files if _keep(m)]
 
     if top_n and top_n > 0:
         trace_files = trace_files[:top_n]
@@ -662,6 +683,36 @@ def aggregate(trace_dir=DEFAULT_TRACE_DIR,
 
     pairs, unmatched_trace, unmatched_detection = pair_files(
         trace_files, det_files, trace_parsed, det_parsed)
+
+    # ---- 去重: 同一 (model, dataset, client_num) 只保留时间戳最新的一个 ----
+    # 同一个实验往往被重复跑过多次 (不同时间戳), 若不���重, summary 表里会出现
+    # 同一个配置的多行, 画图时 x 轴标签重复。
+    if dedupe_latest and pairs:
+        best = {}
+        for p in pairs:
+            cn = p['trace']['client_num'] or p['detection']['client_num']
+            key = (p['trace']['model'], p['trace']['dataset'], cn)
+            ts = p['trace']['timestamp']
+            if key not in best or ts > best[key][0]:
+                best[key] = (ts, p)
+        n_before = len(pairs)
+        pairs = [v[1] for v in best.values()]
+        if verbose and n_before != len(pairs):
+            print(f'[INFO] 按 (model, dataset, K) 去重: {n_before} -> {len(pairs)} 组 '
+                  f'(每个配置只保留最新一次)')
+
+    if client_nums:
+        keep_pairs, dropped = [], []
+        for p in pairs:
+            cn = p['trace']['client_num'] or p['detection']['client_num']
+            if cn is not None and int(cn) in client_nums:
+                keep_pairs.append(p)
+            else:
+                dropped.append(p)
+        if verbose and dropped:
+            print(f'[INFO] 按 client_num 过滤掉 {len(dropped)} 组: '
+                  f'{sorted({int(p["trace"]["client_num"] or p["detection"]["client_num"] or 0) for p in dropped})}')
+        pairs = keep_pairs
 
     if verbose:
         print(f'[INFO] 成功配对 {len(pairs)} 组, '
@@ -804,13 +855,33 @@ def main(argv=None):
                         help='每个目录取最新的 N 个文件 (默认 18, 传 0 表示全部)')
     parser.add_argument('--out-dir', default=DEFAULT_OUT_DIR,
                         help='输出目录')
+    parser.add_argument('--datasets', default='',
+                        help='只整合指定数据集, 逗号分隔 (如 chestmnist)。默认全部')
+    parser.add_argument('--models', default='',
+                        help='只整合指定模型, 逗号分隔 (如 alexnet,resnet)。默认全部')
+    parser.add_argument('--client-nums', default='',
+                        help='只整合指定客户端数, 逗号分隔 (如 5,10,20)。默认全部')
+    parser.add_argument('--keep-duplicates', action='store_true',
+                        help='不去重: 同一 (模型, 数据集, K) 的多次实验全部保留 '
+                             '(默认每个配置只保留最新一次)')
     args = parser.parse_args(argv)
+
+    def _split(s):
+        return {x.strip().lower() for x in s.split(',') if x.strip()} or None
+
+    def _split_int(s):
+        vals = {int(x.strip()) for x in s.split(',') if x.strip()}
+        return vals or None
 
     aggregate(
         trace_dir=args.trace_dir,
         detection_dir=args.detection_dir,
         top_n=args.top_n,
         out_dir=args.out_dir,
+        datasets=_split(args.datasets),
+        models=_split(args.models),
+        client_nums=_split_int(args.client_nums),
+        dedupe_latest=not args.keep_duplicates,
     )
     return 0
 
