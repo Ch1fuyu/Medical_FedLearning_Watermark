@@ -347,14 +347,33 @@ def fig_focus_accuracy(summary, out_path):
 
 def fig_mode_similarity(data, mode, out_path):
     """
-    单种泄漏模式下的逐轮相似度曲线: 3 x 6 网格 (行 = dataset, 列 = model x K)。
+    单种泄漏模式下的逐轮相似度曲线: 行 = dataset, 列 = model x K。
 
     每个子图: 泄漏者 top-1 相似度 vs 次高相似度, 阴影为判别 gap。
+
+    行数自适应: 只为**实际有数据**的 dataset 分配行,
+    因此只跑了 ChestMNIST 时不会空出 cifar10/cifar100 两行白板。
     """
     plt = setup_matplotlib()
     _, cn, en, color, _, _ = mode
 
-    n_rows, n_cols = len(DATASET_ORDER), len(MODEL_ORDER) * len(K_ORDER)
+    # ---- 自适应: 依据实际数据里存在的 (model, dataset, K) 组合 ----
+    src = data['rounds'] if mode[0] == 'pre' else data['detmargin']
+    present_ds, present_models, present_ks = set(), set(), set()
+    if src is not None and not src.empty:
+        present_ds = set(src['dataset'].unique())
+        present_models = set(src['model'].unique())
+        present_ks = set(src['client_num'].astype(int).unique())
+
+    ds_list = [d for d in DATASET_ORDER if d in present_ds]
+    model_list = [m for m in MODEL_ORDER if m in present_models]
+    k_list = [k for k in K_ORDER if k in present_ks]
+
+    if not ds_list or not model_list or not k_list:
+        print(f'[WARN] 未找到可用于 {mode[0]} 模式的数据, 跳过 {os.path.basename(out_path)}')
+        return
+
+    n_rows, n_cols = len(ds_list), len(model_list) * len(k_list)
     fig = plt.figure(figsize=(3.6 * n_cols, 3.1 * n_rows + 0.5), layout='constrained')
     gs = fig.add_gridspec(n_rows + 1, n_cols,
                           height_ratios=[1] * n_rows + [0.11],
@@ -369,8 +388,8 @@ def fig_mode_similarity(data, mode, out_path):
             axes[ri, ci] = fig.add_subplot(gs[ri, ci], **kw)
 
     gap_all = []
-    for ri, ds in enumerate(DATASET_ORDER):
-        for ci, (md, k) in enumerate([(m, kk) for m in MODEL_ORDER for kk in K_ORDER]):
+    for ri, ds in enumerate(ds_list):
+        for ci, (md, k) in enumerate([(m, kk) for m in model_list for kk in k_list]):
             ax = axes[ri, ci]
 
             if mode[0] == 'pre':
@@ -474,11 +493,17 @@ def fig_noise_levels(data, out_path):
         print('[WARN] 未找到 AlexNet/ChestMNIST 的追踪数据, 跳过 Figure 5')
         return
 
-    n_row, n_col = len(FOCUS_K_LIST), len(NOISE_LEVELS)
+    # 自适应: 只画实际有数据的 K (避免留空白行)
+    focus_ks = [k for k in FOCUS_K_LIST if k in set(base['client_num'].astype(int))]
+    if not focus_ks:
+        print('[WARN] 未找到 K=5/10/20 的追踪数据, 跳过 Figure 5')
+        return
+
+    n_row, n_col = len(focus_ks), len(NOISE_LEVELS)
     fig = plt.figure(figsize=(4.6 * n_col, 3.1 * n_row + 0.9), layout='constrained')
     gs = fig.add_gridspec(n_row, n_col, hspace=0.30, wspace=0.18)
 
-    for ri, k in enumerate(FOCUS_K_LIST):
+    for ri, k in enumerate(focus_ks):
         sub = base[base['client_num'] == k].sort_values('round')
         if sub.empty:
             continue
